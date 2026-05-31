@@ -1,4 +1,5 @@
 .DS_Store
+.claude/
 
 # Local runtime data and secrets.
 data/

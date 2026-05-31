@@ -316,11 +316,21 @@ export class CDPClient {
   /**
    * 关闭当前工作标签页并断开连接。
    */
-  close() {
-    if (this.targetId && this.port) {
-      // 尝试关闭我们创建的标签页（非阻塞，PUT for Chrome 130+，GET 兜底）
-      fetch(`http://127.0.0.1:${this.port}/json/close/${this.targetId}`, { method: 'PUT' })
-        .catch(() => fetch(`http://127.0.0.1:${this.port}/json/close/${this.targetId}`).catch(() => {}));
+  async close() {
+    const targetId = this.targetId;
+    const port = this.port;
+    this.targetId = null;
+
+    if (targetId && port) {
+      // 等待 Chrome 确认关闭标签页，批处理才能确定上一批已经释放。
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/json/close/${targetId}`, { method: 'PUT' });
+        if (!res.ok) {
+          await fetch(`http://127.0.0.1:${port}/json/close/${targetId}`);
+        }
+      } catch {
+        try { await fetch(`http://127.0.0.1:${port}/json/close/${targetId}`); } catch { /* ignore */ }
+      }
     }
     if (this.ws) {
       try { this.ws.close(); } catch { /* ignore */ }

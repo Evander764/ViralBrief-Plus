@@ -18,6 +18,7 @@ const DEFAULTS = {
   retries: 2,
   budgetDailyTokens: 0,        // 0 = 不限制，仅记录用量
   schedule: { enabled: false, time: '09:00', window: 'last_1_day', catchUp: true },
+  rpa: { maxTabsPerBatch: 10 },
   pairingToken: '',
   apiKeyEnc: null,
   apiKeyEnc2: null,
@@ -49,6 +50,17 @@ function writeRaw(obj) {
   writeFileSync(CONFIG_PATH, JSON.stringify(obj, null, 2), { mode: 0o600 });
 }
 
+function normalizeRpaConfig(input = {}) {
+  const maxTabs = Number(input.maxTabsPerBatch);
+  return {
+    ...DEFAULTS.rpa,
+    ...input,
+    maxTabsPerBatch: Number.isFinite(maxTabs)
+      ? Math.max(1, Math.min(30, Math.floor(maxTabs)))
+      : DEFAULTS.rpa.maxTabsPerBatch,
+  };
+}
+
 function refreshRedaction() {
   clearRedaction();
   const k = getApiKey();
@@ -64,6 +76,7 @@ export function loadConfig() {
     ...DEFAULTS,
     ...raw,
     schedule: { ...DEFAULTS.schedule, ...(raw.schedule || {}) },
+    rpa: normalizeRpaConfig(raw.rpa || {}),
   };
   let changed = false;
   if (!cfg.pairingToken) { cfg.pairingToken = randomBytes(24).toString('hex'); changed = true; }
@@ -85,10 +98,11 @@ export function loadConfig() {
 export function saveConfig(patch = {}) {
   const cfg = loadConfig();
   const {
-    apiKeyEnc, apiKeyEnc2, apiKey, apiKeyUpdatedAt, apiKey2UpdatedAt, pairingToken, provider, ...safe
+    apiKeyEnc, apiKeyEnc2, apiKey, apiKeyUpdatedAt, apiKey2UpdatedAt, pairingToken, provider, rpa, ...safe
   } = patch; // 过滤掉 provider / Key 相关字段，不允许手动指定
   Object.assign(cfg, safe);
   if (patch.schedule) cfg.schedule = { ...cfg.schedule, ...patch.schedule };
+  if (rpa) cfg.rpa = normalizeRpaConfig({ ...cfg.rpa, ...rpa });
   
   // 重新推断并保存
   const key = getApiKey();
@@ -105,7 +119,12 @@ export function getApiKey() {
 // 仅供 getApiKey 在 cache 未建立时使用，避免与 loadConfig 的 refreshRedaction 互相递归
 function readMerged() {
   const raw = readRaw();
-  return { ...DEFAULTS, ...raw, schedule: { ...DEFAULTS.schedule, ...(raw.schedule || {}) } };
+  return {
+    ...DEFAULTS,
+    ...raw,
+    schedule: { ...DEFAULTS.schedule, ...(raw.schedule || {}) },
+    rpa: normalizeRpaConfig(raw.rpa || {}),
+  };
 }
 
 export function setApiKey(plain) {

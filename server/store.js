@@ -320,7 +320,7 @@ function normalizePlatformInput(v) {
 
 function normalizePriority(v) {
   const s = String(v || 'B').trim().toUpperCase();
-  return ['S', 'A', 'B'].includes(s) ? s : 'B';
+  return /^[A-Z0-9][A-Z0-9_-]{0,15}$/.test(s) ? s : 'B';
 }
 
 export function upsertAccount(a) {

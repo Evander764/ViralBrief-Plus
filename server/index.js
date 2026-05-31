@@ -221,6 +221,10 @@ async function handleApi(req, res, url, segs) {
   // ---- rpa patrol ----
   if (p[0] === 'patrol' && p[1] === 'run' && method === 'POST') {
     try {
+      const body = await readJson(req);
+      const cfg = loadConfig();
+      const windowType = body.window || cfg.schedule?.window || 'last_1_days';
+      const maxTabsPerBatch = body.maxTabsPerBatch ?? cfg.rpa?.maxTabsPerBatch;
       log.info('正在执行 Node.js CDP 自动巡检（小红书 + 抖音）...');
       const client = new CDPClient();
       const chrome = await launchChrome({ port: 9222, waitMs: 15000 });
@@ -229,6 +233,8 @@ async function handleApi(req, res, url, segs) {
         await client.connect(chrome.port);
         result = await runPatrol(client, {
           onProgress: (msg) => log.info(`[RPA] ${msg}`),
+          windowType,
+          maxTabsPerBatch,
           clientFactory: async () => {
             const c = new CDPClient();
             await c.connect(chrome.port);
@@ -236,7 +242,7 @@ async function handleApi(req, res, url, segs) {
           },
         });
       } finally {
-        client.close();
+        await client.close();
         if (chrome.closeOnDone && chrome.child) killChrome(chrome.child);
       }
       return sendJson(res, 200, {
@@ -277,7 +283,7 @@ async function handleApi(req, res, url, segs) {
           });
         }
       } finally {
-        client.close();
+        await client.close();
         if (chrome.closeOnDone && chrome.child) killChrome(chrome.child);
       }
       return sendJson(res, 200, { ok: true, discovered: creators.length, creators });

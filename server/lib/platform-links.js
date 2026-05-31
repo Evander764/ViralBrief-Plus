@@ -18,7 +18,7 @@ export function platformSearchUrl(platform, nickname) {
     case 'douyin':
       return `https://www.douyin.com/search/${q}?type=user`;
     case 'xiaohongshu':
-      return `https://www.xiaohongshu.com/search_result?keyword=${q}&type=user`;
+      return `https://www.xiaohongshu.com/search_result?keyword=${q}`;
     case 'wechat_channels':
       // 视频号没有稳定的网页搜索入口，退而用通用搜索帮用户定位
       return `https://www.google.com/search?q=${q}+微信视频号`;

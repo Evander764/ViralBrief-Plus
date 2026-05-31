@@ -15,7 +15,18 @@ const { redact } = await import('../server/lib/log.js');
 test('默认配置：openai + 自动生成配对 token', () => {
   const c = loadConfig();
   assert.ok(c.pairingToken && c.pairingToken.length >= 24);
+  assert.equal(c.rpa.maxTabsPerBatch, 10);
   assert.equal(getPublicConfig().hasApiKey, false);
+});
+
+test('巡检每轮标签数会保存并限制在合理范围', () => {
+  let pub = saveConfig({ rpa: { maxTabsPerBatch: 14.8 } });
+  assert.equal(pub.rpa.maxTabsPerBatch, 14);
+  pub = saveConfig({ rpa: { maxTabsPerBatch: 999 } });
+  assert.equal(pub.rpa.maxTabsPerBatch, 30);
+  pub = saveConfig({ rpa: { maxTabsPerBatch: -5 } });
+  assert.equal(pub.rpa.maxTabsPerBatch, 1);
+  saveConfig({ rpa: { maxTabsPerBatch: 10 } });
 });
 
 test('API Key 加密往返：存进去能解出来', () => {

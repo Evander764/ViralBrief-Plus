@@ -17,3 +17,11 @@ test('破坏性操作使用页面内确认弹层，不直接依赖浏览器 conf
     assert.match(html, new RegExp(`id="${id}"`));
   }
 });
+
+test('账号池搜索填空用当前窗口跳转，兼容原生 WebKit 窗口', () => {
+  const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
+
+  assert.match(appJs, /function platformSearchUrl\(/);
+  assert.match(appJs, /window\.location\.assign\(url\)/);
+  assert.doesNotMatch(appJs, /window\.open\(/);
+});

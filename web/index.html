@@ -48,7 +48,7 @@
           </div>
         </div>
         <p class="muted">入选条件（硬阈值，由系统确定性判定）：来自账号池的抖音 / 小红书内容，点赞 / 转发 / 收藏任一项 &gt; 1000。1000+ 按超过 1000 处理。</p>
-        <p class="muted" style="font-size:12px;">勾选「先自动采集」后，系统会按平台同时打开多个账号标签页巡检；主页缺失或不可用时，会先搜索昵称，再进入真实账号页提取最新内容数据并截图存档。</p>
+        <p class="muted" style="font-size:12px;">勾选「先自动采集」后，系统会按设置的数量混合打开小红书和抖音账号标签页巡检；主页缺失或不可用时，会先搜索昵称，再进入真实账号页提取最新内容数据并截图存档。</p>
       </div>
     </section>
 
@@ -60,7 +60,7 @@
         <div class="row accent-row" style="margin-bottom: 15px;">
           <div style="flex: 1;">
             <b style="color: var(--brand-strong);">自动巡检</b>
-            <div class="muted" style="font-size: 13px; margin-top: 4px;">使用你已登录的 Chrome 巡检账号池；小红书和抖音都会按账号批量打开多个标签页，没有真实主页时会先搜索昵称。</div>
+            <div class="muted" style="font-size: 13px; margin-top: 4px;">使用你已登录的 Chrome 巡检账号池；小红书和抖音会按设置的每轮数量混合打开标签页，没有真实主页时会先搜索昵称。</div>
           </div>
           <button class="primary" id="candRunRpa" style="align-self: center;">一键自动巡检</button>
         </div>
@@ -152,7 +152,23 @@
             <div class="row"><button class="primary" id="acAdd">添加到账号池</button></div>
           </div>
 
-          <!-- 方式二：搜索填空 —— 先选平台，去平台搜到本人再回填 -->
+          <!-- 方式二：AI 搜索 —— 模型给候选，平台搜索链接由本地代码兜底 -->
+          <div class="ac-card">
+            <h4>AI 搜索 <span class="muted">输入名字，返回候选账号</span></h4>
+            <div class="ac-grid">
+              <label class="wide">名称 / 关键词
+                <input id="acAiQuery" placeholder="博主名字或关键词" />
+              </label>
+            </div>
+            <div class="row">
+              <button class="primary" id="acAiSearch">AI 搜索</button>
+            </div>
+            <div class="ac-ai-results" id="acAiResults">
+              <p class="muted">输入名字后，可直接打开小红书 / 抖音搜索；AI 候选会显示在这里。</p>
+            </div>
+          </div>
+
+          <!-- 方式三：搜索填空 —— 先选平台，去平台搜到本人再回填 -->
           <div class="ac-card">
             <h4>🔍 搜索填空 <span class="muted">只知道名字，按平台搜到本人再回填</span></h4>
             <div class="ac-grid">
@@ -171,10 +187,10 @@
               </label>
             </div>
             <div class="row">
-              <button id="acSearchJump">🔍 去平台搜索</button>
+              <a class="filebtn" id="acSearchJump" href="#" target="_blank" rel="noopener noreferrer">打开平台搜索</a>
               <button class="primary" id="acSearchAdd">添加到账号池</button>
             </div>
-            <p class="muted" id="acSearchHint">先选平台、填名字，点「去平台搜索」跳到该平台搜索页找本人。</p>
+            <p class="muted" id="acSearchHint">先选平台、填名字，点「打开平台搜索」跳到该平台搜索页找本人。</p>
           </div>
         </div>
 
@@ -247,6 +263,13 @@
           <label>每日时间<input id="stSchedTime" type="time" value="09:00" /></label>
           <label>默认回溯天数<input id="stSchedDays" type="number" min="1" max="30" value="1" /></label>
           <label>每日 token 预算提醒（0=不限）<input id="stBudget" type="number" min="0" value="0" /></label>
+        </div>
+        <h3>浏览器巡检</h3>
+        <div class="grid2">
+          <label>每轮同时打开账号标签数
+            <input id="stRpaMaxTabs" type="number" min="1" max="30" step="1" value="10" />
+          </label>
+          <p class="muted" style="align-self:end; margin:0;">默认 10。运行时会按可用内存自动下调，避免一次打开太多标签页。</p>
         </div>
         <div class="row"><button class="primary" id="stSaveSettings">保存设置</button><span class="muted" id="stSaveMsg"></span></div>
 

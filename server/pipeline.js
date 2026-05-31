@@ -53,6 +53,7 @@ export async function runDailyReport({
   // 统一窗口格式
   windowType = normalizeWindowType(windowType);
   const startISO = windowStartISO(windowType);
+  const cfg = loadConfig();
 
   // ====================================================================
   // 第 1 步：RPA 浏览器采集（可选跳过）
@@ -78,6 +79,9 @@ export async function runDailyReport({
       // 执行巡检
       patrolResult = await runPatrol(client, {
         onProgress: (msg) => progress('rpa', msg),
+        windowType,
+        windowStartISO: startISO,
+        maxTabsPerBatch: cfg.rpa?.maxTabsPerBatch,
         clientFactory: async () => {
           const c = new CDPClient();
           await c.connect(chrome.port);
@@ -93,7 +97,7 @@ export async function runDailyReport({
       progress('rpa', `采集失败: ${rpaErr.message}（将使用已有数据继续）`);
     } finally {
       // 一定要清理资源
-      if (client) client.close();
+      if (client) await client.close();
       if (chromeChild) killChrome(chromeChild);
     }
   } else {
@@ -108,7 +112,6 @@ export async function runDailyReport({
   const items = getEligible(startISO);
   const counts = countsByStatus();
   const reportDate = new Date().toISOString().slice(0, 10);
-  const cfg = loadConfig();
 
   progress('filter', `达标内容: ${items.length} 条`);
 

@@ -309,7 +309,7 @@ main {
 /* ─── Account add: two clean methods ─── */
 .ac-add {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 18px;
 }
 .ac-card {
@@ -338,6 +338,33 @@ main {
   margin-bottom: 12px;
 }
 .ac-grid label.wide { grid-column: 1 / -1; }
+/* 关键：让 label/控件能收缩到列宽（min-width:0 + width:100%）。
+   否则输入框保持默认宽度，会撑出卡片右边、与相邻卡片重叠（与 .metricgrid 同款处理）。 */
+.ac-grid label { min-width: 0; }
+.ac-grid input, .ac-grid select { width: 100%; min-width: 0; }
+.ac-ai-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+.ac-ai-results p { margin: 0; }
+.ac-ai-shortcuts, .ac-ai-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ac-ai-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--bg-subtle);
+}
+.ac-ai-title {
+  font-weight: 650;
+  margin-bottom: 4px;
+}
+.ac-ai-actions { margin-top: 10px; }
 
 /* ─── Layout Helpers ─── */
 .row {
@@ -689,6 +716,53 @@ td a { color: var(--brand-strong); text-decoration: none; font-weight: 550; }
 td a:hover { text-decoration: underline; }
 td input, td select { padding: 6px 8px; font-size: 12.5px; }
 td button { padding: 6px 11px; font-size: 12px; }
+
+/* ─── Accounts table: dense + 绝不撑破面板边框 ─── */
+#acTable {
+  margin-top: 16px;
+  /* 兜底：表再宽也只在面板内横向滚动，不会顶出圆角边框 */
+  overflow: hidden;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--glass-1);
+}
+#acTable::-webkit-scrollbar { height: 8px; }
+.ac-table {
+  width: 100%;
+  min-width: 760px;          /* 窄窗口下触发横向滚动，而不是把列挤烂 */
+  margin: 0;
+  border: none;              /* 边框 / 圆角交给 #acTable 容器 */
+  border-radius: 0;
+  background: transparent;
+}
+.ac-table th, .ac-table td { padding: 9px 11px; white-space: nowrap; }
+/* 关键：控件填满列宽并能收缩到 0，不被长值 / 长 option 顶大 */
+.ac-table td input:not([type="checkbox"]),
+.ac-table td select { width: 100%; min-width: 0; box-sizing: border-box; }
+/* 列宽分配：定值列收紧，主页链接吃掉剩余空间 */
+.ac-table .col-chk  { width: 1%; text-align: center; }
+.ac-table .col-plat { min-width: 76px; }
+.ac-table .col-nick { min-width: 100px; }
+.ac-table .col-cat  { min-width: 84px; }
+.ac-table .col-prio { min-width: 64px; }
+.ac-table .col-url  { width: 42%; min-width: 140px; }
+.ac-table .col-url input { font-size: 12px; }
+.ac-table .col-act  { width: 1%; text-align: right; }
+.ac-table .col-meta { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* 来源做成小胶囊，原始字段值（search_fallback 等）看起来更收敛 */
+.ac-table .src-tag {
+  display: inline-block; max-width: 132px;
+  overflow: hidden; text-overflow: ellipsis; vertical-align: bottom;
+  padding: 2px 9px; font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+/* 操作列按钮紧凑、间距一致 */
+.ac-table .col-act button { padding: 5px 12px; }
+.ac-table .col-act button + button { margin-left: 6px; }
 
 /* ─── Code / Token ─── */
 code.token {

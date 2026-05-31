@@ -9,6 +9,7 @@
 import { join } from 'node:path';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { freemem } from 'node:os';
 import { all } from '../db.js';
 import {
   upsertCapture,
@@ -18,13 +19,20 @@ import {
 } from '../store.js';
 import { SCREENSHOTS_DIR } from '../lib/paths.js';
 import { log } from '../lib/log.js';
-import { deriveMetricsWithEvidence } from '../../extension/extract-core.js';
+import { deriveMetricsWithEvidence, parseCount } from '../../extension/extract-core.js';
 import { clickRectLikeHuman, executeHumanActions } from './human-actions.js';
 import { looksLikeRealProfile, platformSearchUrl } from '../lib/platform-links.js';
+import { normalizeWindowType, THRESHOLD, windowStartISO as computeWindowStartISO } from '../filter.js';
 
 const DEFAULT_PLATFORMS = ['xiaohongshu', 'douyin'];
 const DEFAULT_MAX_CANDIDATES = 8;
-const DEFAULT_MAX_TABS_PER_PLATFORM = 3;
+const DEFAULT_MAX_TABS_PER_BATCH = 10;
+const MIN_MEMORY_SAFE_TABS = 2;
+const MEMORY_PER_RPA_TAB_BYTES = 600 * 1024 * 1024;
+const MEMORY_RESERVE_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_XHS_SCAN_CANDIDATES = 120;
+const MAX_XHS_SCROLLS = 20;
+const MAX_XHS_EMPTY_SCROLLS = 3;
 
 export async function discoverFollowedCreators(client, opts = {}) {
   const platforms = opts.platforms || DEFAULT_PLATFORMS;
@@ -54,12 +62,25 @@ export async function runPatrol(client, opts = {}) {
     maxCandidatesPerAccount = DEFAULT_MAX_CANDIDATES,
     clientFactory = null,
   } = opts;
-  const maxTabsPerPlatform = normalizeMaxTabs(
-    opts.maxTabsPerPlatform
+  const orderedPlatforms = orderPlatforms(platforms);
+  const normalizedWindowType = normalizeWindowType(opts.windowType || 'last_1_days');
+  const patrolWindowStartISO = opts.windowStartISO || computeWindowStartISO(normalizedWindowType);
+  const requestedMaxTabsPerBatch = normalizeMaxTabs(
+    opts.maxTabsPerBatch
+      ?? opts.maxTabsPerPlatform
+      ?? process.env.VBP_RPA_MAX_TABS_PER_BATCH
+      ?? process.env.VB_RPA_MAX_TABS_PER_BATCH
       ?? process.env.VBP_RPA_MAX_TABS_PER_PLATFORM
       ?? process.env.VB_RPA_MAX_TABS_PER_PLATFORM
-      ?? DEFAULT_MAX_TABS_PER_PLATFORM,
+      ?? DEFAULT_MAX_TABS_PER_BATCH,
+    DEFAULT_MAX_TABS_PER_BATCH,
   );
+  const freeMemoryBytes = Number.isFinite(Number(opts.freeMemoryBytes))
+    ? Number(opts.freeMemoryBytes)
+    : freemem();
+  const maxTabsPerBatch = clientFactory
+    ? memorySafeBatchSize(requestedMaxTabsPerBatch, freeMemoryBytes)
+    : 1;
   const progress = (msg) => {
     log.info(`[RPA] ${msg}`);
     if (onProgress) onProgress(msg);
@@ -74,14 +95,19 @@ export async function runPatrol(client, opts = {}) {
     discovered: 0,
     platformResults: {},
     details: [],
-    tabMode: clientFactory && maxTabsPerPlatform > 1 ? 'multi' : 'single',
-    maxTabsPerPlatform: clientFactory && maxTabsPerPlatform > 1 ? maxTabsPerPlatform : 1,
+    tabMode: clientFactory ? 'multi' : 'single',
+    maxTabsPerBatch,
+    maxTabsPerPlatform: maxTabsPerBatch,
+    requestedMaxTabsPerBatch: clientFactory ? requestedMaxTabsPerBatch : 1,
+    freeMemoryBytes,
+    windowType: normalizedWindowType,
+    windowStartISO: patrolWindowStartISO,
   };
 
-  progress(`开始自动巡检: ${platforms.join(', ')}`);
+  progress(`开始自动巡检: ${orderedPlatforms.join(', ')}`);
 
   if (discoverFollows) {
-    const creators = await discoverFollowedCreators(client, { platforms, onProgress: progress });
+    const creators = await discoverFollowedCreators(client, { platforms: orderedPlatforms, onProgress: progress });
     for (const creator of creators) {
       upsertAccount({
         platform: creator.platform,
@@ -98,47 +124,37 @@ export async function runPatrol(client, opts = {}) {
     progress(`关注发现完成: ${creators.length} 个账号`);
   }
 
-  const placeholders = platforms.map(() => '?').join(',');
+  const placeholders = orderedPlatforms.map(() => '?').join(',');
   const accounts = all(
     `SELECT * FROM accounts WHERE monitor_enabled = 1 AND platform IN (${placeholders}) ORDER BY priority ASC, last_patrolled_at ASC NULLS FIRST, created_at DESC`,
-    platforms,
+    orderedPlatforms,
   );
   result.total = accounts.length;
   for (const acc of accounts) {
     initPlatformResult(result, acc.platform).total++;
   }
 
-  if (clientFactory && maxTabsPerPlatform > 1) {
-    progress(`启用多标签巡检: 每个平台最多同时打开 ${maxTabsPerPlatform} 个账号标签页`);
-    const grouped = groupAccountsByPlatform(accounts, platforms);
-    let primaryUsed = false;
-    let displayIndex = 0;
-    for (const platform of platforms) {
-      const group = grouped.get(platform) || [];
-      if (group.length === 0) continue;
-      const tabs = Math.min(maxTabsPerPlatform, group.length);
-      progress(`${platformName(platform)}: 准备同时打开 ${tabs} 个标签页巡检 ${group.length} 个账号`);
-      const outcomes = await mapLimit(group, tabs, async (acc, localIndex) => {
-        let worker = client;
-        let shouldClose = false;
-        if (primaryUsed) {
-          worker = await clientFactory();
-          shouldClose = true;
-        } else {
-          primaryUsed = true;
-        }
-        try {
-          return await patrolAccount(worker, acc, progress, {
-            index: displayIndex + localIndex,
-            total: accounts.length,
-            maxCandidates: maxCandidatesPerAccount,
-          });
-        } finally {
-          if (shouldClose) worker.close();
-        }
+  if (clientFactory) {
+    if (maxTabsPerBatch < requestedMaxTabsPerBatch) {
+      progress(`启用混合批量巡检: 目标每批 ${requestedMaxTabsPerBatch} 个账号；可用内存不足，自动降到 ${maxTabsPerBatch} 个`);
+    } else {
+      progress(`启用混合批量巡检: 每批最多同时打开 ${maxTabsPerBatch} 个小红书/抖音账号标签页`);
+    }
+    let primaryAvailable = true;
+    for (let start = 0; start < accounts.length; start += maxTabsPerBatch) {
+      const batch = accounts.slice(start, start + maxTabsPerBatch);
+      const outcomes = await patrolMixedBatch(batch, {
+        client,
+        clientFactory,
+        progress,
+        startIndex: start,
+        total: accounts.length,
+        maxCandidates: maxCandidatesPerAccount,
+        windowStartISO: patrolWindowStartISO,
+        usePrimary: primaryAvailable,
       });
+      primaryAvailable = false;
       for (const outcome of outcomes) applyPatrolOutcome(result, outcome);
-      displayIndex += group.length;
     }
   } else {
     for (let i = 0; i < accounts.length; i++) {
@@ -146,6 +162,7 @@ export async function runPatrol(client, opts = {}) {
         index: i,
         total: accounts.length,
         maxCandidates: maxCandidatesPerAccount,
+        windowStartISO: patrolWindowStartISO,
       });
       applyPatrolOutcome(result, outcome);
       await client.sleep(1400 + Math.random() * 1600);
@@ -156,38 +173,29 @@ export async function runPatrol(client, opts = {}) {
   return result;
 }
 
-function normalizeMaxTabs(v) {
+function orderPlatforms(platforms) {
+  const requested = Array.isArray(platforms) && platforms.length ? platforms : DEFAULT_PLATFORMS;
+  return [...new Set(requested.filter(Boolean))];
+}
+
+function normalizeMaxTabs(v, fallback = DEFAULT_MAX_TABS_PER_BATCH) {
   const n = Number(v);
-  if (!Number.isFinite(n)) return DEFAULT_MAX_TABS_PER_PLATFORM;
-  return Math.max(1, Math.min(8, Math.floor(n)));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(30, Math.floor(n)));
+}
+
+function memorySafeBatchSize(requested, freeBytes) {
+  const requestedTabs = Math.max(1, Number(requested) || DEFAULT_MAX_TABS_PER_BATCH);
+  const availableForTabs = Number(freeBytes) - MEMORY_RESERVE_BYTES;
+  const memoryTabs = Math.floor(availableForTabs / MEMORY_PER_RPA_TAB_BYTES);
+  const safeTabs = Math.max(MIN_MEMORY_SAFE_TABS, memoryTabs);
+  return Math.max(1, Math.min(requestedTabs, safeTabs));
 }
 
 function platformName(platform) {
   if (platform === 'xiaohongshu') return '小红书';
   if (platform === 'douyin') return '抖音';
   return platform;
-}
-
-function groupAccountsByPlatform(accounts, platforms) {
-  const grouped = new Map(platforms.map((p) => [p, []]));
-  for (const acc of accounts) {
-    if (!grouped.has(acc.platform)) grouped.set(acc.platform, []);
-    grouped.get(acc.platform).push(acc);
-  }
-  return grouped;
-}
-
-async function mapLimit(items, limit, worker) {
-  const out = new Array(items.length);
-  let next = 0;
-  const workerCount = Math.min(limit, items.length);
-  await Promise.all(Array.from({ length: workerCount }, async () => {
-    while (next < items.length) {
-      const i = next++;
-      out[i] = await worker(items[i], i);
-    }
-  }));
-  return out;
 }
 
 function initPlatformResult(result, platform) {
@@ -200,12 +208,15 @@ function applyPatrolOutcome(result, outcome) {
   if (outcome.status === 'ok') {
     result.success++;
     platformResult.success++;
-    if (outcome.item?.duplicate) {
-      result.duplicates++;
-      platformResult.duplicates++;
-    } else {
-      result.newItems++;
-      platformResult.newItems++;
+    const items = outcome.items || (outcome.item ? [outcome.item] : []);
+    for (const item of items) {
+      if (item?.duplicate) {
+        result.duplicates++;
+        platformResult.duplicates++;
+      } else if (item) {
+        result.newItems++;
+        platformResult.newItems++;
+      }
     }
   } else {
     result.failed++;
@@ -214,7 +225,136 @@ function applyPatrolOutcome(result, outcome) {
   result.details.push(outcome);
 }
 
-async function patrolAccount(client, acc, progress, { index, total, maxCandidates }) {
+async function patrolMixedBatch(accounts, { client, clientFactory, progress, startIndex, total, maxCandidates, windowStartISO, usePrimary }) {
+  const endIndex = startIndex + accounts.length;
+  progress(`批次 ${startIndex + 1}-${endIndex}/${total}: 同时打开 ${accounts.length} 个账号主页`);
+
+  const opened = await Promise.allSettled(accounts.map(async (acc, localIndex) => {
+    const index = startIndex + localIndex;
+    let worker = null;
+    try {
+      worker = usePrimary && localIndex === 0 ? client : await clientFactory();
+      const session = await openPatrolSession(worker, acc, progress, { index, total });
+      if (session.outcome) {
+        await closeWorker(worker, progress, acc);
+      }
+      return session;
+    } catch (e) {
+      if (worker) await closeWorker(worker, progress, acc);
+      log.warn(`[RPA] 打开主页失败 ${acc.platform}/${acc.nickname || acc.id}: ${e.message}`);
+      return { outcome: errorOutcome(acc, e.message) };
+    }
+  }));
+
+  const sessions = [];
+  const outcomes = [];
+  for (const item of opened) {
+    if (item.status === 'rejected') {
+      outcomes.push(errorOutcome(null, item.reason?.message || String(item.reason)));
+      continue;
+    }
+    if (item.value?.outcome) outcomes.push(item.value.outcome);
+    else if (item.value) sessions.push(item.value);
+  }
+
+  progress(`批次 ${startIndex + 1}-${endIndex}/${total}: 主页打开完成，开始处理 ${sessions.length} 个账号`);
+  const processed = await Promise.allSettled(sessions.map((session) => (
+    patrolOpenSession(session, progress, { total, maxCandidates, windowStartISO })
+  )));
+  for (let i = 0; i < processed.length; i++) {
+    const item = processed[i];
+    if (item.status === 'fulfilled') outcomes.push(item.value);
+    else {
+      const session = sessions[i];
+      outcomes.push(errorOutcome(session?.acc, item.reason?.message || String(item.reason)));
+    }
+  }
+
+  await Promise.allSettled(sessions.map((session) => closeWorker(session.worker, progress, session.acc)));
+  progress(`批次 ${startIndex + 1}-${endIndex}/${total}: 标签已全部关闭`);
+  return outcomes;
+}
+
+async function openPatrolSession(worker, acc, progress, { index, total }) {
+  const label = `${acc.platform}/${acc.nickname || acc.homepage_url || acc.id}`;
+  const accountProgress = progressForAccount(acc, progress);
+
+  if (!acc.homepage_url && !acc.nickname) {
+    return { worker, acc, index, outcome: { accountId: acc.id, nickname: acc.nickname, platform: acc.platform, status: 'skipped', error: '缺少主页链接和昵称', item: null, items: [], skipReasons: [] } };
+  }
+
+  progress(`(${index + 1}/${total}) 打开标签页巡检 ${label}`);
+  const waitMs = acc.platform === 'xiaohongshu' ? 5000 : 4500;
+  const homepage = await openAccountHomepage(worker, acc, acc.platform, accountProgress, { waitMs });
+  if (!homepage) {
+    return { worker, acc, index, outcome: errorOutcome(acc, `未能打开${platformName(acc.platform)}主页`) };
+  }
+  progress(`(${index + 1}/${total}) ${platformName(acc.platform)}主页标签已打开 ${acc.nickname || acc.homepage_url || acc.id}`);
+  return { worker, acc, homepage, index };
+}
+
+async function patrolOpenSession(session, progress, { total, maxCandidates, windowStartISO }) {
+  const { worker, acc, homepage, index } = session;
+  progress(`(${index + 1}/${total}) 处理已打开的${platformName(acc.platform)}主页 ${acc.nickname || homepage || acc.id}`);
+  const accountProgress = progressForAccount(acc, progress);
+
+  if (acc.platform === 'xiaohongshu') {
+    const result = await collectXiaohongshuItems(worker, acc, homepage, accountProgress, { windowStartISO });
+    markAccountPatrolledFromItems(acc.id, result.items);
+    return okOutcome(acc, result.items, result.skipReasons);
+  }
+
+  const result = await collectDouyinItems(worker, acc, accountProgress, { maxCandidates, windowStartISO });
+  const items = result.item ? [result.item] : [];
+  if (!result.item && result.skipReasons.length === 0) {
+    return errorOutcome(acc, '未能提取到新增内容');
+  }
+  markAccountPatrolledFromItems(acc.id, items);
+  return okOutcome(acc, items, result.skipReasons);
+}
+
+async function closeWorker(worker, progress, acc) {
+  if (!worker || typeof worker.close !== 'function') return;
+  try {
+    await worker.close();
+  } catch (e) {
+    const label = acc ? `${acc.platform}/${acc.nickname || acc.id}` : 'unknown';
+    log.warn(`[RPA] 关闭标签页失败 ${label}: ${e.message}`);
+    progress(`关闭标签页失败 ${label}: ${e.message}`);
+  }
+}
+
+function okOutcome(acc, items = [], skipReasons = []) {
+  return {
+    accountId: acc.id,
+    nickname: acc.nickname,
+    platform: acc.platform,
+    status: 'ok',
+    item: items[0] || null,
+    items,
+    skipReasons,
+  };
+}
+
+function errorOutcome(acc, error) {
+  return {
+    accountId: acc?.id || null,
+    nickname: acc?.nickname || null,
+    platform: acc?.platform || 'unknown',
+    status: 'error',
+    error,
+    item: null,
+    items: [],
+    skipReasons: [],
+  };
+}
+
+function progressForAccount(acc, progress) {
+  const label = `${acc.platform}/${acc.nickname || acc.homepage_url || acc.id}`;
+  return (msg) => progress(`[${label}] ${String(msg || '').trimStart()}`);
+}
+
+async function patrolAccount(client, acc, progress, { index, total, maxCandidates, windowStartISO }) {
   const label = `${acc.platform}/${acc.nickname || acc.homepage_url || acc.id}`;
   const accountProgress = (msg) => progress(`[${label}] ${String(msg || '').trimStart()}`);
 
@@ -224,20 +364,33 @@ async function patrolAccount(client, acc, progress, { index, total, maxCandidate
 
   progress(`(${index + 1}/${total}) 打开标签页巡检 ${label}`);
   try {
-    const item = acc.platform === 'douyin'
-      ? await patrolDouyin(client, acc, accountProgress, { maxCandidates })
-      : await patrolXiaohongshu(client, acc, accountProgress, { maxCandidates });
+    if (acc.platform === 'xiaohongshu') {
+      const result = await patrolXiaohongshu(client, acc, accountProgress, { windowStartISO });
+      markAccountPatrolledFromItems(acc.id, result.items);
+      return okOutcome(acc, result.items, result.skipReasons);
+    }
 
-    if (!item) {
+    const result = await patrolDouyin(client, acc, accountProgress, { maxCandidates, windowStartISO });
+    if (!result?.item && !result?.skipReasons?.length) {
       return { accountId: acc.id, nickname: acc.nickname, platform: acc.platform, status: 'error', error: '未能提取到新增内容', item: null };
     }
 
-    markAccountPatrolled(acc.id, { lastSeenUrl: item.url, lastSeenPublishTime: item.publishTime });
-    return { accountId: acc.id, nickname: acc.nickname, platform: acc.platform, status: 'ok', item };
+    const items = result.item ? [result.item] : [];
+    markAccountPatrolledFromItems(acc.id, items);
+    return okOutcome(acc, items, result.skipReasons);
   } catch (e) {
     markAccountPatrolled(acc.id);
     log.warn(`[RPA] 巡检 ${label} 失败: ${e.message}`);
     return { accountId: acc.id, nickname: acc.nickname, platform: acc.platform, status: 'error', error: e.message, item: null };
+  }
+}
+
+function markAccountPatrolledFromItems(accountId, items = []) {
+  const first = items.find(Boolean);
+  if (first) {
+    markAccountPatrolled(accountId, { lastSeenUrl: first.url, lastSeenPublishTime: first.publishTime });
+  } else {
+    markAccountPatrolled(accountId);
   }
 }
 
@@ -271,30 +424,33 @@ async function discoverDouyinCreators(client, progress) {
   return creators;
 }
 
-async function patrolDouyin(client, acc, progress, { maxCandidates }) {
+async function patrolDouyin(client, acc, progress, { maxCandidates, windowStartISO }) {
   const homepage = await openAccountHomepage(client, acc, 'douyin', progress, { waitMs: 4500 });
-  if (!homepage) return null;
+  if (!homepage) return { item: null, skipReasons: [{ reason: 'homepage_unavailable', detail: '未能打开抖音主页' }] };
+  return collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO });
+}
 
+async function collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO }) {
+  const skipReasons = [];
   const postCandidates = await waitForPostCandidates(client, 'douyin');
   if (postCandidates.length === 0) {
     progress('  未找到最新视频链接');
-    return null;
+    return { item: null, skipReasons };
   }
 
-  return patrolCandidateUrls(client, acc, 'douyin', postCandidates, progress, { maxCandidates, waitMs: 4500 });
+  const item = await patrolCandidateUrls(client, acc, 'douyin', postCandidates, progress, {
+    maxCandidates,
+    waitMs: 4500,
+    windowStartISO,
+    skipReasons,
+  });
+  return { item, skipReasons };
 }
 
-async function patrolXiaohongshu(client, acc, progress, { maxCandidates }) {
+async function patrolXiaohongshu(client, acc, progress, { windowStartISO }) {
   const homepage = await openAccountHomepage(client, acc, 'xiaohongshu', progress, { waitMs: 5000 });
-  if (!homepage) return null;
-
-  const postCandidates = await waitForPostCandidates(client, 'xiaohongshu');
-  if (postCandidates.length === 0) {
-    progress('  未找到最新笔记链接');
-    return null;
-  }
-
-  return patrolCandidateUrls(client, acc, 'xiaohongshu', postCandidates, progress, { maxCandidates, waitMs: 7000, homepage });
+  if (!homepage) return { items: [], skipReasons: [{ reason: 'homepage_unavailable' }] };
+  return collectXiaohongshuItems(client, acc, homepage, progress, { windowStartISO });
 }
 
 async function openAccountHomepage(client, acc, platform, progress, { waitMs }) {
@@ -609,13 +765,294 @@ function creatorIdFromUrl(platform, url) {
   }
 }
 
-async function patrolCandidateUrls(client, acc, platform, postCandidates, progress, { maxCandidates, waitMs, homepage = null }) {
+async function collectXiaohongshuItems(client, acc, homepage, progress, { windowStartISO }) {
+  const items = [];
+  const skipReasons = [];
+  const seenCandidates = new Set();
+  let scrolls = 0;
+  let emptyScrolls = 0;
+  let stop = false;
+
+  while (!stop && seenCandidates.size < MAX_XHS_SCAN_CANDIDATES && scrolls <= MAX_XHS_SCROLLS) {
+    const candidates = await waitForPostCandidates(client, 'xiaohongshu', seenCandidates.size === 0 ? 12000 : 1500);
+    const fresh = candidates.filter((candidate) => candidate?.url && !seenCandidates.has(candidate.url));
+
+    if (fresh.length === 0) {
+      emptyScrolls++;
+      if (emptyScrolls >= MAX_XHS_EMPTY_SCROLLS) break;
+      await scrollPage(client, 1);
+      scrolls++;
+      continue;
+    }
+    emptyScrolls = 0;
+
+    for (const candidate of fresh) {
+      if (seenCandidates.size >= MAX_XHS_SCAN_CANDIDATES) break;
+      seenCandidates.add(candidate.url);
+
+      const decision = assessXiaohongshuCandidate(candidate, windowStartISO);
+      if (decision.action === 'skip') {
+        recordSkip(skipReasons, candidate, decision.reason, decision.detail);
+        progress(`  跳过候选: ${decision.detail}`);
+        continue;
+      }
+      if (decision.action === 'stop') {
+        recordSkip(skipReasons, candidate, decision.reason, decision.detail);
+        progress(`  停止继续检查: ${decision.detail}`);
+        if (decision.item) items.push(decision.item);
+        stop = true;
+        break;
+      }
+
+      const item = await captureXiaohongshuCandidate(client, acc, homepage, candidate, progress, { windowStartISO, skipReasons });
+      if (item?.stop) {
+        if (item.item) items.push(item.item);
+        stop = true;
+        break;
+      }
+      if (item?.item) items.push(item.item);
+
+      await client.goto(homepage);
+      await client.sleep(1200 + Math.random() * 1000);
+      await assertNotBlocked(client, 'xiaohongshu');
+    }
+
+    if (!stop) {
+      await scrollPage(client, 1);
+      scrolls++;
+    }
+  }
+
+  if (seenCandidates.size === 0) progress('  未找到最新笔记链接');
+  else if (!stop) progress(`  小红书候选检查完成: 新增/命中 ${items.length} 条，跳过 ${skipReasons.length} 条`);
+  return { items, skipReasons };
+}
+
+function assessXiaohongshuCandidate(candidate, windowStartISO) {
+  if (candidate.isPinned) {
+    return { action: 'skip', reason: 'pinned', detail: '置顶内容不算真正最新内容' };
+  }
+
+  const cardPublishTime = normalizedPublishTime(candidate.publishTime || candidate.publishRaw);
+  if (isBeforeWindow(cardPublishTime, windowStartISO)) {
+    return { action: 'stop', reason: 'out_of_window', detail: `候选发布时间超出窗口: ${candidate.publishRaw || cardPublishTime}` };
+  }
+
+  if (contentExistsByUrl(candidate.url)) {
+    return {
+      action: 'stop',
+      reason: 'already_seen',
+      detail: '遇到已采集内容，停止该账号后续检查',
+      item: duplicateItem(candidate.url),
+    };
+  }
+
+  if (candidate.likeCount === null || candidate.likeCount === undefined) {
+    return { action: 'skip', reason: 'unknown_like', detail: '主页卡片未识别到点赞数，按规则不点击' };
+  }
+
+  if (!cardLikeQualifies(candidate.likeRaw, candidate.likeCount)) {
+    return { action: 'skip', reason: 'below_threshold', detail: `主页卡片点赞未达标: ${candidate.likeRaw ?? candidate.likeCount}` };
+  }
+
+  return { action: 'capture', reason: 'qualified', detail: `主页卡片点赞达标: ${candidate.likeRaw ?? candidate.likeCount}` };
+}
+
+async function captureXiaohongshuCandidate(client, acc, homepage, candidate, progress, { windowStartISO, skipReasons }) {
+  progress(`  进入达标候选: ${candidate.url}（主页点赞=${candidate.likeRaw ?? candidate.likeCount}）`);
+  if (candidate.rect && homepage) {
+    const opened = await openXiaohongshuCandidateFromHomepage(client, homepage, candidate, progress, { waitMs: 7000 });
+    if (opened?.skipped === 'pinned') {
+      recordSkip(skipReasons, candidate, 'pinned', '回到主页后识别为置顶内容，跳过点击');
+      return null;
+    }
+  } else {
+    progress('  候选缺少可点击卡片范围，改用详情链接兜底');
+    await client.goto(candidate.url);
+    await client.sleep(7000);
+  }
+
+  try {
+    await assertNotBlocked(client, 'xiaohongshu');
+  } catch (e) {
+    recordSkip(skipReasons, candidate, 'blocked', e.message);
+    progress(`  候选被登录/验证拦截，跳过: ${e.message}`);
+    return null;
+  }
+
+  const currentUrl = await safeCurrentUrl(client);
+  if (!isDetailUrl('xiaohongshu', currentUrl) || await currentPageUnavailable(client)) {
+    recordSkip(skipReasons, candidate, 'not_detail', `候选点击后未停留在详情页: ${currentUrl || candidate.url}`);
+    progress(`  候选点击后未停留在详情页，跳过: ${currentUrl || candidate.url}`);
+    return null;
+  }
+
+  const raw = await extractPageRaw(client, 'xiaohongshu');
+  const data = buildCaptureData(raw, 'xiaohongshu');
+  const finalUrl = isDetailUrl('xiaohongshu', data.pageUrl) ? data.pageUrl : candidate.url;
+  const titleDecision = titleMismatchDecision(candidate, data.title, skipReasons);
+  if (titleDecision) {
+    recordSkip(skipReasons, candidate, titleDecision.reason, titleDecision.detail);
+    progress(`  候选标题校验失败，跳过: ${titleDecision.detail}`);
+    return null;
+  }
+
+  if (contentExistsByUrl(finalUrl)) {
+    const item = duplicateItem(finalUrl);
+    recordSkip(skipReasons, candidate, 'already_seen', '详情页已采集，停止该账号后续检查');
+    progress('  详情页已采集，停止该账号后续检查');
+    return { stop: true, item };
+  }
+
+  const detailPublishTime = normalizedPublishTime(data.pubTime);
+  if (!detailPublishTime) {
+    recordSkip(skipReasons, candidate, 'unknown_time', '详情页未识别到发布时间，按规则不保存');
+    progress('  详情页未识别到发布时间，跳过该候选');
+    return null;
+  }
+  if (isBeforeWindow(detailPublishTime, windowStartISO)) {
+    recordSkip(skipReasons, candidate, 'out_of_window', `详情页发布时间超出窗口: ${data.pubTime || detailPublishTime}`);
+    progress(`  详情页发布时间超出窗口，停止该账号后续检查: ${data.pubTime || detailPublishTime}`);
+    return { stop: true };
+  }
+
+  if (isUnavailablePage(raw) || !hasCaptureSignal(data)) {
+    recordSkip(skipReasons, candidate, 'unavailable', data.title || raw.pageUrl || candidate.url);
+    progress(`  候选不可采，跳过: ${data.title || raw.pageUrl || candidate.url}`);
+    return null;
+  }
+
+  progress(`  抓取到数据: 点赞=${data.like}, 转发=${data.share}, 收藏=${data.favorite}, 证据=${data.metricsConfidence}`);
+  const screenshotPath = await takeScreenshot(client, acc, 'xiaohongshu');
+  const item = saveData(acc, finalUrl, data, screenshotPath);
+  if (item.duplicate) {
+    recordSkip(skipReasons, candidate, 'already_seen', '内容重复，停止该账号后续检查');
+    progress('  内容重复，停止该账号后续检查');
+    return { stop: true, item };
+  }
+  return { item };
+}
+
+function cardLikeQualifies(raw, count) {
+  if (!Number.isFinite(Number(count))) return false;
+  if (Number(count) > THRESHOLD) return true;
+  return Number(count) >= THRESHOLD && /\+/.test(String(raw ?? ''));
+}
+
+function normalizedPublishTime(value) {
+  if (!value) return null;
+  return parseHumanTime(value);
+}
+
+function isBeforeWindow(publishTime, windowStartISO) {
+  if (!publishTime || !windowStartISO) return false;
+  const pub = new Date(publishTime).getTime();
+  const start = new Date(windowStartISO).getTime();
+  return Number.isFinite(pub) && Number.isFinite(start) && pub < start;
+}
+
+function recordSkip(skipReasons, candidate, reason, detail) {
+  skipReasons.push({
+    url: candidate?.url || null,
+    reason,
+    detail,
+    title: candidateTitle(candidate, { fallbackCardText: true }),
+    cardText: typeof candidate?.cardText === 'string' ? candidate.cardText.slice(0, 300) : '',
+  });
+}
+
+function candidateTitle(candidate, { fallbackCardText = false } = {}) {
+  const title = candidate?.title ?? candidate?.titleRaw ?? candidate?.title_raw;
+  if (typeof title === 'string' && title.trim()) return title.trim().slice(0, 180);
+  if (fallbackCardText && typeof candidate?.cardText === 'string') {
+    return candidate.cardText.replace(/\s+/g, ' ').trim().slice(0, 180);
+  }
+  return '';
+}
+
+function normalizeTitleForCompare(value) {
+  return String(value || '')
+    .replace(/[-_—|].*(小红书|抖音).*/i, '')
+    .replace(/(小红书|抖音|置顶|Pinned)/ig, '')
+    .replace(/\s+/g, '')
+    .replace(/[^\p{L}\p{N}]/gu, '')
+    .toLowerCase();
+}
+
+function titlesLikelyMatch(a, b) {
+  const left = normalizeTitleForCompare(a);
+  const right = normalizeTitleForCompare(b);
+  if (!left || !right) return true;
+  if (left.length < 4 || right.length < 4) return true;
+  return left.includes(right) || right.includes(left);
+}
+
+function pinnedTitleMatches(pinnedTitle, detailTitle) {
+  const pinned = normalizeTitleForCompare(pinnedTitle);
+  const detail = normalizeTitleForCompare(detailTitle);
+  if (!pinned || !detail || pinned.length < 6 || detail.length < 6) return false;
+  return pinned === detail || pinned.includes(detail) || detail.includes(pinned);
+}
+
+function titleMismatchDecision(candidate, detailTitle, skipReasons = []) {
+  const detail = String(detailTitle || '').trim();
+  if (!detail) return null;
+
+  for (const skip of skipReasons) {
+    if (skip?.reason !== 'pinned' || !skip.title) continue;
+    if (pinnedTitleMatches(skip.title, detail)) {
+      return {
+        reason: 'title_mismatch',
+        detail: `详情标题命中已跳过置顶标题: ${detail}`,
+      };
+    }
+  }
+
+  const title = candidateTitle(candidate);
+  if (title && !titlesLikelyMatch(title, detail)) {
+    return {
+      reason: 'title_mismatch',
+      detail: `卡片标题和详情标题不一致: ${title} / ${detail}`,
+    };
+  }
+  return null;
+}
+
+function duplicateItem(url) {
+  return {
+    url,
+    title: '候选内容已采集',
+    duplicate: true,
+    dataStatus: 'already_seen',
+    publishTime: null,
+    screenshotPath: null,
+  };
+}
+
+async function patrolCandidateUrls(client, acc, platform, postCandidates, progress, {
+  maxCandidates,
+  waitMs,
+  homepage = null,
+  windowStartISO = null,
+  skipReasons = [],
+}) {
   progress(`  找到 ${postCandidates.length} 个候选内容，最多检查 ${maxCandidates} 条`);
   let duplicateUrl = null;
   for (let i = 0; i < Math.min(postCandidates.length, maxCandidates); i++) {
     const candidate = normalizePostCandidate(postCandidates[i]);
     const postUrl = candidate?.url;
     if (!postUrl) continue;
+    if (candidate.isPinned) {
+      recordSkip(skipReasons, candidate, 'pinned', '置顶内容不算真正最新内容');
+      progress(`  候选 ${i + 1} 是置顶内容，跳过`);
+      continue;
+    }
+    const cardPublishTime = normalizedPublishTime(candidate.publishTime || candidate.publishRaw);
+    if (isBeforeWindow(cardPublishTime, windowStartISO)) {
+      recordSkip(skipReasons, candidate, 'out_of_window', `候选发布时间超出窗口: ${candidate.publishRaw || cardPublishTime}`);
+      progress(`  候选 ${i + 1} 发布时间超出窗口，停止该账号后续检查`);
+      break;
+    }
     if (contentExistsByUrl(postUrl)) {
       progress(`  候选 ${i + 1} 已采集，跳过`);
       duplicateUrl ||= postUrl;
@@ -624,7 +1061,8 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
 
     progress(`  进入候选 ${i + 1}: ${postUrl}`);
     if (platform === 'xiaohongshu' && candidate.rect && homepage) {
-      await openXiaohongshuCandidateFromHomepage(client, homepage, candidate, progress, { waitMs });
+      const opened = await openXiaohongshuCandidateFromHomepage(client, homepage, candidate, progress, { waitMs });
+      if (opened?.skipped === 'pinned') continue;
     } else {
       if (platform === 'xiaohongshu') progress('  候选缺少可点击卡片范围，改用详情链接兜底');
       await client.goto(postUrl);
@@ -651,11 +1089,28 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
     const raw = await extractPageRaw(client, platform);
     const data = buildCaptureData(raw, platform);
     const finalUrl = isDetailUrl(platform, data.pageUrl) ? data.pageUrl : postUrl;
+    const titleDecision = titleMismatchDecision(candidate, data.title, skipReasons);
+    if (titleDecision) {
+      recordSkip(skipReasons, candidate, titleDecision.reason, titleDecision.detail);
+      progress(`  候选标题校验失败，跳过: ${titleDecision.detail}`);
+      continue;
+    }
 
     if (contentExistsByUrl(finalUrl)) {
       progress('  详情页已采集，跳过');
       duplicateUrl ||= finalUrl;
       continue;
+    }
+    const detailPublishTime = normalizedPublishTime(data.pubTime);
+    if (!detailPublishTime) {
+      recordSkip(skipReasons, candidate, 'unknown_time', '详情页未识别到发布时间，按规则不保存');
+      progress('  详情页未识别到发布时间，跳过该候选');
+      continue;
+    }
+    if (isBeforeWindow(detailPublishTime, windowStartISO)) {
+      recordSkip(skipReasons, candidate, 'out_of_window', `详情页发布时间超出窗口: ${data.pubTime || detailPublishTime}`);
+      progress(`  详情页发布时间超出窗口，停止该账号后续检查: ${data.pubTime || detailPublishTime}`);
+      break;
     }
     if (isUnavailablePage(raw) || !hasCaptureSignal(data)) {
       progress(`  候选不可采，跳过: ${data.title || raw.pageUrl || postUrl}`);
@@ -695,12 +1150,16 @@ async function openXiaohongshuCandidateFromHomepage(client, homepage, candidate,
   }
 
   const fresh = await findPostCandidateByUrl(client, 'xiaohongshu', candidate.url);
+  if (fresh?.isPinned) {
+    progress('  回到主页后识别为置顶内容，跳过点击');
+    return { skipped: 'pinned' };
+  }
   const clickTarget = fresh?.rect ? fresh : candidate;
   if (!clickTarget.rect) {
     progress('  候选回到主页后未找到卡片范围，改用详情链接兜底');
     await client.goto(candidate.url);
     await client.sleep(waitMs);
-    return;
+    return { opened: true };
   }
 
   progress('  从主页卡片内随机位置长按点击进入');
@@ -718,6 +1177,7 @@ async function openXiaohongshuCandidateFromHomepage(client, homepage, candidate,
   } else {
     await client.sleep(1600 + Math.random() * 1200);
   }
+  return { opened: true };
 }
 
 async function waitForDetailUrl(client, platform, timeoutMs = 7000) {
@@ -799,6 +1259,37 @@ function postLinksScript(platform, targetUrl = null) {
       const toAbs = (href) => {
         try { return new URL(href, location.href).href; } catch { return null; }
       };
+      const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+      const parseCount = (raw) => {
+        if (raw === null || raw === undefined) return null;
+        if (typeof raw === 'number') return Number.isFinite(raw) ? Math.round(raw) : null;
+        let s = String(raw).trim();
+        if (!s) return null;
+        s = s.replace(/[０-９．＋，]/g, (c) => '0123456789.+,'['０１２３４５６７８９．＋，'.indexOf(c)] || c);
+        const m = s.match(/(\\d[\\d,]*\\.?\\d*)\\s*([kKwWmM千万亿]?)/);
+        if (!m) return null;
+        const num = parseFloat(m[1].replace(/,/g, ''));
+        if (!Number.isFinite(num)) return null;
+        const unit = { k: 1e3, K: 1e3, 千: 1e3, w: 1e4, W: 1e4, 万: 1e4, m: 1e6, M: 1e6, 亿: 1e8 }[m[2]] || 1;
+        return Math.round(num * unit);
+      };
+      const parseHumanTime = (raw) => {
+        const str = clean(raw);
+        if (!str) return null;
+        const now = new Date();
+        if (str.includes('刚刚')) return now.toISOString();
+        const min = str.match(/(\\d+)\\s*分钟前/);
+        if (min) return new Date(now.getTime() - Number(min[1]) * 60000).toISOString();
+        const hour = str.match(/(\\d+)\\s*小时前/);
+        if (hour) return new Date(now.getTime() - Number(hour[1]) * 3600000).toISOString();
+        const day = str.match(/(\\d+)\\s*天前/);
+        if (day) return new Date(now.getTime() - Number(day[1]) * 86400000).toISOString();
+        if (str.includes('昨天')) return new Date(now.getTime() - 86400000).toISOString();
+        if (/^\\d{1,2}-\\d{1,2}$/.test(str)) return new Date(\`\${now.getFullYear()}-\${str}\`).toISOString();
+        const d = new Date(str);
+        return Number.isNaN(d.getTime()) ? null : d.toISOString();
+      };
+      const firstTimeText = (text) => clean(text).match(/刚刚|\\d+\\s*(?:分钟前|小时前|天前)|昨天|\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}|\\d{1,2}[-/]\\d{1,2}/)?.[0] || null;
       const detailKey = (href) => {
         try {
           const u = new URL(href, location.href);
@@ -841,11 +1332,130 @@ function postLinksScript(platform, targetUrl = null) {
           if (rect.width > innerWidth * 0.92 || rect.height > innerHeight * 0.95) continue;
           const name = [el.tagName, el.id, String(el.className || '')].join(' ');
           const likelyCard = el === link
-            || /note|feed|card|cover|item|waterfall|media|作品|瀑布/i.test(name)
+            || /note|feed|card|cover|item|waterfall|media|video|post|aweme|douyin|作品|瀑布/i.test(name)
             || ['ARTICLE', 'LI', 'SECTION'].includes(el.tagName);
           if (likelyCard) rects.push(rect);
         }
         return rects.find((r) => r.width >= 80 && r.height >= 80) || rects[0] || visibleRect(link);
+      };
+      const findCardElement = (link) => (
+        link.closest('article, li, section, [class*="note"], [class*="feed"], [class*="card"], [class*="item"], [class*="cover"], [class*="video"], [class*="post"], [class*="aweme"], [data-e2e*="video"]')
+        || link
+      );
+      const parseColor = (value) => {
+        const s = String(value || '').trim();
+        let m = s.match(/rgba?\\(\\s*(\\d+(?:\\.\\d+)?)\\s*,\\s*(\\d+(?:\\.\\d+)?)\\s*,\\s*(\\d+(?:\\.\\d+)?)/i);
+        if (m) return { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]) };
+        m = s.match(/#([0-9a-f]{6})\\b/i);
+        if (m) {
+          const hex = m[1];
+          return {
+            r: parseInt(hex.slice(0, 2), 16),
+            g: parseInt(hex.slice(2, 4), 16),
+            b: parseInt(hex.slice(4, 6), 16),
+          };
+        }
+        m = s.match(/#([0-9a-f]{3})\\b/i);
+        if (m) {
+          const hex = m[1].split('').map((c) => c + c).join('');
+          return {
+            r: parseInt(hex.slice(0, 2), 16),
+            g: parseInt(hex.slice(2, 4), 16),
+            b: parseInt(hex.slice(4, 6), 16),
+          };
+        }
+        return null;
+      };
+      const isRed = (color) => color && color.r >= 150 && color.r > color.g * 1.25 && color.r > color.b * 1.15;
+      const isYellow = (color) => color && color.r >= 150 && color.g >= 110 && color.b <= 150 && color.r >= color.g * 0.75;
+      const platformPinColor = (el) => {
+        const values = [];
+        for (let cur = el, depth = 0; cur && cur !== document.body && depth < 3; cur = cur.parentElement, depth++) {
+          const style = getComputedStyle(cur);
+          values.push(style.color, style.backgroundColor, style.borderColor, style.borderTopColor, cur.getAttribute('style') || '');
+        }
+        return values.some((value) => {
+          const color = parseColor(value);
+          if (platform === 'xiaohongshu') return isRed(color) || /red|#ff2442|#fe2c55/i.test(String(value || ''));
+          if (platform === 'douyin') return isYellow(color) || /yellow|gold|#face15|#ffd|#ffc|#ffcc/i.test(String(value || ''));
+          return false;
+        });
+      };
+      const inCardTopLeft = (badgeRect, cardRect) => {
+        if (!badgeRect || !cardRect) return false;
+        const centerX = badgeRect.left + badgeRect.width / 2;
+        const centerY = badgeRect.top + badgeRect.height / 2;
+        const leftLimit = cardRect.left + cardRect.width * 0.45;
+        const topLimit = cardRect.top + Math.max(54, cardRect.height * 0.32);
+        return centerX <= leftLimit && centerY <= topLimit;
+      };
+      const pinBadgeText = (el) => clean([
+        el.getAttribute('aria-label'),
+        el.getAttribute('title'),
+        el.getAttribute('alt'),
+        el.innerText || el.textContent,
+      ].filter(Boolean).join(' '));
+      const isPinnedContent = (card, cardRect) => {
+        const baseRect = cardRect || visibleRect(card);
+        if (!card || !baseRect) return false;
+        const nodes = [card, ...card.querySelectorAll('*')].slice(0, 500);
+        for (const node of nodes) {
+          const text = pinBadgeText(node);
+          if (!/(置顶|Pinned)/i.test(text)) continue;
+          const badgeRect = visibleRect(node);
+          if (!inCardTopLeft(badgeRect, baseRect)) continue;
+          if (platformPinColor(node) || text.length <= 24) return true;
+        }
+        return false;
+      };
+      const findLikeRaw = (card) => {
+        if (!card) return null;
+        const selectors = [
+          '[aria-label*="点赞"]',
+          '[aria-label*="赞"]',
+          '[title*="点赞"]',
+          '[title*="赞"]',
+          '[class*="like"] [class*="count"]',
+          '[class*="like"]',
+          '[class*="liked"]',
+          '[class*="赞"]',
+        ];
+        for (const selector of selectors) {
+          for (const el of card.querySelectorAll(selector)) {
+            const text = clean([el.getAttribute('aria-label'), el.getAttribute('title'), el.innerText || el.textContent].filter(Boolean).join(' '));
+            const m = text.match(/(?:点赞|赞|like)?\\s*[:：]?\\s*([\\d.,]+\\s*[万千wkWK]?\\+?)/i)
+              || text.match(/([\\d.,]+\\s*[万千wkWK]?\\+?)\\s*(?:点赞|赞|like)/i);
+            if (m) return m[1];
+          }
+        }
+        return null;
+      };
+      const findPublishRaw = (card) => {
+        if (!card) return null;
+        for (const el of card.querySelectorAll('time, [datetime], [class*="time"], [class*="date"]')) {
+          const text = clean([el.getAttribute('datetime'), el.getAttribute('title'), el.innerText || el.textContent].filter(Boolean).join(' '));
+          const hit = firstTimeText(text);
+          if (hit) return hit;
+        }
+        return firstTimeText(card.innerText || card.textContent || '');
+      };
+      const findTitleRaw = (card, link, cardText) => {
+        const candidates = [
+          link.getAttribute('title'),
+          link.getAttribute('aria-label'),
+          link.querySelector('img')?.alt,
+          card?.querySelector('[class*="title"], [class*="desc"], [class*="caption"]')?.innerText,
+          card?.querySelector('[title]')?.getAttribute('title'),
+        ].map(clean).filter(Boolean);
+        const fromAttr = candidates.find((text) => text && !/(置顶|点赞|收藏|评论|转发|分享)/.test(text));
+        if (fromAttr) return fromAttr.slice(0, 180);
+        return clean(cardText)
+          .replace(/置顶|Pinned/ig, ' ')
+          .replace(/\\d[\\d,.]*\\s*[万千wkWKmM]?\\+?\\s*(?:点赞|赞|收藏|评论|转发|分享)?/g, ' ')
+          .replace(/刚刚|\\d+\\s*(?:分钟前|小时前|天前)|昨天|\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}|\\d{1,2}[-/]\\d{1,2}/g, ' ')
+          .replace(/\\s+/g, ' ')
+          .trim()
+          .slice(0, 180);
       };
       const out = [];
       const seen = new Set();
@@ -855,15 +1465,46 @@ function postLinksScript(platform, targetUrl = null) {
         const key = detailKey(href);
         if (!key || seen.has(key)) return;
         if (targetKey && key !== targetKey) return;
-        const rect = platform === 'xiaohongshu' ? findCardRect(link) : null;
+        const rect = findCardRect(link);
+        const card = findCardElement(link);
+        const cardText = clean(card?.innerText || card?.textContent || link.innerText || link.textContent || '').slice(0, 800);
+        const isPinned = isPinnedContent(card, rect || visibleRect(card) || visibleRect(link));
+        const titleRaw = findTitleRaw(card, link, cardText);
+        const pinRaw = isPinned ? '置顶' : null;
         if (platform === 'xiaohongshu') {
           if (!rect && !allowWithoutRect) return;
+          const likeRaw = findLikeRaw(card);
+          const publishRaw = findPublishRaw(card);
           seen.add(key);
-          out.push({ url: href, rect, viewport: { width: innerWidth, height: innerHeight } });
+          out.push({
+            url: href,
+            rect,
+            viewport: { width: innerWidth, height: innerHeight },
+            isPinned,
+            pinRaw,
+            titleRaw,
+            title: titleRaw,
+            likeRaw,
+            likeCount: parseCount(likeRaw),
+            publishRaw,
+            publishTime: parseHumanTime(publishRaw),
+            cardText,
+          });
           return;
         }
         seen.add(key);
-        out.push(href);
+        out.push({
+          url: href,
+          rect,
+          viewport: rect ? { width: innerWidth, height: innerHeight } : null,
+          isPinned,
+          pinRaw,
+          titleRaw,
+          title: titleRaw,
+          publishRaw: findPublishRaw(card),
+          publishTime: parseHumanTime(findPublishRaw(card)),
+          cardText,
+        });
       };
       const links = [...document.querySelectorAll('a[href]')];
       for (const a of links) {
@@ -909,10 +1550,26 @@ function normalizePostCandidate(item) {
   if (typeof item === 'string') return { url: item, rect: null, viewport: null };
   if (!item || typeof item !== 'object') return null;
   const url = typeof item.url === 'string' ? item.url : '';
+  const likeRaw = item.likeRaw ?? item.like_raw ?? null;
+  const likeCount = item.likeCount ?? item.like_count ?? parseCount(likeRaw);
+  const publishRaw = item.publishRaw ?? item.publish_raw ?? null;
+  const publishTime = item.publishTime ?? item.publish_time ?? normalizedPublishTime(publishRaw);
+  const numericLike = likeCount === null || likeCount === undefined || likeCount === '' ? null : Number(likeCount);
+  const titleRaw = item.titleRaw ?? item.title_raw ?? item.title ?? '';
+  const pinRaw = item.pinRaw ?? item.pin_raw ?? null;
   return {
     url,
     rect: normalizeRect(item.rect),
     viewport: normalizeViewport(item.viewport),
+    isPinned: item.isPinned === true || item.is_pinned === true,
+    pinRaw,
+    titleRaw: typeof titleRaw === 'string' ? titleRaw : '',
+    title: typeof item.title === 'string' ? item.title : (typeof titleRaw === 'string' ? titleRaw : ''),
+    likeRaw,
+    likeCount: Number.isFinite(numericLike) ? numericLike : null,
+    publishRaw,
+    publishTime: normalizedPublishTime(publishTime),
+    cardText: typeof item.cardText === 'string' ? item.cardText : '',
   };
 }
 
@@ -1194,7 +1851,7 @@ if (fileURLToPath(import.meta.url) === process.argv[1]) {
     });
     console.log(JSON.stringify(result, null, 2));
   } finally {
-    client.close();
+    await client.close();
     if (chrome.closeOnDone && chrome.child) killChrome(chrome.child);
   }
 }

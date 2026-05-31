@@ -7,7 +7,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const PLATFORM_LABEL = {
-  douyin: '抖音', xiaohongshu: '小红书', other: '其他',
+  douyin: '抖音', xiaohongshu: '小红书', wechat_channels: '视频号', other: '其他',
 };
 const STATUS_LABEL = {
   confirmed: '已确认', needs_review: '待复核', missing_share: '缺转发数',
@@ -15,6 +15,8 @@ const STATUS_LABEL = {
   duplicate: '重复', archived: '已归档', monitoring: '发酵中',
 };
 let accountsCache = [];
+let accountSuggestionCache = [];
+const ACCOUNT_SEARCH_PLATFORMS = ['xiaohongshu', 'douyin'];
 
 async function api(path, opts = {}) {
   const res = await fetch(`/api${path}`, {
@@ -360,10 +362,10 @@ $('#candRunRpa').addEventListener('click', async (e) => {
   btn.disabled = true;
   btn.textContent = '巡检中...';
   try {
-    toast('正在启动已登录 Chrome，按平台多标签巡检账号池...', 'ok');
+    toast('正在启动已登录 Chrome，按设置批量巡检账号池...', 'ok');
     const res = await api('/patrol/run', { method: 'POST' });
     if (res.error) throw new Error(res.error);
-    const tabInfo = res.tabMode === 'multi' ? `，多标签 ${res.maxTabsPerPlatform || 1}/平台` : '';
+    const tabInfo = res.tabMode === 'multi' ? `，每轮 ${res.maxTabsPerBatch || res.maxTabsPerPlatform || 1} 个账号标签` : '';
     toast(`自动巡检完成：发现 ${res.discovered || 0} 个账号，新增 ${res.newItems || 0} 条${tabInfo}`, 'ok');
     loadCandidates();
     loadOverview();
@@ -490,20 +492,24 @@ async function loadAccounts() {
     p => `<option ${p===sel?'selected':''}>${p}</option>`
   ).join('');
   $('#acTable').innerHTML = rows.length ? `
-    <table><thead><tr><th>巡检</th><th>平台</th><th>昵称</th><th>来源</th><th>最近发现</th><th>最近巡检</th><th>分类</th><th>优先级</th><th>主页链接</th><th></th></tr></thead><tbody>
+    <table class="ac-table"><thead><tr>
+      <th class="col-chk">巡检</th><th class="col-plat">平台</th><th class="col-nick">昵称</th>
+      <th class="col-src">来源</th><th class="col-meta">最近发现</th><th class="col-meta">最近巡检</th>
+      <th class="col-cat">分类</th><th class="col-prio">优先级</th><th class="col-url">主页链接</th><th class="col-act"></th>
+    </tr></thead><tbody>
     ${rows.map((a) => `<tr data-acid="${a.id}">
-      <td><input type="checkbox" data-af="monitor_enabled" ${a.monitor_enabled ? 'checked' : ''} /></td>
-      <td><select data-af="platform">${platformOpts(a.platform)}</select></td>
-      <td><input data-af="nickname" value="${esc(a.nickname)}" style="min-width:80px" /></td>
-      <td>${esc(a.discovery_source || '手动')}</td>
-      <td>${a.last_discovered_at ? esc(a.last_discovered_at.slice(0, 10)) : '—'}</td>
-      <td>${a.last_patrolled_at ? esc(a.last_patrolled_at.slice(0, 10)) : '—'}</td>
-      <td><input data-af="category" value="${esc(a.category || '')}" style="min-width:60px" /></td>
-      <td><select data-af="priority">${prioOpts(a.priority||'B')}</select></td>
-      <td><input data-af="homepage_url" value="${esc(a.homepage_url || '')}" placeholder="主页链接" style="min-width:150px;font-size:11px" /></td>
-      <td style="white-space:nowrap">
+      <td class="col-chk"><input type="checkbox" data-af="monitor_enabled" ${a.monitor_enabled ? 'checked' : ''} /></td>
+      <td class="col-plat"><select data-af="platform">${platformOpts(a.platform)}</select></td>
+      <td class="col-nick"><input data-af="nickname" value="${esc(a.nickname)}" /></td>
+      <td class="col-src"><span class="src-tag">${esc(a.discovery_source || '手动')}</span></td>
+      <td class="col-meta">${a.last_discovered_at ? esc(a.last_discovered_at.slice(0, 10)) : '—'}</td>
+      <td class="col-meta">${a.last_patrolled_at ? esc(a.last_patrolled_at.slice(0, 10)) : '—'}</td>
+      <td class="col-cat"><input data-af="category" value="${esc(a.category || '')}" placeholder="未分类" /></td>
+      <td class="col-prio"><select data-af="priority">${prioOpts(a.priority||'B')}</select></td>
+      <td class="col-url"><input data-af="homepage_url" value="${esc(a.homepage_url || '')}" placeholder="粘贴主页链接" /></td>
+      <td class="col-act">
         <button data-save="${a.id}">保存</button>
-        <button data-del="${a.id}">删除</button>
+        <button data-del="${a.id}" class="danger">删除</button>
       </td>
     </tr>`).join('')}
     </tbody></table>` : '<p class="muted">还没有账号。用上方「手动填写」或「搜索填空」添加。</p>';
@@ -567,29 +573,168 @@ $('#acDiscoverFollows').addEventListener('click', async (e) => {
   }
 });
 
-// 方式二「搜索填空」：先选平台 → 用昵称跳到该平台搜索页找到本人 → 回填主页链接后添加。
 // 搜索链接是确定性拼接（与 server/lib/platform-links.js 一致），不经过 AI，绝不给死链。
-function acSearchUrl(platform, nickname) {
+function platformSearchUrl(platform, nickname) {
   const q = encodeURIComponent(String(nickname || '').trim());
   if (!q) return '';
   switch (platform) {
     case 'douyin': return `https://www.douyin.com/search/${q}?type=user`;
-    case 'xiaohongshu': return `https://www.xiaohongshu.com/search_result?keyword=${q}&type=user`;
+    case 'xiaohongshu': return `https://www.xiaohongshu.com/search_result?keyword=${q}`;
+    case 'wechat_channels': return `https://www.google.com/search?q=${q}+%E5%BE%AE%E4%BF%A1%E8%A7%86%E9%A2%91%E5%8F%B7`;
     default: return `https://www.google.com/search?q=${q}`;
   }
 }
-function syncSearchJumpLabel() {
-  const p = $('#acSearchPlatform').value;
-  $('#acSearchJump').textContent = `🔍 去${PLATFORM_LABEL[p] || '平台'}搜索`;
-}
-$('#acSearchPlatform').addEventListener('change', syncSearchJumpLabel);
-syncSearchJumpLabel();
 
-$('#acSearchJump').addEventListener('click', () => {
+function fallbackAccountSearchLinks(nickname) {
+  const name = String(nickname || '').trim();
+  if (!name) return [];
+  return ACCOUNT_SEARCH_PLATFORMS.map((platform) => ({
+    platform,
+    nickname: name,
+    homepage_url: '',
+    search_url: platformSearchUrl(platform, name),
+    link_verified: false,
+  }));
+}
+
+// 右侧「搜索填空」运行在原生 WebKit 窗口里，target="_blank" 可能失效；
+// href 只做可见兜底，实际点击时用当前窗口跳到平台搜索页。
+function syncSearchJumpLink() {
+  const p = $('#acSearchPlatform').value;
   const nick = $('#acSearchNick').value.trim();
-  if (!nick) return toast('请先输入昵称或关键词', 'bad');
-  window.open(acSearchUrl($('#acSearchPlatform').value, nick), '_blank', 'noopener');
+  const link = $('#acSearchJump');
+  const url = platformSearchUrl(p, nick);
+  link.textContent = `打开${PLATFORM_LABEL[p] || '平台'}搜索`;
+  link.href = url || '#';
+}
+$('#acSearchPlatform').addEventListener('change', syncSearchJumpLink);
+$('#acSearchNick').addEventListener('input', syncSearchJumpLink);
+syncSearchJumpLink();
+
+$('#acSearchJump').addEventListener('click', (e) => {
+  e.preventDefault();
+  const nick = $('#acSearchNick').value.trim();
+  if (!nick) {
+    return toast('请先输入昵称或关键词', 'bad');
+  }
+  const url = platformSearchUrl($('#acSearchPlatform').value, nick);
+  if (!url) {
+    return toast('未生成搜索链接，请检查平台和昵称', 'bad');
+  }
+  window.location.assign(url);
   $('#acSearchHint').textContent = '已打开搜索页 → 找到本人后，复制其主页链接粘贴到上方，再点「添加到账号池」。';
+});
+
+function normalizeAccountSuggestion(item, fallbackNickname = '') {
+  const platform = item?.platform || 'other';
+  const nickname = String(item?.nickname || fallbackNickname || '').trim();
+  return {
+    platform,
+    nickname,
+    homepage_url: String(item?.homepage_url || '').trim(),
+    search_url: String(item?.search_url || platformSearchUrl(platform, nickname) || '').trim(),
+    category: String(item?.category || '').trim(),
+    priority: ['S', 'A', 'B'].includes(item?.priority) ? item.priority : 'B',
+    monitor_enabled: item?.monitor_enabled !== false,
+    description: String(item?.description || '').trim(),
+    link_verified: item?.link_verified === true,
+  };
+}
+
+function accountSuggestionUrl(item) {
+  return item.homepage_url || item.search_url || platformSearchUrl(item.platform, item.nickname);
+}
+
+function renderAiAccountResults(data = {}, query = '', error = '') {
+  const shortcuts = (Array.isArray(data.search_links) && data.search_links.length
+    ? data.search_links
+    : fallbackAccountSearchLinks(query)).map((item) => normalizeAccountSuggestion(item, query));
+  accountSuggestionCache = (Array.isArray(data.suggestions) ? data.suggestions : [])
+    .map((item) => normalizeAccountSuggestion(item, query))
+    .filter((item) => ACCOUNT_SEARCH_PLATFORMS.includes(item.platform) && item.nickname);
+
+  const shortcutHtml = shortcuts.length ? `
+    <div class="ac-ai-shortcuts">
+      ${shortcuts.map((item) => `<a class="filebtn" href="${esc(accountSuggestionUrl(item))}" target="_blank" rel="noopener noreferrer">打开${esc(PLATFORM_LABEL[item.platform] || item.platform)}搜索</a>`).join('')}
+    </div>` : '';
+
+  const suggestionsHtml = accountSuggestionCache.length
+    ? accountSuggestionCache.map((item, idx) => {
+      const label = PLATFORM_LABEL[item.platform] || item.platform;
+      const openUrl = accountSuggestionUrl(item);
+      const openText = item.link_verified ? '打开主页' : `打开${label}搜索`;
+      const meta = [label, item.category || '未分类', item.priority].filter(Boolean).join(' ｜ ');
+      return `
+        <div class="ac-ai-item">
+          <div class="ac-ai-title">${esc(item.nickname)}</div>
+          <div class="muted">${esc(meta)}${item.description ? ` ｜ ${esc(item.description)}` : ''}</div>
+          <div class="ac-ai-actions">
+            ${openUrl ? `<a class="filebtn" href="${esc(openUrl)}" target="_blank" rel="noopener noreferrer">${esc(openText)}</a>` : ''}
+            <button data-ac-ai-fill="${idx}">填到搜索填空</button>
+            <button class="primary" data-ac-ai-add="${idx}">添加到账号池</button>
+          </div>
+        </div>`;
+    }).join('')
+    : `<p class="muted">${error ? 'AI 搜索暂不可用，先用上方平台搜索链接定位。' : 'AI 没有返回候选，先用上方平台搜索链接定位。'}</p>`;
+
+  $('#acAiResults').innerHTML = `
+    ${error ? `<p class="muted">AI 搜索失败：${esc(error)}</p>` : ''}
+    ${shortcutHtml}
+    ${suggestionsHtml}`;
+
+  $$('#acAiResults [data-ac-ai-fill]').forEach((b) => b.addEventListener('click', () => {
+    const item = accountSuggestionCache[Number(b.dataset.acAiFill)];
+    if (!item) return;
+    $('#acSearchPlatform').value = item.platform === 'wechat_channels' ? 'other' : item.platform;
+    $('#acSearchNick').value = item.nickname;
+    $('#acSearchUrl').value = item.homepage_url;
+    syncSearchJumpLink();
+    $('#acSearchHint').textContent = item.homepage_url
+      ? '已填入真实主页链接，可直接添加到账号池。'
+      : '已填入昵称；点左侧平台搜索链接找到本人主页后再回填。';
+  }));
+
+  $$('#acAiResults [data-ac-ai-add]').forEach((b) => b.addEventListener('click', async () => {
+    const item = accountSuggestionCache[Number(b.dataset.acAiAdd)];
+    if (!item) return;
+    await api('/accounts', {
+      method: 'POST',
+      body: JSON.stringify({
+        platform: item.platform,
+        nickname: item.nickname,
+        homepage_url: item.homepage_url,
+        category: item.category,
+        priority: item.priority,
+        monitor_enabled: item.monitor_enabled,
+      }),
+    });
+    accountsCache = [];
+    toast('已添加', 'ok');
+    loadAccounts();
+  }));
+}
+
+$('#acAiQuery').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#acAiSearch').click();
+});
+
+$('#acAiSearch').addEventListener('click', async (e) => {
+  const q = $('#acAiQuery').value.trim();
+  if (!q) return toast('请先输入要搜索的名称', 'bad');
+  const btn = e.target;
+  btn.disabled = true;
+  btn.textContent = '搜索中...';
+  renderAiAccountResults({ search_links: fallbackAccountSearchLinks(q), suggestions: [] }, q);
+  try {
+    const data = await api('/accounts/search-suggest', { method: 'POST', body: JSON.stringify({ q }) });
+    renderAiAccountResults(data, q);
+  } catch (err) {
+    renderAiAccountResults({ search_links: fallbackAccountSearchLinks(q), suggestions: [] }, q, err.message);
+    toast('AI 搜索暂不可用，已显示平台搜索链接', 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'AI 搜索';
+  }
 });
 
 $('#acSearchAdd').addEventListener('click', async () => {
@@ -708,6 +853,7 @@ async function loadSettings() {
   const wm = (c.schedule.window || 'last_1_day').match(/last_(\d+)_days?/);
   $('#stSchedDays').value = wm ? Number(wm[1]) : 1;
   $('#stBudget').value = c.budgetDailyTokens || 0;
+  $('#stRpaMaxTabs').value = c.rpa?.maxTabsPerBatch || 10;
   $('#stToken').textContent = c.pairingToken;
   $('#stEndpoint').textContent = `http://127.0.0.1:${PORT}`;
   renderSettingsKeyState(c);
@@ -857,8 +1003,13 @@ $('#stSaveSettings').addEventListener('click', async () => {
       time: $('#stSchedTime').value || '09:00',
       window: windowStr($('#stSchedDays').value),
     },
+    rpa: {
+      maxTabsPerBatch: Number($('#stRpaMaxTabs').value) || 10,
+    },
   };
-  await api('/settings', { method: 'PUT', body: JSON.stringify(body) });
+  const pub = await api('/settings', { method: 'PUT', body: JSON.stringify(body) });
+  $('#stRpaMaxTabs').value = pub.rpa?.maxTabsPerBatch || 10;
+  $('#stSaveMsg').textContent = `已保存：每轮 ${pub.rpa?.maxTabsPerBatch || 10} 个账号标签`;
   toast('设置已保存', 'ok'); loadOverview();
 });
 $('#stCopyToken').addEventListener('click', async () => {

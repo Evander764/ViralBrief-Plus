@@ -4,7 +4,7 @@ import { platformSearchUrl, looksLikeRealProfile, withUsableLink } from '../serv
 
 test('platformSearchUrl：各平台生成可用搜索链接（昵称已编码）', () => {
   assert.equal(platformSearchUrl('douyin', '数字生命卡兹克'), 'https://www.douyin.com/search/%E6%95%B0%E5%AD%97%E7%94%9F%E5%91%BD%E5%8D%A1%E5%85%B9%E5%85%8B?type=user');
-  assert.match(platformSearchUrl('xiaohongshu', '老王'), /xiaohongshu\.com\/search_result\?keyword=/);
+  assert.equal(platformSearchUrl('xiaohongshu', '老王'), 'https://www.xiaohongshu.com/search_result?keyword=%E8%80%81%E7%8E%8B');
   assert.match(platformSearchUrl('wechat_channels', '老张'), /google\.com\/search/);
   assert.equal(platformSearchUrl('douyin', ''), '');
 });

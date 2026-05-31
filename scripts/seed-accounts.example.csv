@@ -1,0 +1,4 @@
+platform,nickname,homepage_url,category,priority,monitor_enabled
+douyin,示例-商业老王,https://www.douyin.com/user/EXAMPLE,商业,S,false
+xiaohongshu,示例-增长小李,https://www.xiaohongshu.com/user/profile/EXAMPLE,营销,A,false
+wechat_channels,示例-创业老张,,创业,B,false

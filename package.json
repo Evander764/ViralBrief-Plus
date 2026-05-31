@@ -1,0 +1,31 @@
+{
+  "name": "viral-brief-plus",
+  "version": "1.0.0",
+  "description": "Viral Brief Plus — 每日自动化内容抓取、筛选与整理工具。",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
+    "report": "node --disable-warning=ExperimentalWarning scripts/run-report.js",
+    "patrol": "node --disable-warning=ExperimentalWarning server/rpa/patrol.js",
+    "rpa:chrome": "'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --user-data-dir=\"$HOME/Library/Application Support/Google/Chrome\" --profile-directory=\"${VBP_RPA_CHROME_PROFILE:-${VB_RPA_CHROME_PROFILE:-Default}}\" --remote-debugging-port=9222",
+    "package:mac": "node scripts/package-macos-app.js"
+  },
+  "keywords": [
+    "viral",
+    "content-radar",
+    "local-first",
+    "sqlite",
+    "ai",
+    "douyin",
+    "xiaohongshu",
+    "wechat-channels"
+  ],
+  "license": "MIT",
+  "private": true,
+  "dependencies": {}
+}

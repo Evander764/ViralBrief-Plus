@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "爆款选题雷达 Local — 采集助手",
+  "version": "1.0.0",
+  "description": "一键把当前抖音/小红书/视频号/公众号内容保存到本地桌面端；人工确认点赞与转发后，进入每日爆款选题日报。",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "*://*.douyin.com/*",
+    "*://*.xiaohongshu.com/*",
+    "*://*.weixin.qq.com/*",
+    "*://channels.weixin.qq.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "保存当前内容到爆款选题雷达"
+  },
+  "options_page": "options.html"
+}

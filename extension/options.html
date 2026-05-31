@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1f2937; max-width: 520px; margin: 40px auto; padding: 0 20px; }
+    h1 { font-size: 18px; }
+    label { display: block; margin: 16px 0 4px; font-size: 13px; color: #6b7280; }
+    input { width: 100%; padding: 9px 10px; border: 1px solid #e5e7eb; border-radius: 8px; font: inherit; }
+    button { margin-top: 18px; margin-right: 8px; padding: 9px 16px; border: 1px solid #2563eb; background: #2563eb; color: #fff; border-radius: 8px; cursor: pointer; }
+    button.sec { background: #fff; color: #2563eb; }
+    .msg { margin-top: 12px; font-size: 13px; } .ok { color: #16a34a; } .bad { color: #dc2626; }
+    .hint { color: #6b7280; font-size: 12.5px; margin-top: 6px; }
+    code { background: #f1f5f9; padding: 1px 5px; border-radius: 5px; }
+  </style>
+</head>
+<body>
+  <h1>桌面端连接配置</h1>
+  <p class="hint">在桌面端仪表盘的「设置 → 浏览器插件配对」里复制地址与 token，填到这里。</p>
+  <label>本机服务地址</label>
+  <input id="endpoint" placeholder="http://127.0.0.1:8787" />
+  <label>配对 token</label>
+  <input id="token" placeholder="粘贴桌面端显示的 token" />
+  <div>
+    <button id="save">保存</button>
+    <button id="test" class="sec">测试连接</button>
+  </div>
+  <div id="msg" class="msg"></div>
+  <script src="options.js"></script>
+</body>
+</html>

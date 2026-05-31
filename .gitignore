@@ -1,0 +1,15 @@
+.DS_Store
+
+# Local runtime data and secrets.
+data/
+.env
+.env.*
+!.env.example
+
+# Generated artifacts.
+dist/
+tmp/
+coverage/
+
+# Dependency folders if someone installs tooling locally.
+node_modules/

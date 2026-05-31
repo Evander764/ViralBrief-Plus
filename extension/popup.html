@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { width: 340px; margin: 0; font: 13px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1f2937; }
+    header { background: #2563eb; color: #fff; padding: 10px 14px; font-weight: 600; }
+    .wrap { padding: 12px 14px; }
+    .shot { width: 100%; height: 120px; object-fit: cover; border-radius: 8px; border: 1px solid #e5e7eb; background: #f1f5f9; display: block; margin-bottom: 10px; }
+    label { display: block; font-size: 11.5px; color: #6b7280; margin: 8px 0 3px; }
+    input, select { width: 100%; padding: 6px 8px; border: 1px solid #e5e7eb; border-radius: 7px; font: inherit; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .grid4 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button { width: 100%; padding: 9px; border: none; border-radius: 8px; background: #2563eb; color: #fff; font: inherit; font-weight: 600; cursor: pointer; margin-top: 12px; }
+    button:hover { background: #1d4ed8; }
+    .msg { font-size: 12px; margin-top: 8px; min-height: 16px; }
+    .msg.ok { color: #16a34a; } .msg.bad { color: #dc2626; }
+    .hint { font-size: 11px; color: #6b7280; margin-top: 6px; }
+    a { color: #2563eb; }
+  </style>
+</head>
+<body>
+  <header>📡 保存当前内容</header>
+  <div class="wrap">
+    <img id="shot" class="shot" alt="页面截图预览" />
+    <div class="grid">
+      <div><label>平台</label>
+        <select id="platform">
+          <option value="douyin">抖音</option>
+          <option value="xiaohongshu">小红书</option>
+          <option value="wechat_channels">视频号</option>
+          <option value="wechat_article">公众号文章</option>
+          <option value="other">其他</option>
+        </select>
+      </div>
+      <div><label>类型</label>
+        <select id="content_type"><option value="video">视频</option><option value="article">图文/文章</option></select>
+      </div>
+    </div>
+    <label>标题/封面文案</label><input id="title" />
+    <label>作者</label><input id="author_name" />
+    <div class="grid4">
+      <div><label>点赞</label><input id="like" placeholder="如 1.2w" /></div>
+      <div><label>转发/分享</label><input id="share" placeholder="如 2100" /></div>
+      <div><label>评论</label><input id="comment" /></div>
+      <div><label>收藏</label><input id="favorite" /></div>
+    </div>
+    <label>发布时间（可选）</label><input id="publish_time" type="date" />
+    <button id="save">确认并保存到桌面端</button>
+    <div id="msg" class="msg"></div>
+    <div class="hint">未识别到的指标请手动填写。转发数缺失时不会被算作达标。<a href="#" id="openOptions">配置桌面端连接</a></div>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

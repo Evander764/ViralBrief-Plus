@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#06070d" />
+  <title>Viral Brief Plus</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script>
+    window.__VBP_TOKEN__ = '%%VBP_TOKEN%%';
+    window.__VBP_PORT__ = %%VBP_PORT%%;
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Viral Brief <span>Plus</span></div>
+    <nav class="tabs">
+      <button data-tab="overview" class="active">概览</button>
+      <button data-tab="candidates">今日候选 <span class="dot" id="candCount"></span></button>
+      <button data-tab="library">内容库</button>
+      <button data-tab="accounts">账号池</button>
+      <button data-tab="reports">每日结果</button>
+      <button data-tab="settings">设置</button>
+    </nav>
+    <div class="keystate" id="keyState"></div>
+  </header>
+
+  <main>
+    <!-- 概览 -->
+    <section id="tab-overview" class="tab">
+      <div class="cards" id="statCards"></div>
+      <div class="panel">
+        <h3>生成每日爆款选题日报</h3>
+        <div class="row">
+          <label>回溯天数
+            <input id="ovDays" type="number" min="1" max="30" value="1" style="width:70px" />
+          </label>
+          <label class="check" style="font-size:13px; margin-left:12px;">
+            <input type="checkbox" id="ovAutoCollect" checked /> 先自动采集（RPA）
+          </label>
+          <button class="primary" id="ovGenerate">立即生成日报</button>
+          <span class="muted" id="ovGenMsg"></span>
+        </div>
+        <div id="ovProgress" style="display:none; margin-top:10px; padding:10px; background:var(--bg2); border-radius:6px; font-size:13px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="spinner" style="width:16px;height:16px;border:2px solid var(--brand);border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;display:inline-block;"></span>
+            <span id="ovProgressText">准备中...</span>
+          </div>
+        </div>
+        <p class="muted">入选条件（硬阈值，由系统确定性判定）：来自账号池的抖音 / 小红书内容，点赞 / 转发 / 收藏任一项 &gt; 1000。1000+ 按超过 1000 处理。</p>
+        <p class="muted" style="font-size:12px;">勾选「先自动采集」后，系统会按平台同时打开多个账号标签页巡检；主页缺失或不可用时，会先搜索昵称，再进入真实账号页提取最新内容数据并截图存档。</p>
+      </div>
+    </section>
+
+    <!-- 今日候选 -->
+    <section id="tab-candidates" class="tab hidden">
+      <div class="panel">
+        <h3>今日候选池 <span class="muted">— 待你确认/补录指标的内容</span></h3>
+        <p class="muted">稳定页面数据可自动入选；截图/OCR 或弱文本推断会留在候选池待复核。正式日报只看小红书 / 抖音，且点赞、转发或收藏任一项超过 1000。</p>
+        <div class="row accent-row" style="margin-bottom: 15px;">
+          <div style="flex: 1;">
+            <b style="color: var(--brand-strong);">自动巡检</b>
+            <div class="muted" style="font-size: 13px; margin-top: 4px;">使用你已登录的 Chrome 巡检账号池；小红书和抖音都会按账号批量打开多个标签页，没有真实主页时会先搜索昵称。</div>
+          </div>
+          <button class="primary" id="candRunRpa" style="align-self: center;">一键自动巡检</button>
+        </div>
+        <div class="row" style="margin-bottom: 15px; gap: 8px;">
+          <div style="flex:1; min-width:240px;">
+            <b style="color: var(--brand-strong);">粘贴链接抓取</b>
+            <div class="muted" style="font-size:13px; margin-top:4px;">把单条内容链接贴进来，服务端尝试抓取标题/指标。抓到的数字默认进「待补录」，需你核对确认（平台可能返回不全或验证页）。</div>
+          </div>
+          <input id="ingestUrl" placeholder="https://www.douyin.com/video/... 或 小红书笔记链接" style="flex:2; min-width:240px;" />
+          <button class="primary" id="ingestBtn" style="align-self:center;">抓取</button>
+        </div>
+        <div class="muted" id="ingestMsg" style="margin:-6px 0 12px; min-height:16px;"></div>
+        <div class="row" id="candToolbar" style="margin-bottom:10px;display:none">
+          <label class="check" style="font-size:13px"><input type="checkbox" id="candSelectAll" /> 全选</label>
+          <span class="muted" id="candSelectedCount"></span>
+          <button class="primary" id="candBatchConfirm">批量确认</button>
+          <button id="candBatchArchive">批量归档</button>
+          <span class="muted" style="margin-left:auto">快捷键：Enter=确认当前 │ ↑↓=切换 │ Esc=取消选中</span>
+        </div>
+        <div id="candList" class="list"></div>
+      </div>
+    </section>
+
+    <!-- 内容库 -->
+    <section id="tab-library" class="tab hidden">
+      <div class="panel">
+        <h3>内容库</h3>
+        <div class="row filters">
+          <input id="libQ" placeholder="搜索标题/作者…" />
+          <select id="libStatus">
+            <option value="">全部状态</option>
+            <option value="confirmed">已确认</option>
+            <option value="needs_review">待复核</option>
+            <option value="monitoring">发酵中</option>
+            <option value="missing_share">缺转发数</option>
+            <option value="missing_like">缺点赞数</option>
+            <option value="below_threshold">未达阈值</option>
+            <option value="duplicate">重复</option>
+            <option value="archived">已归档</option>
+          </select>
+          <select id="libPlatform">
+            <option value="">全部平台</option>
+            <option value="douyin">抖音</option>
+            <option value="xiaohongshu">小红书</option>
+            <option value="other">其他</option>
+          </select>
+          <button id="libRefresh">刷新</button>
+        </div>
+        <div id="libTable"></div>
+      </div>
+    </section>
+
+    <!-- 账号池 -->
+    <section id="tab-accounts" class="tab hidden">
+      <div class="panel">
+        <h3>账号池 <span class="muted">— 你关注的博主（抖音 / 小红书）</span></h3>
+        <div class="row accent-row" style="margin-bottom: 14px;">
+          <div style="flex:1">
+            <b style="color: var(--brand-strong);">从已登录浏览器发现关注账号</b>
+            <div class="muted" style="font-size:13px; margin-top:4px;">只同步关注列表到账号池，不抓取内容；适合先建立本地名单。</div>
+          </div>
+          <button class="primary" id="acDiscoverFollows">发现关注账号</button>
+        </div>
+        <div class="ac-add">
+          <!-- 方式一：手动填写 —— 固定字段逐项填，不用自己排格式 -->
+          <div class="ac-card">
+            <h4>✍️ 手动填写 <span class="muted">已知道信息，逐项填</span></h4>
+            <div class="ac-grid">
+              <label>平台
+                <select id="acPlatform">
+                  <option value="douyin">抖音</option>
+                  <option value="xiaohongshu">小红书</option>
+                  <option value="other">其他</option>
+                </select>
+              </label>
+              <label>昵称
+                <input id="acNick" placeholder="博主昵称（必填）" />
+              </label>
+              <label>分类
+                <input id="acCategory" placeholder="商业 / AI / 创业…" />
+              </label>
+              <label>优先级
+                <select id="acPriority"><option>S</option><option>A</option><option selected>B</option></select>
+              </label>
+              <label class="wide">主页链接
+                <input id="acUrl" placeholder="粘贴博主主页 URL（可留空，之后再补）" />
+              </label>
+            </div>
+            <div class="row"><button class="primary" id="acAdd">添加到账号池</button></div>
+          </div>
+
+          <!-- 方式二：搜索填空 —— 先选平台，去平台搜到本人再回填 -->
+          <div class="ac-card">
+            <h4>🔍 搜索填空 <span class="muted">只知道名字，按平台搜到本人再回填</span></h4>
+            <div class="ac-grid">
+              <label>平台
+                <select id="acSearchPlatform">
+                  <option value="douyin">抖音</option>
+                  <option value="xiaohongshu">小红书</option>
+                  <option value="other">其他</option>
+                </select>
+              </label>
+              <label>昵称 / 关键词
+                <input id="acSearchNick" placeholder="博主名字或关键词" />
+              </label>
+              <label class="wide">主页链接
+                <input id="acSearchUrl" placeholder="在搜索页找到本人后，复制其主页 URL 粘贴到这里" />
+              </label>
+            </div>
+            <div class="row">
+              <button id="acSearchJump">🔍 去平台搜索</button>
+              <button class="primary" id="acSearchAdd">添加到账号池</button>
+            </div>
+            <p class="muted" id="acSearchHint">先选平台、填名字，点「去平台搜索」跳到该平台搜索页找本人。</p>
+          </div>
+        </div>
+
+        <hr />
+        <div id="acTable"></div>
+      </div>
+    </section>
+
+    <!-- 每日结果 -->
+    <section id="tab-reports" class="tab hidden">
+      <div class="panel">
+        <h3>每日结果</h3>
+        <div class="row">
+          <input id="rpDays" type="number" min="1" max="30" value="1" style="width:70px" placeholder="天数" />
+          <button class="primary" id="rpGenerate">生成日报</button>
+          <span class="muted" id="rpMsg"></span>
+        </div>
+        <div id="rpList" class="list"></div>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section id="tab-settings" class="tab hidden">
+      <div class="panel">
+        <h3>AI API Key（BYOK）</h3>
+        <div class="row">
+          <input id="stApiKey" type="password" placeholder="粘贴主 API Key（加密存储，不外传）" style="flex:1" />
+          <button class="primary" id="stSaveKey">保存主 Key</button>
+          <button id="stTestKey">测试主 Key</button>
+          <button class="danger" id="stClearKey">清除</button>
+          <span class="muted" id="stKeyState"></span>
+        </div>
+        <div class="row">
+          <input id="stApiKey2" type="password" placeholder="粘贴备用 API Key（可选，主 Key 失败时自动切换）" style="flex:1" />
+          <button class="primary" id="stSaveKey2">保存备用 Key</button>
+          <button id="stTestKey2">测试备用</button>
+          <button class="danger" id="stClearKey2">清除</button>
+          <span class="muted" id="stKeyState2"></span>
+        </div>
+        <div class="row">
+          <label style="flex:1">供应商
+            <select id="stVendor">
+              <option value="openai">OpenAI（官方）</option>
+              <option value="deepseek">DeepSeek 深度求索</option>
+              <option value="xiaomi">小米 MiMo</option>
+              <option value="moonshot">月之暗面 Kimi</option>
+              <option value="zhipu">智谱 GLM</option>
+              <option value="qwen">通义千问（阿里百炼）</option>
+              <option value="siliconflow">硅基流动 SiliconFlow</option>
+              <option value="anthropic">Anthropic Claude</option>
+              <option value="custom">自定义（手动填地址）</option>
+            </select>
+          </label>
+          <label style="flex:1">模型名
+            <input id="stModel" list="modelHints" placeholder="选择供应商后会给出示例" />
+            <datalist id="modelHints"></datalist>
+          </label>
+        </div>
+        <div class="row">
+          <label style="flex:1">接口地址 Base URL
+            <input id="stBaseUrl" placeholder="选择供应商后自动填入；自定义可手填" />
+          </label>
+        </div>
+        <p class="muted" id="stVendorHint">选择上面的供应商，会自动填好接口地址，你只需粘贴对应平台的 Key 并填模型名。</p>
+        <p class="muted" id="stTestDetail"></p>
+
+        <h3>自动运行（接入 Key 后每天自动产出日报）</h3>
+        <div class="grid2">
+          <label class="check"><input type="checkbox" id="stSchedEnabled" /> 开启每日自动生成</label>
+          <label>每日时间<input id="stSchedTime" type="time" value="09:00" /></label>
+          <label>默认回溯天数<input id="stSchedDays" type="number" min="1" max="30" value="1" /></label>
+          <label>每日 token 预算提醒（0=不限）<input id="stBudget" type="number" min="0" value="0" /></label>
+        </div>
+        <div class="row"><button class="primary" id="stSaveSettings">保存设置</button><span class="muted" id="stSaveMsg"></span></div>
+
+        <h3>浏览器插件配对</h3>
+        <p class="muted">在插件「选项」里填入本机地址与下面的配对 token，即可让插件把内容保存到桌面端。</p>
+        <div class="row">
+          <code class="token" id="stToken"></code>
+          <button id="stCopyToken">复制 token</button>
+          <button class="danger" id="stRegenToken">重置 token</button>
+        </div>
+        <p class="muted">本机服务地址：<code id="stEndpoint"></code></p>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <div id="confirmDialog" class="confirm-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <div class="confirm-box">
+      <h3 id="confirmTitle">请确认</h3>
+      <p id="confirmMessage"></p>
+      <div class="confirm-actions">
+        <button id="confirmCancel" type="button">取消</button>
+        <button id="confirmOk" type="button" class="danger">确认</button>
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

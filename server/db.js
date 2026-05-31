@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS contents (
   duplicate_of TEXT,
   archived INTEGER DEFAULT 0,
   screenshot_path TEXT,
+  cover_url TEXT,
+  duration_text TEXT,
   created_at TEXT,
   updated_at TEXT
 );
@@ -150,6 +152,8 @@ ensureColumn('accounts', 'last_seen_publish_time', 'last_seen_publish_time TEXT'
 ensureColumn('contents', 'metrics_confidence', 'metrics_confidence TEXT');
 ensureColumn('contents', 'metrics_evidence_json', 'metrics_evidence_json TEXT');
 ensureColumn('contents', 'eligible_reason', 'eligible_reason TEXT');
+ensureColumn('contents', 'cover_url', 'cover_url TEXT');
+ensureColumn('contents', 'duration_text', 'duration_text TEXT');
 
 /** node:sqlite 只接受 null/number/bigint/string/Uint8Array。统一清洗参数。 */
 export function sanitize(v) {

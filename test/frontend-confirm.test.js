@@ -18,10 +18,80 @@ test('破坏性操作使用页面内确认弹层，不直接依赖浏览器 conf
   }
 });
 
-test('账号池搜索填空用当前窗口跳转，兼容原生 WebKit 窗口', () => {
+test('账号池搜索入口交给本地接口打开 Chrome，不覆盖工作台窗口', () => {
   const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
+  const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
+  const serverJs = readFileSync(join(root, 'server', 'index.js'), 'utf8');
 
   assert.match(appJs, /function platformSearchUrl\(/);
-  assert.match(appJs, /window\.location\.assign\(url\)/);
+  assert.match(appJs, /\/browser\/open/);
+  assert.match(appJs, /data-ac-open-url/);
+  assert.match(appJs, /dataset\.acOpenUrl/);
+  assert.match(appJs, /\/accounts\/open-platform/);
+  assert.match(html, /id="acOpenXhsLinks"/);
+  assert.match(serverJs, /open-platform/);
+  assert.match(serverJs, /accountOpenUrlsForPlatform\(listAccounts\(\), body\.platform \|\| 'xiaohongshu'\)/);
+  assert.match(html, /<button[^>]+id="acSearchJump"/);
+  assert.doesNotMatch(html, /id="acSearchJump"[^>]+href=/);
+  assert.doesNotMatch(appJs, /window\.location\.assign\(/);
   assert.doesNotMatch(appJs, /window\.open\(/);
+});
+
+test('概览和每日结果共用设置里的默认回溯天数', () => {
+  const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
+  const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
+
+  assert.doesNotMatch(html, /id="ovDays"/);
+  assert.doesNotMatch(html, /id="rpDays"/);
+  assert.doesNotMatch(appJs, /#ovDays/);
+  assert.doesNotMatch(appJs, /#rpDays/);
+  assert.match(appJs, /function getDefaultWindowType\(\)/);
+  assert.match(appJs, /generateReport\(await getDefaultWindowType\(\), \$\('#ovGenMsg'\), skipRpa/);
+  assert.match(appJs, /generateReport\(await getDefaultWindowType\(\), \$\('#rpMsg'\), true/);
+});
+
+test('今日候选并入概览，顶部不再有独立候选页入口', () => {
+  const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
+  const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
+
+  assert.doesNotMatch(html, /data-tab="candidates"/);
+  assert.doesNotMatch(html, /id="tab-candidates"/);
+  assert.ok(html.indexOf('id="tab-overview"') < html.indexOf('id="candList"'));
+  assert.ok(html.indexOf('id="candList"') < html.indexOf('id="tab-library"'));
+  assert.match(appJs, /loadOverviewPage/);
+  assert.match(appJs, /today=1&include_observations=1/);
+  assert.match(html, /北京时间当天抓取记录/);
+});
+
+test('浏览器巡检默认每轮 6 个标签，且可在 1-10 间调整', () => {
+  const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
+  const configJs = readFileSync(join(root, 'server', 'config.js'), 'utf8');
+  const patrolJs = readFileSync(join(root, 'server', 'rpa', 'patrol.js'), 'utf8');
+
+  assert.match(html, /id="stRpaMaxTabs"[^>]+min="1"[^>]+max="10"[^>]+value="6"/);
+  assert.match(html, /默认 6/);
+  assert.match(configJs, /rpa: \{ maxTabsPerBatch: 6 \}/);
+  assert.match(configJs, /Math\.min\(10/);
+  assert.match(patrolJs, /const DEFAULT_MAX_TABS_PER_BATCH = 6/);
+});
+
+test('RPA skill 明确要求巡检阶段先保存后筛选', () => {
+  const skill = readFileSync(join(root, 'skills', 'rpa-report', 'SKILL.md'), 'utf8');
+
+  assert.match(skill, /巡检阶段不做入选判断/);
+  assert.match(skill, /未知时间和超出窗口都保存后待复核或筛选排除/);
+  assert.match(skill, /是否入日报只在巡检后的筛选阶段决定/);
+});
+
+test('自动巡检前端按小红书、抖音两个阶段发起，并提供停止按钮', () => {
+  const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
+  const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
+  const serverJs = readFileSync(join(root, 'server', 'index.js'), 'utf8');
+
+  assert.match(appJs, /platform: 'xiaohongshu'/);
+  assert.match(appJs, /platform: 'douyin'/);
+  assert.match(appJs, /\/patrol\/stop/);
+  assert.match(serverJs, /requestPatrolStop/);
+  assert.match(html, /id="ovStopPatrol"/);
+  assert.match(html, /id="candStopRpa"/);
 });

@@ -7,22 +7,49 @@
 - 启动：`npm start`（= `node --disable-warning=ExperimentalWarning server/index.js`），仪表盘 `http://127.0.0.1:8787`。
 - 测试：`npm test`（node 内置 test runner）。
 - 命令行出日报：`npm run report -- last_7_days`。
-- 环境变量：`VB_PORT`、`VB_DATA_DIR`、`VB_OPEN_BROWSER`。
+- 环境变量：`VBP_PORT`、`VBP_DATA_DIR`、`VBP_OPEN_BROWSER`（旧 `VB_*` 前缀仍兼容）。
 - **要求 Node ≥ 22.5**（用内置 `node:sqlite`、全局 `fetch`）。**运行时零 npm 依赖、零原生编译**——这是「别人本地拿起来即可运行」的硬约束，新增依赖前务必三思。
 
 ## 关键不变量（改代码时必须守住）
-1. **关键数据绝不靠 AI**。点赞/转发数、双 1000 判定、时间窗口、去重、达标清单的数字，全部走确定性代码（`normalize.js` / `filter.js` / `dedup.js` / `store.js`）。AI 只产出定性内容（选题/聚类/标题/建议）。
-2. **未知 ≠ 0**。`normalizeMetric` 识别不到时返回 `value:null`；`null` → `missing_*`（待补录），`< 1000` → `below_threshold`。不要把 null 当 0。
-3. **只有 `confirmed` 入榜**。`computeDataStatus` 优先级：duplicate > archived > needs_review(自动且未确认) > below_threshold(已知<1000) > missing_* > confirmed。自动识别的数据在用户确认前一律 `needs_review`。
-4. **入榜范围必须收紧**。正式日报只收 `douyin` / `xiaohongshu` / `wechat_channels`，且内容必须关联 `accounts` 账号池；公众号文章和未关联账号的内容可保存、不可入日报。
+1. **关键数据绝不靠 AI**。点赞/转发/收藏、1000 阈值判定、时间窗口、去重、达标清单的数字，全部走确定性代码（`normalize.js` / `filter.js` / `dedup.js` / `store.js`）。AI 只产出定性内容（选题/聚类/标题/建议）。
+2. **未知 ≠ 0**。`normalizeMetric` 识别不到时返回 `value:null`；`null` 表示待复核/待补录，已知值 `< 1000` 才是 `below_threshold`。不要把 null 当 0。
+3. **只有 `confirmed` 入榜**。`computeDataStatus` 优先级：duplicate > archived > monitoring(未确认且 24h 内) > needs_review(自动且未确认) > confirmed / below_threshold。自动弱来源在用户确认前不入榜。
+4. **入榜范围必须收紧**。正式日报只收 `douyin` / `xiaohongshu`，且内容必须关联 `accounts` 账号池；视频号、公众号文章和未关联账号的内容可保存、不可入日报。
+   - 小红书入选必须 `like` 和 `favorite` 都达标；抖音入选必须 `like`、`favorite`、`share` 都达标。`1000+` 按超过 1000，纯 1000 不达标。
 5. **日报数字从 DB 渲染，不采信 AI 文本**。`report/render.js` 的达标清单只用传入的 `items`（DB 行）。AI 返回 JSON 仅提供母题/原因/标题，且引用的编号（C1..Cn）会被校验必须真实存在。
 6. **API Key 安全**：只存桌面端、AES-256-GCM 加密（`lib/secret.js`）、日志脱敏（`lib/log.js` 的 `addRedaction`）、不导出、可清除。插件不存 Key、不调模型。
 7. **服务只绑 127.0.0.1**；`/api/*`（除 `/api/health`）需配对 token。
+8. **RPA 只负责顺序采集，不负责入选判断**。每读完一条详情内容，先记录/规范化发布时间和指标，再截图入库；未知时间、超窗口、未达阈值都要进入内容库。巡检阶段不因时间窗口或标题匹配判断而丢弃已打开详情；正式日报只在巡检结束后的 `recomputeAll()` / `getEligible()` 阶段筛选。
+
+## 巡检流程（当前唯一口径）
+- 巡检前先排序：前端/API 实际按平台阶段执行，小红书阶段整体先于抖音阶段；每个阶段内部评级越高越前，同评级按 `created_at` 更早优先；缺少时间时随机打散。`sortPatrolAccounts()` 仍保留混合列表的同评级小红书优先规则。
+- API 阶段拆开：前端先调用 `/api/patrol/run` 跑 `{ platform: "xiaohongshu" }`，完成后再调用 `{ platform: "douyin" }`；`/api/reports/generate` 在前端阶段巡检后只负责生成日报。服务端 pipeline 自跑 RPA 时也按小红书、抖音两个阶段。
+- 单活跃巡检：同一时间只允许一个巡检运行；已有巡检时，新的 `/api/patrol/run` 或含 RPA 的 `/api/reports/generate` 必须返回 409，并保留原巡检的停止控制。
+- 并发标签：`rpa.maxTabsPerBatch` 默认 6，允许 1-10；内存不足可自动下调。多标签模式每个账号标签使用独立 CDP client，账号跑完立即关标签。
+- 停止控制：`POST /api/patrol/stop` 设置当前巡检 stop flag；长循环、批次和详情采集都要检查 `shouldStop` 并收尾关闭标签；尚未实际处理完成的账号不得写 `last_patrolled_at`。
+- 当天防重复：账号实际处理完成后写 `last_patrolled_at`；默认跳过北京时间当天已经跑过的账号。
+
+### 小红书阶段
+- 只打开已登录 Chrome 中的小红书主页，每批默认 6 个账号 URL。
+- 主页卡片按行从左到右、从上到下检查；每个账号最多检查 `maxCandidatesPerAccount` 条候选；置顶内容不进详情。
+- 每次点击记录卡片位置；同一账号内下一次点击必须在上一次点击右侧。发现同一候选 URL 或同一详情 URL 在本轮打开两次，立刻停止该账号。
+- 点开详情后读取标题、作者、封面、视频时长、正文、发布时间、点赞/红心、收藏、评论；可采内容一律截图并入库。
+- 发布时间缺失、超窗口、标题不匹配或互动未达标都不阻断保存；是否入选留到巡检后判断。
+- 保存或不可采跳过详情后优先点击左上角关闭按钮回主页，不重新打开主页 URL。
+
+### 抖音阶段
+- 小红书阶段结束后再发起新的抖音巡检 API。
+- 账号有主页 URL 则打开；无 URL 时通过搜索找博主主页。
+- 内容从最新到更旧检查；每条详情必须读取封面/首帧、标题、正文、发布时间、点赞、收藏、转发、评论。
+- 详情页先暂停视频，再提取数据；可采内容一律截图并入库。
+- 发布时间缺失、超窗口、标题不匹配或互动未达标都不阻断保存；是否入选留到巡检后判断。
+- 全部账号完成或剩余账号正在跑时不再额外开新标签；单个账号跑完立即关闭自己的标签。
 
 ## 数据流
 - 采集：插件 `popup.js` 注入页面提取 → `POST /api/capture`（带 `x-vb-token`）→ `store.upsertCapture()`：标准化指标、算 url_key/fingerprint、去重合并、`computeDataStatus`、落库。截图存 `data/screenshots/`，DB 存路径。
 - 确认：仪表盘候选池 → `POST /api/contents/:id/confirm` → `store.confirmContent()`：重算指标、强制 `metrics_source='manual'` + `user_confirmed=1`、重算状态。
-- 出报：`pipeline.runDailyReport({windowType})`：`recomputeAll(窗口)` → `getEligible(窗口起点)`（三平台 + 账号池 + confirmed + 双 1000）→ 逐条 `analyzeContent`（按 content_id 缓存）→ `generateReportData`（校验编号）→ `render*` → 落 `daily_reports` + 写 `data/exports/`（MD/HTML/CSV/ZIP）。0 达标则用 `fallbackReportData` 跳过 AI。
+- 账号池打开：`POST /api/accounts/open-platform` 从当前 DB 筛选有效平台主页（小红书 `/user/profile/<id>`），一次性交给 Chrome 打开为多个标签页；`POST /api/browser/open` 保留单 URL 兼容并支持 `{ urls: [...] }`。
+- 出报：`pipeline.runDailyReport({windowType})`：可选先跑小红书、抖音 RPA 阶段 → `recomputeAll(窗口)` → `getEligible(窗口起点)`（小红书/抖音 + 账号池 + confirmed + 平台必需指标都达标）→ 逐条 `analyzeContent`（按 content_id 缓存）→ `generateReportData`（校验编号）→ `render*` → 落 `daily_reports` + 写 `data/exports/`（MD/HTML/CSV/ZIP）。0 达标则用 `fallbackReportData` 跳过 AI。
 - 自动：`scheduler.startScheduler()`，setTimeout 到点跑；用 `meta.last_auto_run_date` 防重复；可补跑。设置变更后调 `restartScheduler()`。
 
 ## Token 策略（既省又准）
@@ -48,4 +75,4 @@
 - 插件页面指标识别是「尽力而为」，平台改版会失效；**人工修正是主路径**（设计如此）。视频号网页端指标基本靠手填。
 - PDF：当前出 Markdown/HTML/CSV，HTML 可浏览器「打印为 PDF」；如需服务端直出 PDF，可选接 puppeteer（会引入大依赖，与「零依赖」目标权衡）。
 - 桌面安装包：可用 Tauri/Electron 包壳，内嵌本服务 + `web/`。
-- 增强：OS 钥匙串存 Key；RPA 低频巡检账号池（默认进待复核，文档 4.3）。
+- 增强：OS 钥匙串存 Key；浏览器上下滑动控制 API。

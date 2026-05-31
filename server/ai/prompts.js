@@ -65,7 +65,7 @@ export function buildAnalyzeUser(c) {
 
 // ---- 日报趋势分析（标准版，≥3 条达标时使用） ----
 
-export const SYSTEM_REPORT = `你是内容归类助手。系统会给你「最近 N 天内、已由系统确认达标（点赞/转发/收藏任一项 > 1000）」的内容清单。
+export const SYSTEM_REPORT = `你是内容归类助手。系统会给你「最近 N 天内、已由系统确认达标（小红书点赞和收藏都达标；抖音点赞、收藏和转发都达标）」的内容清单。
 你的任务是把相似内容归入母题，并基于清单中的标题改写可复用选题。
 
 你不是趋势分析师。你只是在做机械的归类和改写工作。
@@ -162,7 +162,7 @@ export function buildReportUser(windowLabel, items, analyses = {}) {
       : '';
 
   return `时间窗口：${windowLabel}
-已确认达标内容（共 ${items.length} 条，均满足点赞/转发/收藏任一项 > 1000，由系统筛选）：
+已确认达标内容（共 ${items.length} 条，均已由系统按平台硬规则筛选：小红书点赞和收藏都达标；抖音点赞、收藏和转发都达标）：
 ${lines.join('\n')}
 
 请基于以上清单输出符合要求的 JSON。

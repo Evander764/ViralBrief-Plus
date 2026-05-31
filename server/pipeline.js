@@ -29,6 +29,33 @@ import { CDPClient } from './rpa/cdp.js';
 import { runPatrol } from './rpa/patrol.js';
 import { launchChrome, killChrome } from './rpa/chrome-launcher.js';
 
+function combinePatrolResults(results = []) {
+  const out = {
+    total: 0,
+    success: 0,
+    failed: 0,
+    newItems: 0,
+    duplicates: 0,
+    discovered: 0,
+    skippedToday: 0,
+    platformResults: {},
+    details: [],
+    stages: results,
+    stopped: results.some((r) => r?.stopped),
+  };
+  for (const r of results) {
+    if (!r) continue;
+    for (const key of ['total', 'success', 'failed', 'newItems', 'duplicates', 'discovered', 'skippedToday']) {
+      out[key] += Number(r[key] || 0);
+    }
+    Object.assign(out.platformResults, r.platformResults || {});
+    out.details.push(...(r.details || []));
+    out.tabMode ||= r.tabMode;
+    out.maxTabsPerBatch ||= r.maxTabsPerBatch;
+  }
+  return out;
+}
+
 /**
  * 生成每日爆款选题日报。
  *
@@ -44,6 +71,7 @@ export async function runDailyReport({
   force = false,
   skipRpa = false,
   onProgress,
+  shouldStop = () => false,
 } = {}) {
   const progress = (phase, detail) => {
     log.info(`[Pipeline:${phase}] ${detail}`);
@@ -76,18 +104,26 @@ export async function runDailyReport({
       client = new CDPClient();
       await client.connect(chrome.port);
 
-      // 执行巡检
-      patrolResult = await runPatrol(client, {
-        onProgress: (msg) => progress('rpa', msg),
-        windowType,
-        windowStartISO: startISO,
-        maxTabsPerBatch: cfg.rpa?.maxTabsPerBatch,
-        clientFactory: async () => {
-          const c = new CDPClient();
-          await c.connect(chrome.port);
-          return c;
-        },
-      });
+      // 执行巡检：按平台阶段分别跑，便于前端/外部调用观察每个阶段完成状态。
+      const stageResults = [];
+      for (const platform of ['xiaohongshu', 'douyin']) {
+        if (shouldStop()) break;
+        progress('rpa', `开始${platform === 'xiaohongshu' ? '小红书' : '抖音'}阶段巡检...`);
+        stageResults.push(await runPatrol(client, {
+          onProgress: (msg) => progress('rpa', msg),
+          windowType,
+          windowStartISO: startISO,
+          platforms: [platform],
+          maxTabsPerBatch: cfg.rpa?.maxTabsPerBatch,
+          shouldStop,
+          clientFactory: async () => {
+            const c = new CDPClient();
+            await c.connect(chrome.port);
+            return c;
+          },
+        }));
+      }
+      patrolResult = combinePatrolResults(stageResults);
 
       progress('rpa', `采集完成: 新增 ${patrolResult.newItems} 条，去重 ${patrolResult.duplicates} 条`);
     } catch (rpaErr) {

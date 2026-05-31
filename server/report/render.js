@@ -56,7 +56,7 @@ function excludedSummary(counts) {
 export function fallbackReportData(windowType, counts) {
   const ex = excludedSummary(counts);
   return {
-    daily_summary: `过去${windowLabel(windowType)}内，暂无满足「点赞/转发/收藏任一项 > 1000」且证据可信的内容，样本不足。${ex ? `当前库内：${ex}。建议在「今日候选」里补录/确认指标后再生成。` : ''}`,
+    daily_summary: `过去${windowLabel(windowType)}内，暂无满足「小红书点赞和收藏都达标；抖音点赞、收藏和转发都达标」且证据可信的内容，样本不足。${ex ? `当前库内：${ex}。建议在「今日候选」里补录/确认指标后再生成。` : ''}`,
     top_topic_clusters: [],
     recommended_actions: [],
     data_warnings: ['样本不足：达标内容为 0 条，本期不做趋势结论。'],
@@ -70,7 +70,7 @@ export function renderMarkdown(reportData, items, analyses, meta) {
   const out = [];
   out.push(`# 每日爆款选题总结 — ${L}`);
   out.push('');
-  out.push(`> 生成时间：${meta.generatedAt}　｜　窗口：${L}　｜　达标内容：**${items.length}** 条　｜　入选条件：账号池内小红书/抖音 + 点赞/转发/收藏任一项 > 1000`);
+  out.push(`> 生成时间：${meta.generatedAt}　｜　窗口：${L}　｜　达标内容：**${items.length}** 条　｜　入选条件：账号池内小红书/抖音 + 平台必需指标都达标（小红书：点赞+收藏；抖音：点赞+收藏+转发）`);
   out.push('');
 
   out.push('## 一、AI 观察摘要');
@@ -106,13 +106,13 @@ export function renderMarkdown(reportData, items, analyses, meta) {
   out.push('## 三、达标内容清单（数据来自本地库，精确值）');
   out.push('');
   if (items.length) {
-    out.push('| # | 平台 | 作者 | 标题 | 点赞 | 转发/分享 | 收藏 | 评论 | 入选原因 | 发布时间 | 链接 |');
-    out.push('|---|------|------|------|------|-----------|------|------|----------|----------|------|');
+    out.push('| 内容编号 | 平台 | 作者 | 标题 | 点赞 | 转发/分享 | 收藏 | 评论 | 入选原因 | 发布时间 | 链接 |');
+    out.push('|----------|------|------|------|------|-----------|------|------|----------|----------|------|');
     items.forEach((it, i) => {
       const t = (it.title || '').replace(/\|/g, '／');
       const link = it.url ? `[打开](${it.url})` : '—';
       const pub = it.publish_time ? it.publish_time.slice(0, 10) : '—';
-      out.push(`| ${i + 1} | ${it.platform || '?'} | ${(it.author_name || '?').replace(/\|/g, '／')} | ${t} | ${fmt(it.like_count)} | ${fmt(it.share_count)} | ${fmt(it.favorite_count)} | ${fmt(it.comment_count)} | ${(it.eligible_reason || '—').replace(/\|/g, '／')} | ${pub} | ${link} |`);
+      out.push(`| C${i + 1} | ${it.platform || '?'} | ${(it.author_name || '?').replace(/\|/g, '／')} | ${t} | ${fmt(it.like_count)} | ${fmt(it.share_count)} | ${fmt(it.favorite_count)} | ${fmt(it.comment_count)} | ${(it.eligible_reason || '—').replace(/\|/g, '／')} | ${pub} | ${link} |`);
     });
   } else {
     out.push('_本期无达标内容。_');
@@ -179,7 +179,7 @@ export function renderHtml(reportData, items, analyses, meta) {
     const link = it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noreferrer">打开</a>` : '—';
     const pub = it.publish_time ? esc(it.publish_time.slice(0, 10)) : '—';
     return `<tr>
-      <td>${i + 1}</td><td>${esc(it.platform)}</td><td>${esc(it.author_name)}</td>
+      <td>C${i + 1}</td><td>${esc(it.platform)}</td><td>${esc(it.author_name)}</td>
       <td class="title">${esc(it.title)}</td>
       <td class="num">${fmt(it.like_count)}</td><td class="num">${fmt(it.share_count)}</td>
       <td class="num">${fmt(it.favorite_count)}</td><td class="num">${fmt(it.comment_count)}</td>
@@ -215,7 +215,7 @@ export function renderHtml(reportData, items, analyses, meta) {
 </style></head>
 <body><div class="wrap">
   <h1>每日爆款选题总结 <span class="badge">${esc(L)}</span></h1>
-  <div class="meta">生成时间：${esc(meta.generatedAt)}　｜　达标内容：<b>${items.length}</b> 条　｜　入选条件：账号池内小红书/抖音 + 点赞/转发/收藏任一项 &gt; 1000</div>
+  <div class="meta">生成时间：${esc(meta.generatedAt)}　｜　达标内容：<b>${items.length}</b> 条　｜　入选条件：账号池内小红书/抖音 + 平台必需指标都达标（小红书：点赞+收藏；抖音：点赞+收藏+转发）</div>
   <p class="noprint muted">提示：按 Cmd/Ctrl + P 可「打印为 PDF」。</p>
 
   <h2>一、AI 观察摘要</h2>
@@ -225,7 +225,7 @@ export function renderHtml(reportData, items, analyses, meta) {
   ${clusters.length ? `<h2>二、AI 母题聚类 TOP ${clusters.length}（仅供参考）</h2>${clusterHtml}` : ''}
 
   <h2>三、达标内容清单 <span class="muted">（数据来自本地库，为精确值）</span></h2>
-  ${items.length ? `<table><thead><tr><th>#</th><th>平台</th><th>作者</th><th>标题</th><th>点赞</th><th>转发/分享</th><th>收藏</th><th>评论</th><th>入选原因</th><th>发布</th><th>链接</th></tr></thead><tbody>${rows}</tbody></table>` : '<p><i>本期无达标内容。</i></p>'}
+  ${items.length ? `<table><thead><tr><th>内容编号</th><th>平台</th><th>作者</th><th>标题</th><th>点赞</th><th>转发/分享</th><th>收藏</th><th>评论</th><th>入选原因</th><th>发布</th><th>链接</th></tr></thead><tbody>${rows}</tbody></table>` : '<p><i>本期无达标内容。</i></p>'}
 
   ${titles.length ? `<h2>四、AI 建议选题（仅供参考）</h2><ol>${titles.map((t) => `<li>${esc(t)}</li>`).join('')}</ol>` : ''}
 
@@ -247,11 +247,12 @@ export function renderHtml(reportData, items, analyses, meta) {
 // --------------------------------------------------------------------- CSV ----
 
 export function renderCsv(items, analyses = {}) {
-  const header = ['平台', '作者', '标题', '点赞', '转发/分享', '评论', '收藏', '入选原因', '发布时间', '链接', '选题', '钩子'];
+  const header = ['内容编号', '平台', '作者', '标题', '点赞', '转发/分享', '评论', '收藏', '入选原因', '发布时间', '链接', '选题', '钩子'];
   const lines = [header.map(csvCell).join(',')];
-  for (const it of items) {
+  for (const [i, it] of items.entries()) {
     const a = analyses[it.id] || {};
     lines.push([
+      `C${i + 1}`,
       it.platform, it.author_name, it.title,
       it.like_count, it.share_count, it.comment_count, it.favorite_count,
       it.eligible_reason || '', it.publish_time || '', it.url || '', a.extracted_topic || '', a.hook_type || '',

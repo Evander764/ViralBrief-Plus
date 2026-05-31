@@ -21,6 +21,8 @@ test('Markdown 里的点赞/转发是来自 items 的精确值（千分位）', 
   assert.match(md, /12,000/);
   assert.match(md, /2,100/);
   assert.match(md, /达标内容清单/);
+  assert.match(md, /内容编号/);
+  assert.match(md, /\| C1 \|/);
   assert.match(md, /AI副业退潮/);
   assert.match(md, /复用1/);
   assert.match(md, /缺转发数 3 条/); // 未入选统计来自 counts
@@ -29,6 +31,8 @@ test('Markdown 里的点赞/转发是来自 items 的精确值（千分位）', 
 test('HTML 含表格与精确数字', () => {
   const html = renderHtml(reportData, items, analyses, meta);
   assert.match(html, /<table>/);
+  assert.match(html, /<th>内容编号<\/th>/);
+  assert.match(html, /<td>C1<\/td>/);
   assert.match(html, /12,000/);
   assert.match(html, /每日爆款选题总结/);
 });

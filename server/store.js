@@ -15,6 +15,18 @@ const METRICS = ['like', 'share', 'comment', 'favorite'];
 const cleanId = (v) => (v == null || String(v).trim() === '' ? null : String(v).trim());
 const cleanText = (v) => String(v || '').trim().toLowerCase();
 
+export function beijingDayStartISO(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const value = (type) => Number(parts.find((p) => p.type === type)?.value);
+  const startUtcMs = Date.UTC(value('year'), value('month') - 1, value('day')) - 8 * 60 * 60 * 1000;
+  return new Date(startUtcMs).toISOString();
+}
+
 /** 尽量把各种发布时间表示解析为 ISO；解析不了返回 null（绝不瞎猜）。 */
 export function parsePublishTime(raw) {
   if (raw == null || raw === '') return null;
@@ -41,7 +53,7 @@ const CONTENT_COLS = [
   'like_raw', 'share_raw', 'comment_raw', 'favorite_raw',
   'metrics_source', 'metrics_confidence', 'metrics_evidence_json', 'eligible_reason',
   'data_status', 'user_confirmed', 'is_duplicate', 'duplicate_of',
-  'archived', 'screenshot_path', 'created_at', 'updated_at',
+  'archived', 'screenshot_path', 'cover_url', 'duration_text', 'created_at', 'updated_at',
 ];
 
 function insertContentRow(row) {
@@ -147,7 +159,7 @@ export function upsertCapture(payload) {
 
   if (existing) {
     // 合并：只填补现有为空的指标，不覆盖用户已确认的可信数据。
-    const patch = {};
+    const patch = { captured_at: nowISO() };
     const accountId = findAccountForCapture(payload);
     if (!existing.account_id && accountId) patch.account_id = accountId;
     for (const m of METRICS) {
@@ -158,6 +170,8 @@ export function upsertCapture(payload) {
       }
     }
     if (!existing.screenshot_path && payload.screenshot_path) patch.screenshot_path = payload.screenshot_path;
+    if (!existing.cover_url && payload.cover_url) patch.cover_url = payload.cover_url;
+    if (!existing.duration_text && payload.duration_text) patch.duration_text = payload.duration_text;
     if (!existing.body_excerpt && payload.body_excerpt) patch.body_excerpt = payload.body_excerpt;
     if (!existing.metrics_confidence && payload.metrics_confidence) patch.metrics_confidence = payload.metrics_confidence;
     if (!existing.metrics_evidence_json && payload.metrics_evidence) patch.metrics_evidence_json = JSON.stringify(payload.metrics_evidence);
@@ -204,6 +218,8 @@ export function upsertCapture(payload) {
     duplicate_of: null,
     archived: 0,
     screenshot_path: payload.screenshot_path || null,
+    cover_url: payload.cover_url || null,
+    duration_text: payload.duration_text || null,
     created_at: ts,
     updated_at: ts,
   };
@@ -230,7 +246,7 @@ export function confirmContent(id, patch = {}) {
       update[`${m}_raw`] = n.raw;
     }
   }
-  for (const f of ['title', 'author_name', 'platform', 'content_type', 'body_excerpt']) {
+  for (const f of ['title', 'author_name', 'platform', 'content_type', 'body_excerpt', 'cover_url', 'duration_text']) {
     if (f in patch) update[f] = patch[f];
   }
   if ('account_id' in patch) update.account_id = cleanId(patch.account_id);
@@ -256,12 +272,13 @@ export function deleteContent(id) {
   return run('DELETE FROM contents WHERE id = ?', [id]);
 }
 
-export function listContents({ status, platform, window: windowStart, q, limit = 500 } = {}) {
+export function listContents({ status, platform, window: windowStart, q, capturedSince, limit = 500 } = {}) {
   const where = [];
   const params = [];
   if (status) { where.push('data_status = ?'); params.push(status); }
   if (platform) { where.push('platform = ?'); params.push(platform); }
   if (windowStart) { where.push('publish_time IS NOT NULL AND publish_time >= ?'); params.push(windowStart); }
+  if (capturedSince) { where.push('captured_at IS NOT NULL AND captured_at >= ?'); params.push(capturedSince); }
   if (q) {
     where.push('(title LIKE ? OR author_name LIKE ? OR body_excerpt LIKE ?)');
     const like = `%${q}%`;
@@ -272,9 +289,13 @@ export function listContents({ status, platform, window: windowStart, q, limit =
   return all(sql, params);
 }
 
-/** 取达标内容（账号池小红书/抖音 + confirmed + video/article + 任一互动指标 > 1000 + 在窗口内）。 */
+/** 取达标内容（账号池小红书/抖音 + confirmed + 平台所需指标全部达标 + 在窗口内）。 */
 export function getEligible(windowStartISO) {
   const platformPlaceholders = ELIGIBLE_PLATFORMS.map(() => '?').join(',');
+  const metricOk = (col, raw) => `(${col} > 1000 OR (${col} >= 1000 AND ${raw} LIKE '%+%'))`;
+  const likeOk = metricOk('c.like_count', 'c.like_raw');
+  const favoriteOk = metricOk('c.favorite_count', 'c.favorite_raw');
+  const shareOk = metricOk('c.share_count', 'c.share_raw');
   return all(
     `SELECT c.*, a.nickname AS account_nickname, a.category AS account_category, a.priority AS account_priority
      FROM contents c
@@ -283,10 +304,8 @@ export function getEligible(windowStartISO) {
        AND c.platform IN (${platformPlaceholders})
        AND c.content_type IN ('video','article')
        AND (
-         c.like_count > 1000 OR c.share_count > 1000 OR c.favorite_count > 1000
-         OR (c.like_count >= 1000 AND c.like_raw LIKE '%+%')
-         OR (c.share_count >= 1000 AND c.share_raw LIKE '%+%')
-         OR (c.favorite_count >= 1000 AND c.favorite_raw LIKE '%+%')
+         (c.platform = 'xiaohongshu' AND ${likeOk} AND ${favoriteOk})
+         OR (c.platform = 'douyin' AND ${likeOk} AND ${favoriteOk} AND ${shareOk})
        )
        AND c.publish_time IS NOT NULL AND c.publish_time >= ?
      ORDER BY MAX(COALESCE(c.like_count, 0), COALESCE(c.share_count, 0), COALESCE(c.favorite_count, 0)) DESC`,

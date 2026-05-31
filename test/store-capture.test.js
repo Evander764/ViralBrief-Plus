@@ -8,8 +8,9 @@ import assert from 'node:assert/strict';
 process.env.VBP_DATA_DIR = mkdtempSync(join(tmpdir(), 'vbp-capture-'));
 
 const {
-  upsertAccount, upsertCapture, confirmContent, getContent, importAccountsCsv, importAccountsLines, listAccounts,
+  upsertAccount, upsertCapture, confirmContent, getContent, importAccountsCsv, importAccountsLines, listAccounts, listContents,
 } = await import('../server/store.js');
+const { run } = await import('../server/db.js');
 
 const recent = () => new Date().toISOString();
 const twoDaysAgo = () => new Date(Date.now() - 2 * 86400000).toISOString();
@@ -32,16 +33,20 @@ test('RPA 稳定证据可自动入选，并保存指标证据 JSON', () => {
     content_type: 'video',
     author_name: '证据账号',
     title: '证据测试',
-    metrics_raw: { like: '1000+', share: '20', favorite: '10' },
+    metrics_raw: { like: '1000+', share: '1000+', favorite: '1000+' },
     metrics_source: 'rpa',
     metrics_confidence: 'dom',
-    metrics_evidence: { like: { source: 'dom', raw: '1000+', value: 1000 } },
+    metrics_evidence: {
+      like: { source: 'dom', raw: '1000+', value: 1000 },
+      favorite: { source: 'dom', raw: '1000+', value: 1000 },
+      share: { source: 'dom', raw: '1000+', value: 1000 },
+    },
     publish_time: twoDaysAgo(),
   });
   const c = getContent(r.id);
   assert.equal(c.account_id, acc.id);
   assert.equal(c.data_status, 'confirmed');
-  assert.equal(c.eligible_reason, '点赞 1000+');
+  assert.equal(c.eligible_reason, '点赞 1000+，收藏 1000+，转发/分享 1000+ 均达标');
   assert.deepEqual(JSON.parse(c.metrics_evidence_json).like, { source: 'dom', raw: '1000+', value: 1000 });
 });
 
@@ -49,7 +54,7 @@ test('采集时按「平台+昵称」自动关联账号池', () => {
   const acc = upsertAccount({ platform: 'douyin', nickname: '商业老王', category: '商业', priority: 'S' });
   const r = upsertCapture({
     url: 'https://www.douyin.com/video/link1', platform: 'douyin', content_type: 'video',
-    author_name: '商业老王', title: '关联测试', metrics_raw: { like: '5000', share: '3000' },
+    author_name: '商业老王', title: '关联测试', metrics_raw: { like: '5000', favorite: '4000', share: '3000' },
     metrics_source: 'manual', publish_time: recent(),
   });
   const c = getContent(r.id);
@@ -66,7 +71,7 @@ test('采集按主页链接自动关联（忽略追踪参数）', () => {
     url: 'https://www.xiaohongshu.com/explore/note1', platform: 'xiaohongshu', content_type: 'article',
     author_name: '马甲号名字不同', // 昵称对不上，只能靠主页链接匹配
     account_homepage_url: 'https://www.xiaohongshu.com/user/profile/ABC?utm_source=share', // 追踪参数会被归一化忽略
-    title: '主页匹配', metrics_raw: { like: '2000', share: '2000' },
+    title: '主页匹配', metrics_raw: { like: '2000', favorite: '2000' },
     metrics_source: 'manual', publish_time: recent(),
   });
   assert.equal(getContent(r.id).account_id, acc.id);
@@ -94,6 +99,38 @@ test('重复采集：URL 命中 → 合并补缺，不覆盖已有值', () => {
   assert.equal(after.share_count, 2000, '缺失的转发被补上');
 });
 
+test('重复补抓会刷新 captured_at，方便同步进今日候选', () => {
+  const first = upsertCapture({
+    url: 'https://www.xiaohongshu.com/explore/dup-today-candidate',
+    platform: 'xiaohongshu',
+    content_type: 'article',
+    author_name: '候选刷新',
+    title: '候选刷新测试',
+    metrics_raw: { like: '1.5w' },
+    metrics_source: 'page_text',
+    publish_time: recent(),
+  });
+  const capturedSince = new Date(Date.now() - 60_000).toISOString();
+  const inTodayCandidates = (id) => ['needs_review', 'missing_share', 'missing_favorite', 'missing_like', 'below_threshold', 'monitoring']
+    .some((status) => listContents({ status, capturedSince }).some((it) => it.id === id));
+  run('UPDATE contents SET captured_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', first.id]);
+  assert.equal(inTodayCandidates(first.id), false);
+
+  const second = upsertCapture({
+    url: 'https://www.xiaohongshu.com/explore/dup-today-candidate?from=share',
+    platform: 'xiaohongshu',
+    content_type: 'article',
+    author_name: '候选刷新',
+    title: '候选刷新测试',
+    metrics_raw: { favorite: '2000' },
+    metrics_source: 'page_text',
+    publish_time: recent(),
+  });
+
+  assert.equal(second.duplicate, true);
+  assert.equal(inTodayCandidates(first.id), true);
+});
+
 test('confirmContent 强制 manual + user_confirmed，并重算状态', () => {
   const r = upsertCapture({
     url: 'https://www.douyin.com/video/cf', platform: 'douyin', content_type: 'video',
@@ -101,11 +138,12 @@ test('confirmContent 强制 manual + user_confirmed，并重算状态', () => {
     metrics_source: 'page_ocr', publish_time: twoDaysAgo(),
   });
   assert.equal(getContent(r.id).data_status, 'needs_review');
-  // 用户把转发改成达标值
-  const c = confirmContent(r.id, { like_count: '1.2w', share_count: '2100' });
+  // 用户把收藏和转发都改成达标值
+  const c = confirmContent(r.id, { like_count: '1.2w', favorite_count: '2200', share_count: '2100' });
   assert.equal(c.metrics_source, 'manual');
   assert.equal(c.user_confirmed, 1);
   assert.equal(c.like_count, 12000);
+  assert.equal(c.favorite_count, 2200);
   assert.equal(c.share_count, 2100);
   assert.equal(c.data_status, 'confirmed');
 });

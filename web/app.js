@@ -17,6 +17,7 @@ const STATUS_LABEL = {
 let accountsCache = [];
 let accountSuggestionCache = [];
 const ACCOUNT_SEARCH_PLATFORMS = ['xiaohongshu', 'douyin'];
+let patrolRunning = false;
 
 async function api(path, opts = {}) {
   const res = await fetch(`/api${path}`, {
@@ -108,7 +109,8 @@ async function loadOverview() {
   ].map(([k, label, cls]) => `<div class="statcard ${cls}"><div class="n">${c[k] || 0}</div><div class="l">${label}</div></div>`);
   cards.push(`<div class="statcard"><div class="n">${fmt(s.usage.total)}</div><div class="l">今日 token（缓存 ${fmt(s.usage.cached)}）</div></div>`);
   $('#statCards').innerHTML = cards.join('');
-  $('#candCount').textContent = (c.needs_review || 0) + (c.missing_share || 0) + (c.missing_like || 0) || '';
+  const candCount = $('#candCount');
+  if (candCount) candCount.textContent = (c.needs_review || 0) + (c.missing_share || 0) + (c.missing_like || 0) || '';
   renderKeyState(s.hasApiKey, s.schedule);
 }
 function renderKeyState(hasKey, schedule) {
@@ -116,33 +118,99 @@ function renderKeyState(hasKey, schedule) {
   $('#keyState').innerHTML = `API Key：<b class="${hasKey ? 'on' : 'off'}">${hasKey ? '已配置' : '未配置'}</b> ｜ ${sch}`;
 }
 
-$('#ovGenerate').addEventListener('click', () => {
+async function getDefaultWindowType() {
+  const c = await api('/settings');
+  return c.schedule?.window || 'last_1_day';
+}
+
+$('#ovGenerate').addEventListener('click', async () => {
   const skipRpa = !$('#ovAutoCollect').checked;
-  generateReport(windowStr($('#ovDays').value), $('#ovGenMsg'), skipRpa);
+  try {
+    await generateReport(await getDefaultWindowType(), $('#ovGenMsg'), skipRpa, { button: $('#ovGenerate') });
+  } catch (e) {
+    toast('生成失败：' + e.message, 'bad');
+  }
 });
 
-async function generateReport(win, msgEl, skipRpa = false) {
-  const progressEl = $('#ovProgress');
-  const progressText = $('#ovProgressText');
-  const btn = $('#ovGenerate');
+async function stopPatrol() {
+  try {
+    await api('/patrol/stop', { method: 'POST' });
+    toast('已请求停止巡检，正在收尾关闭标签页...', 'ok');
+  } catch (e) {
+    toast('停止请求失败：' + e.message, 'bad');
+  }
+}
 
-  btn.disabled = true;
-  progressEl.style.display = 'block';
+$('#ovStopPatrol').addEventListener('click', stopPatrol);
+$('#candStopRpa').addEventListener('click', stopPatrol);
 
-  if (skipRpa) {
+function setPatrolRunning(running, primaryButton = null) {
+  patrolRunning = running;
+  $('#ovStopPatrol').disabled = !running;
+  $('#candStopRpa').disabled = !running;
+  if (primaryButton) primaryButton.disabled = running;
+}
+
+function mergePatrolSummary(summary, res) {
+  for (const key of ['total', 'success', 'failed', 'newItems', 'duplicates', 'discovered', 'skippedToday']) {
+    summary[key] += Number(res?.[key] || 0);
+  }
+  summary.stopped ||= !!res?.stopped;
+  summary.maxTabsPerBatch ||= res?.maxTabsPerBatch || res?.maxTabsPerPlatform || 0;
+  return summary;
+}
+
+async function runPatrolStages(progressText = null) {
+  const summary = { total: 0, success: 0, failed: 0, newItems: 0, duplicates: 0, discovered: 0, skippedToday: 0, stopped: false, maxTabsPerBatch: 0 };
+  for (const stage of [
+    { platform: 'xiaohongshu', label: '小红书' },
+    { platform: 'douyin', label: '抖音' },
+  ]) {
+    if (progressText) progressText.textContent = `正在巡检${stage.label}账号...`;
+    const res = await api('/patrol/run', {
+      method: 'POST',
+      body: JSON.stringify({ platform: stage.platform }),
+    });
+    if (res.error) throw new Error(res.error);
+    mergePatrolSummary(summary, res);
+    if (res.stopped) break;
+  }
+  return summary;
+}
+
+async function generateReport(win, msgEl, skipRpa = false, options = {}) {
+  const progressEl = Object.hasOwn(options, 'progressEl') ? options.progressEl : $('#ovProgress');
+  const progressText = Object.hasOwn(options, 'progressText') ? options.progressText : $('#ovProgressText');
+  const btn = options.button || $('#ovGenerate');
+
+  if (btn) btn.disabled = true;
+  if (progressEl) progressEl.style.display = 'block';
+
+  if (progressText && skipRpa) {
     progressText.textContent = '正在分析已有数据并生成日报...';
-  } else {
+  } else if (progressText) {
     progressText.textContent = '正在启动浏览器，自动采集最新数据...';
   }
   msgEl.textContent = '';
 
   try {
+    let patrolSummary = null;
+    if (!skipRpa) {
+      setPatrolRunning(true, btn);
+      patrolSummary = await runPatrolStages(progressText);
+      setPatrolRunning(false, btn);
+      if (patrolSummary.stopped) {
+        msgEl.textContent = '已停止巡检，未生成日报。';
+        return;
+      }
+      if (progressText) progressText.textContent = '巡检完成，正在调用模型生成日报...';
+    }
     const r = await api('/reports/generate', {
       method: 'POST',
-      body: JSON.stringify({ window: win, skipRpa }),
+      body: JSON.stringify({ window: win, skipRpa: true }),
     });
 
-    progressEl.style.display = 'none';
+    if (progressEl) progressEl.style.display = 'none';
 
     if (r.error) {
       toast('生成失败：' + r.error, 'bad');
@@ -150,8 +218,10 @@ async function generateReport(win, msgEl, skipRpa = false) {
     }
 
     let detail = `达标 ${r.eligibleCount} 条`;
-    if (r.patrolResult) {
-      detail += ` | 发现账号 ${r.patrolResult.discovered || 0}, 采集新增 ${r.patrolResult.newItems}, 去重 ${r.patrolResult.duplicates}`;
+    if (patrolSummary) {
+      detail += ` | 巡检账号 ${patrolSummary.total}, 新增 ${patrolSummary.newItems}, 去重 ${patrolSummary.duplicates}, 今日跳过 ${patrolSummary.skippedToday}`;
+    } else if (r.patrolResult) {
+      detail += ` | 巡检账号 ${r.patrolResult.total || 0}, 采集新增 ${r.patrolResult.newItems}, 去重 ${r.patrolResult.duplicates}`;
     } else if (r.rpaError) {
       detail += ` | RPA 未完成：${r.rpaError}`;
     }
@@ -162,10 +232,11 @@ async function generateReport(win, msgEl, skipRpa = false) {
     loadOverview();
     loadCandidates();
   } catch (e) {
-    progressEl.style.display = 'none';
+    if (progressEl) progressEl.style.display = 'none';
     toast('生成失败：' + e.message, 'bad');
   } finally {
-    btn.disabled = false;
+    setPatrolRunning(false);
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -175,8 +246,8 @@ let candFocusIdx = -1; // 当前键盘聚焦的卡片索引
 async function loadCandidates() {
   const accounts = await getAccountsCache();
   const all = [];
-  for (const st of ['needs_review', 'missing_share', 'missing_favorite', 'missing_like', 'below_threshold', 'monitoring']) {
-    const rows = await api(`/contents?status=${st}&include_observations=1`);
+  for (const st of ['confirmed', 'needs_review', 'missing_share', 'missing_favorite', 'missing_like', 'below_threshold', 'monitoring']) {
+    const rows = await api(`/contents?status=${st}&today=1&include_observations=1`);
     all.push(...rows);
   }
   candFocusIdx = -1;
@@ -190,7 +261,7 @@ async function loadCandidates() {
   }
   $('#candList').innerHTML = all.length
     ? all.map((it, i) => itemCard(it, accounts, i)).join('')
-    : '<p class="muted">暂无待处理内容。用浏览器插件「保存当前内容」后会出现在这里。</p>';
+    : '<p class="muted">今日暂无待处理内容。新抓取或重复补抓的内容会出现在这里，旧候选按北京时间自然清空。</p>';
   bindItemCards($('#candList'));
   updateCandSelectedCount();
 }
@@ -206,8 +277,11 @@ function accountOptions(it, accounts) {
 }
 
 function itemCard(it, accounts, idx) {
-  const shot = it.screenshot_path
-    ? `<img class="shot" src="/screenshots/${esc(it.screenshot_path.split('/').pop())}" alt="截图" />`
+  const mediaSrc = it.screenshot_path
+    ? `/screenshots/${esc(it.screenshot_path.split('/').pop())}`
+    : (it.cover_url ? esc(it.cover_url) : '');
+  const shot = mediaSrc
+    ? `<img class="shot" src="${mediaSrc}" alt="封面或截图" />`
     : '<div class="shot"></div>';
   
   let obsHtml = '';
@@ -248,7 +322,7 @@ function itemCard(it, accounts, idx) {
     ${shot}
     <div class="body">
       <div class="t">${esc(it.title) || '(无标题)'} <span class="badge ${it.data_status}">${STATUS_LABEL[it.data_status] || it.data_status}</span></div>
-      <div class="sub">${PLATFORM_LABEL[it.platform] || it.platform} ｜ ${esc(it.author_name) || '未知作者'} ｜ 采集来源：${esc(it.metrics_source)} ${it.url ? `｜ <a href="${esc(it.url)}" target="_blank" rel="noreferrer">原链接</a>` : ''}</div>
+      <div class="sub">${PLATFORM_LABEL[it.platform] || it.platform} ｜ ${esc(it.author_name) || '未知作者'} ｜ 采集来源：${esc(it.metrics_source)}${it.duration_text ? ` ｜ 时长 ${esc(it.duration_text)}` : ''}${it.url ? ` ｜ <a href="${esc(it.url)}" target="_blank" rel="noreferrer">原链接</a>` : ''}</div>
       <div class="metricgrid">
         <label>点赞<input type="number" data-f="like_count" value="${it.like_count ?? ''}" placeholder="${esc(it.like_raw || '')}" /></label>
         <label>转发/分享<input type="number" data-f="share_count" value="${it.share_count ?? ''}" placeholder="${esc(it.share_raw || '')}" /></label>
@@ -362,16 +436,17 @@ $('#candRunRpa').addEventListener('click', async (e) => {
   btn.disabled = true;
   btn.textContent = '巡检中...';
   try {
-    toast('正在启动已登录 Chrome，按设置批量巡检账号池...', 'ok');
-    const res = await api('/patrol/run', { method: 'POST' });
-    if (res.error) throw new Error(res.error);
-    const tabInfo = res.tabMode === 'multi' ? `，每轮 ${res.maxTabsPerBatch || res.maxTabsPerPlatform || 1} 个账号标签` : '';
-    toast(`自动巡检完成：发现 ${res.discovered || 0} 个账号，新增 ${res.newItems || 0} 条${tabInfo}`, 'ok');
+    setPatrolRunning(true, btn);
+    toast('正在启动已登录 Chrome，先发起小红书巡检 API，再发起抖音巡检 API...', 'ok');
+    const res = await runPatrolStages();
+    const tabInfo = res.maxTabsPerBatch ? `，每轮 ${res.maxTabsPerBatch} 个账号标签` : '';
+    toast(`${res.stopped ? '自动巡检已停止' : '自动巡检完成'}：巡检账号 ${res.total || 0} 个，新增 ${res.newItems || 0} 条，今日跳过 ${res.skippedToday || 0} 个${tabInfo}`, res.stopped ? '' : 'ok');
     loadCandidates();
     loadOverview();
   } catch (err) {
     toast('自动巡检失败: ' + err.message, 'bad');
   } finally {
+    setPatrolRunning(false);
     btn.disabled = false;
     btn.textContent = '一键自动巡检';
   }
@@ -423,8 +498,8 @@ document.addEventListener('keydown', (e) => {
   // 如果焦点在 input/select/textarea 中，不拦截（让用户正常输入）
   const tag = document.activeElement?.tagName;
   if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-  // 仅候选池 tab 可见时生效
-  if ($('#tab-candidates')?.classList.contains('hidden')) return;
+  // 候选池现在位于概览页下方，仅概览可见时启用。
+  if ($('#tab-overview')?.classList.contains('hidden')) return;
 
   const cards = $$('#candList .item');
   if (cards.length === 0) return;
@@ -573,6 +648,27 @@ $('#acDiscoverFollows').addEventListener('click', async (e) => {
   }
 });
 
+$('#acOpenXhsLinks').addEventListener('click', async (e) => {
+  const btn = e.target;
+  btn.disabled = true;
+  btn.textContent = '打开中...';
+  try {
+    accountsCache = [];
+    const res = await api('/accounts/open-platform', {
+      method: 'POST',
+      body: JSON.stringify({ platform: 'xiaohongshu' }),
+    });
+    const skipped = res.skippedCount ? `，跳过 ${res.skippedCount} 个无效链接` : '';
+    const kind = res.openedCount > 0 ? 'ok' : 'bad';
+    toast(`已在 Chrome 同时打开 ${res.openedCount || 0} 个小红书主页${skipped}`, kind);
+  } catch (err) {
+    toast('打开失败: ' + err.message, 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '打开全部小红书主页';
+  }
+});
+
 // 搜索链接是确定性拼接（与 server/lib/platform-links.js 一致），不经过 AI，绝不给死链。
 function platformSearchUrl(platform, nickname) {
   const q = encodeURIComponent(String(nickname || '').trim());
@@ -597,32 +693,54 @@ function fallbackAccountSearchLinks(nickname) {
   }));
 }
 
-// 右侧「搜索填空」运行在原生 WebKit 窗口里，target="_blank" 可能失效；
-// href 只做可见兜底，实际点击时用当前窗口跳到平台搜索页。
+async function openPlatformUrl(url) {
+  const targetUrl = String(url || '').trim();
+  if (!targetUrl) {
+    toast('未生成搜索链接，请检查平台和昵称', 'bad');
+    return false;
+  }
+  try {
+    await api('/browser/open', { method: 'POST', body: JSON.stringify({ url: targetUrl }) });
+    toast('已在 Chrome 打开平台页面', 'ok');
+    return true;
+  } catch (err) {
+    toast('打开失败: ' + err.message, 'bad');
+    return false;
+  }
+}
+
+function bindAccountOpenButtons(root = document) {
+  $$('[data-ac-open-url]', root).forEach((b) => b.addEventListener('click', async () => {
+    await openPlatformUrl(b.dataset.acOpenUrl);
+  }));
+}
+
+// 右侧「搜索填空」运行在工作台窗口里；平台页统一交给已登录 Chrome 打开。
 function syncSearchJumpLink() {
   const p = $('#acSearchPlatform').value;
   const nick = $('#acSearchNick').value.trim();
   const link = $('#acSearchJump');
   const url = platformSearchUrl(p, nick);
   link.textContent = `打开${PLATFORM_LABEL[p] || '平台'}搜索`;
-  link.href = url || '#';
+  link.dataset.acOpenUrl = url;
+  link.disabled = !url;
 }
 $('#acSearchPlatform').addEventListener('change', syncSearchJumpLink);
 $('#acSearchNick').addEventListener('input', syncSearchJumpLink);
 syncSearchJumpLink();
 
-$('#acSearchJump').addEventListener('click', (e) => {
+$('#acSearchJump').addEventListener('click', async (e) => {
   e.preventDefault();
   const nick = $('#acSearchNick').value.trim();
   if (!nick) {
     return toast('请先输入昵称或关键词', 'bad');
   }
-  const url = platformSearchUrl($('#acSearchPlatform').value, nick);
+  const url = $('#acSearchJump').dataset.acOpenUrl || platformSearchUrl($('#acSearchPlatform').value, nick);
   if (!url) {
     return toast('未生成搜索链接，请检查平台和昵称', 'bad');
   }
-  window.location.assign(url);
-  $('#acSearchHint').textContent = '已打开搜索页 → 找到本人后，复制其主页链接粘贴到上方，再点「添加到账号池」。';
+  const opened = await openPlatformUrl(url);
+  if (opened) $('#acSearchHint').textContent = '已在 Chrome 打开搜索页 → 找到本人后，复制其主页链接粘贴到上方，再点「添加到账号池」。';
 });
 
 function normalizeAccountSuggestion(item, fallbackNickname = '') {
@@ -655,7 +773,7 @@ function renderAiAccountResults(data = {}, query = '', error = '') {
 
   const shortcutHtml = shortcuts.length ? `
     <div class="ac-ai-shortcuts">
-      ${shortcuts.map((item) => `<a class="filebtn" href="${esc(accountSuggestionUrl(item))}" target="_blank" rel="noopener noreferrer">打开${esc(PLATFORM_LABEL[item.platform] || item.platform)}搜索</a>`).join('')}
+      ${shortcuts.map((item) => `<button type="button" class="filebtn" data-ac-open-url="${esc(accountSuggestionUrl(item))}">打开${esc(PLATFORM_LABEL[item.platform] || item.platform)}搜索</button>`).join('')}
     </div>` : '';
 
   const suggestionsHtml = accountSuggestionCache.length
@@ -669,7 +787,7 @@ function renderAiAccountResults(data = {}, query = '', error = '') {
           <div class="ac-ai-title">${esc(item.nickname)}</div>
           <div class="muted">${esc(meta)}${item.description ? ` ｜ ${esc(item.description)}` : ''}</div>
           <div class="ac-ai-actions">
-            ${openUrl ? `<a class="filebtn" href="${esc(openUrl)}" target="_blank" rel="noopener noreferrer">${esc(openText)}</a>` : ''}
+            ${openUrl ? `<button type="button" class="filebtn" data-ac-open-url="${esc(openUrl)}">${esc(openText)}</button>` : ''}
             <button data-ac-ai-fill="${idx}">填到搜索填空</button>
             <button class="primary" data-ac-ai-add="${idx}">添加到账号池</button>
           </div>
@@ -681,6 +799,8 @@ function renderAiAccountResults(data = {}, query = '', error = '') {
     ${error ? `<p class="muted">AI 搜索失败：${esc(error)}</p>` : ''}
     ${shortcutHtml}
     ${suggestionsHtml}`;
+
+  bindAccountOpenButtons($('#acAiResults'));
 
   $$('#acAiResults [data-ac-ai-fill]').forEach((b) => b.addEventListener('click', () => {
     const item = accountSuggestionCache[Number(b.dataset.acAiFill)];
@@ -780,7 +900,13 @@ async function loadReports() {
     loadReports();
   }));
 }
-$('#rpGenerate').addEventListener('click', () => generateReport(windowStr($('#rpDays').value), $('#rpMsg')));
+$('#rpGenerate').addEventListener('click', async () => {
+  try {
+    await generateReport(await getDefaultWindowType(), $('#rpMsg'), true, { button: $('#rpGenerate'), progressEl: null, progressText: null });
+  } catch (e) {
+    toast('生成失败：' + e.message, 'bad');
+  }
+});
 
 // ---------------------------------------------------------------- settings ----
 // 供应商预设：选了就自动填 Base URL，并给模型名/获取 Key 的提示。
@@ -853,7 +979,7 @@ async function loadSettings() {
   const wm = (c.schedule.window || 'last_1_day').match(/last_(\d+)_days?/);
   $('#stSchedDays').value = wm ? Number(wm[1]) : 1;
   $('#stBudget').value = c.budgetDailyTokens || 0;
-  $('#stRpaMaxTabs').value = c.rpa?.maxTabsPerBatch || 10;
+  $('#stRpaMaxTabs').value = c.rpa?.maxTabsPerBatch || 6;
   $('#stToken').textContent = c.pairingToken;
   $('#stEndpoint').textContent = `http://127.0.0.1:${PORT}`;
   renderSettingsKeyState(c);
@@ -1004,12 +1130,12 @@ $('#stSaveSettings').addEventListener('click', async () => {
       window: windowStr($('#stSchedDays').value),
     },
     rpa: {
-      maxTabsPerBatch: Number($('#stRpaMaxTabs').value) || 10,
+      maxTabsPerBatch: Number($('#stRpaMaxTabs').value) || 6,
     },
   };
   const pub = await api('/settings', { method: 'PUT', body: JSON.stringify(body) });
-  $('#stRpaMaxTabs').value = pub.rpa?.maxTabsPerBatch || 10;
-  $('#stSaveMsg').textContent = `已保存：每轮 ${pub.rpa?.maxTabsPerBatch || 10} 个账号标签`;
+  $('#stRpaMaxTabs').value = pub.rpa?.maxTabsPerBatch || 6;
+  $('#stSaveMsg').textContent = `已保存：每轮 ${pub.rpa?.maxTabsPerBatch || 6} 个账号标签`;
   toast('设置已保存', 'ok'); loadOverview();
 });
 $('#stCopyToken').addEventListener('click', async () => {
@@ -1023,8 +1149,13 @@ $('#stRegenToken').addEventListener('click', async () => {
 });
 
 // ---------------------------------------------------------------- boot ----
+async function loadOverviewPage() {
+  await loadOverview();
+  await loadCandidates();
+}
+
 const loaders = {
-  overview: loadOverview, candidates: loadCandidates, library: loadLibrary,
+  overview: loadOverviewPage, library: loadLibrary,
   accounts: loadAccounts, reports: loadReports, settings: loadSettings,
 };
-loadOverview().catch((e) => toast('加载失败：' + e.message, 'bad'));
+loadOverviewPage().catch((e) => toast('加载失败：' + e.message, 'bad'));

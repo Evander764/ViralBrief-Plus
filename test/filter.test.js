@@ -7,30 +7,40 @@ import {
 const base = {
   is_duplicate: 0, archived: 0, user_confirmed: 1, metrics_source: 'manual',
   platform: 'douyin', account_id: 'account-1',
-  content_type: 'video', like_count: 5000, share_count: 5000,
+  content_type: 'video', like_count: 5000, favorite_count: 5000, share_count: 5000,
 };
 
-test('任一互动指标 > 1000 → confirmed', () => {
+test('平台必需互动指标全部达标 → confirmed', () => {
   assert.equal(computeDataStatus({ ...base }), 'confirmed');
-  assert.equal(computeDataStatus({ ...base, like_count: 1001, share_count: 0 }), 'confirmed');
-  assert.equal(computeDataStatus({ ...base, like_count: 0, share_count: 1001 }), 'confirmed');
-  assert.equal(computeDataStatus({ ...base, like_count: 0, share_count: 0, favorite_count: 1001 }), 'confirmed');
+  assert.equal(computeDataStatus({
+    ...base, platform: 'xiaohongshu', like_count: 1001, favorite_count: 1001, share_count: 0,
+  }), 'confirmed');
+  assert.equal(computeDataStatus({
+    ...base, platform: 'douyin', like_count: 1001, favorite_count: 1001, share_count: 1001,
+  }), 'confirmed');
 });
 
-test('所有已知互动指标都未超过 1000 → below_threshold', () => {
+test('必需互动指标已知但未全部超过 1000 → below_threshold', () => {
   assert.equal(computeDataStatus({ ...base, like_count: 1000, share_count: 1000, favorite_count: 1000 }), 'below_threshold');
-  assert.equal(computeDataStatus({ ...base, like_count: 999, share_count: 0, favorite_count: null }), 'below_threshold');
-  assert.equal(computeDataStatus({ ...base, like_count: 500, share_count: null }), 'below_threshold');
+  assert.equal(computeDataStatus({ ...base, like_count: 999, favorite_count: 1001, share_count: 1001 }), 'below_threshold');
+  assert.equal(computeDataStatus({ ...base, platform: 'xiaohongshu', like_count: 500, favorite_count: null }), 'needs_review');
 });
 
 test('1000+ 视为超过 1000，但纯 1000 不入选', () => {
-  assert.equal(computeDataStatus({ ...base, like_count: 1000, like_raw: '1000+', share_count: 0 }), 'confirmed');
-  assert.equal(computeDataStatus({ ...base, like_count: 1000, like_raw: '1000', share_count: 0 }), 'below_threshold');
-  assert.equal(eligibleReason({ ...base, like_count: 1000, like_raw: '1000+', share_count: 0 }), '点赞 1000+');
+  const xhsPlus = {
+    ...base,
+    platform: 'xiaohongshu',
+    like_count: 1000,
+    like_raw: '1000+',
+    favorite_count: 1001,
+  };
+  assert.equal(computeDataStatus(xhsPlus), 'confirmed');
+  assert.equal(computeDataStatus({ ...xhsPlus, like_raw: '1000' }), 'below_threshold');
+  assert.equal(eligibleReason(xhsPlus), '点赞 1000+，收藏 1001 均达标');
 });
 
-test('两个指标都缺失 → needs_review', () => {
-  assert.equal(computeDataStatus({ ...base, like_count: null, share_count: null }), 'needs_review');
+test('必需指标缺失 → needs_review', () => {
+  assert.equal(computeDataStatus({ ...base, like_count: null, favorite_count: null, share_count: null }), 'needs_review');
 });
 
 test('关键：自动识别且未经人工确认 → needs_review（不自动达标）', () => {
@@ -54,10 +64,12 @@ test('稳定页面证据可自动入选，弱文本/OCR 证据需复核', () => 
     ...base,
     metrics_source: 'rpa',
     metrics_confidence: 'structured',
+    like_count: 5000,
+    favorite_count: 5000,
     share_count: 10,
-    favorite_count: null,
     metrics_evidence_json: JSON.stringify({
       like: { source: 'text', raw: '5000', value: 5000 },
+      favorite: { source: 'structured', raw: 5000, value: 5000 },
       share: { source: 'structured', raw: 10, value: 10 },
     }),
     user_confirmed: 0,
@@ -74,7 +86,7 @@ test('duplicate / archived 优先级最高', () => {
   assert.equal(computeDataStatus({ ...base, archived: 1 }), 'archived');
 });
 
-test('isEligible：只有账号池小红书/抖音 + confirmed + video/article + 任一指标超过 1000 才入选', () => {
+test('isEligible：只有账号池小红书/抖音 + confirmed + video/article + 平台必需指标达标才入选', () => {
   assert.equal(isEligible({ ...base, data_status: 'confirmed' }), true);
   assert.equal(isEligible({ ...base, data_status: 'missing_share' }), false);
   assert.equal(isEligible({ ...base, data_status: 'confirmed', content_type: 'other' }), false);
@@ -82,7 +94,7 @@ test('isEligible：只有账号池小红书/抖音 + confirmed + video/article +
   assert.equal(isEligible({ ...base, data_status: 'confirmed', platform: 'wechat_channels' }), false);
   assert.equal(isEligible({ ...base, data_status: 'confirmed', account_id: null }), false);
   assert.equal(isEligible({ ...base, data_status: 'confirmed', like_count: 1000, share_count: 1000, favorite_count: 1000 }), false);
-  assert.equal(isEligible({ ...base, data_status: 'confirmed', like_count: 1000, like_raw: '1000+' }), true);
+  assert.equal(isEligible({ ...base, data_status: 'confirmed', like_count: 1000, like_raw: '1000+', favorite_count: 1001, share_count: 1001 }), true);
 });
 
 test('阈值常量就是 1000', () => {

@@ -12,7 +12,6 @@ import { log } from '../lib/log.js';
 import {
   SYSTEM_PAGE_STATE, buildPageStateUser, validatePageState,
   SYSTEM_OBSERVE, buildObserveUser, validateObservation,
-  SYSTEM_READ_METRICS, validateMetricsRead,
 } from './prompts.js';
 import { getObservation, upsertObservation } from '../store.js';
 import { loadConfig } from '../config.js';
@@ -73,23 +72,4 @@ export async function observeVideo(screenshotB64, ctx = {}) {
 
   log.info(`[observe] activity="${json.observed_activity}" topic=${json.topic_category} conf=${json.confidence}`);
   return { observation: json, cached: false };
-}
-
-/**
- * 从截图读取指标数字（可选辅助）。
- * 返回的 raw 字符串需要经 normalizeMetric 转换，且以 needs_review 处理。
- * @param {string} screenshotB64
- * @returns {Promise<{json:object, usage:object}>}
- */
-export async function readMetricsFromScreenshot(screenshotB64) {
-  const { json, usage, model } = await callJSON({
-    system: SYSTEM_READ_METRICS,
-    user: '请从这张截图中读取可见的互动指标数字（点赞、转发、评论、收藏）。',
-    images: [{ data: screenshotB64, media_type: 'image/png' }],
-    validate: validateMetricsRead,
-    task: 'read_metrics',
-    maxTokens: 800,
-  });
-  log.info(`[read_metrics] like=${json.like_raw} share=${json.share_raw}`);
-  return { json, usage, model };
 }

@@ -2,7 +2,7 @@
  * 本地服务入口。
  *  - 监听 127.0.0.1（绝不对外暴露）。
  *  - 托管浏览器仪表盘（桌面端 UI）。
- *  - 提供 /api/capture 给浏览器插件。
+ *  - 提供 /api/capture、/api/ingest、/api/agent/* 三类本地内容入口。
  *  - 启动自动调度器：接入 API Key + 开启调度后，每天自动产出日报。
  *
  * 安全：所有 /api/*（除 /api/health）都需要配对 token；仪表盘从本地服务
@@ -17,6 +17,7 @@ import { execFile } from 'node:child_process';
 import { CDPClient } from './rpa/cdp.js';
 import { runPatrol, discoverFollowedCreators } from './rpa/patrol.js';
 import { launchChrome, killChrome } from './rpa/chrome-launcher.js';
+import { beginPatrolRun, endPatrolRun, requestPatrolStop, getPatrolRunState } from './rpa/control.js';
 
 import { WEB_DIR, SCREENSHOTS_DIR, ensureDirs, PROJECT_ROOT } from './lib/paths.js';
 import { log } from './lib/log.js';
@@ -26,6 +27,7 @@ import {
 } from './config.js';
 import {
   upsertCapture, confirmContent, archiveContent, deleteContent, getContent, listContents,
+  beijingDayStartISO,
   countsByStatus, listAccounts, upsertAccount, deleteAccount, importAccountsCsv, importAccountsLines,
   listReports, getReport, deleteReport, getUsageForDay, getAnalysis, getObservation, upsertObservation,
 } from './store.js';
@@ -33,8 +35,10 @@ import { runDailyReport } from './pipeline.js';
 import { startScheduler, restartScheduler } from './scheduler.js';
 import { testConnection } from './ai/client.js';
 import { analyzeContent, suggestAccountsFromAI } from './ai/analyze.js';
-import { recognizePageState, observeVideo, readMetricsFromScreenshot } from './ai/observe.js';
+import { recognizePageState, observeVideo } from './ai/observe.js';
 import { fetchAndExtract } from './ingest/scrape.js';
+import { openExternalBrowser, openExternalBrowserUrls } from './lib/browser-open.js';
+import { accountOpenUrlsForPlatform } from './lib/account-open.js';
 
 
 ensureDirs();
@@ -219,13 +223,23 @@ async function handleApi(req, res, url, segs) {
   }
 
   // ---- rpa patrol ----
+  if (p[0] === 'patrol' && p[1] === 'stop' && method === 'POST') {
+    return sendJson(res, 200, requestPatrolStop());
+  }
+  if (p[0] === 'patrol' && p[1] === 'state' && method === 'GET') {
+    return sendJson(res, 200, { active: getPatrolRunState() });
+  }
   if (p[0] === 'patrol' && p[1] === 'run' && method === 'POST') {
+    let runCtrl = null;
     try {
       const body = await readJson(req);
       const cfg = loadConfig();
       const windowType = body.window || cfg.schedule?.window || 'last_1_days';
       const maxTabsPerBatch = body.maxTabsPerBatch ?? cfg.rpa?.maxTabsPerBatch;
-      log.info('正在执行 Node.js CDP 自动巡检（小红书 + 抖音）...');
+      const includePatrolledToday = body.includePatrolledToday === true;
+      const platforms = body.platform ? [body.platform] : (Array.isArray(body.platforms) && body.platforms.length ? body.platforms : ['xiaohongshu', 'douyin']);
+      runCtrl = beginPatrolRun({ source: 'api', platforms });
+      log.info(`正在执行 Node.js CDP 自动巡检（${platforms.join(', ')}）...`);
       const client = new CDPClient();
       const chrome = await launchChrome({ port: 9222, waitMs: 15000 });
       let result;
@@ -234,7 +248,10 @@ async function handleApi(req, res, url, segs) {
         result = await runPatrol(client, {
           onProgress: (msg) => log.info(`[RPA] ${msg}`),
           windowType,
+          platforms,
           maxTabsPerBatch,
+          includePatrolledToday,
+          shouldStop: runCtrl.shouldStop,
           clientFactory: async () => {
             const c = new CDPClient();
             await c.connect(chrome.port);
@@ -247,12 +264,19 @@ async function handleApi(req, res, url, segs) {
       }
       return sendJson(res, 200, {
         success: true,
-        message: '自动巡检完成。',
+        message: result.stopped ? '自动巡检已停止。' : '自动巡检完成。',
+        platformComplete: !result.stopped,
+        platforms,
         ...result
       });
     } catch (e) {
+      if (e.code === 'VBP_PATROL_ACTIVE') {
+        return sendJson(res, 409, { error: e.message, active: e.active });
+      }
       log.error('桌面 Agent (Node CDP) 运行失败: ' + e.message);
       return sendJson(res, 500, { error: '桌面 Agent 运行失败: ' + e.message });
+    } finally {
+      if (runCtrl) endPatrolRun(runCtrl.id);
     }
   }
 
@@ -384,6 +408,9 @@ async function handleApi(req, res, url, segs) {
         platform: url.searchParams.get('platform') || undefined,
         window: url.searchParams.get('window') || undefined,
         q: url.searchParams.get('q') || undefined,
+        capturedSince: url.searchParams.get('today') === '1'
+          ? beijingDayStartISO()
+          : url.searchParams.get('captured_since') || undefined,
       });
       // 附加观察数据（候选池展示用）
       if (url.searchParams.get('include_observations') === '1') {
@@ -423,10 +450,35 @@ async function handleApi(req, res, url, segs) {
     }
   }
 
+  // ---- browser ----
+  if (p[0] === 'browser' && p[1] === 'open' && method === 'POST') {
+    const body = await readJson(req);
+    const target = Array.isArray(body.urls) ? body.urls : body.url;
+    try {
+      const opened = await openExternalBrowser(target);
+      return sendJson(res, 200, { ok: true, ...opened });
+    } catch (e) {
+      return sendJson(res, 400, { error: String(e.message || e) });
+    }
+  }
+
   // ---- accounts ----
   if (p[0] === 'accounts') {
     if (p.length === 1 && method === 'GET') return sendJson(res, 200, listAccounts());
     if (p.length === 1 && method === 'POST') return sendJson(res, 200, upsertAccount(await readJson(req)));
+    if (p[1] === 'open-platform' && method === 'POST') {
+      const body = await readJson(req);
+      const selected = accountOpenUrlsForPlatform(listAccounts(), body.platform || 'xiaohongshu');
+      if (!selected.platform) return sendJson(res, 400, { error: '不支持的平台' });
+      if (selected.urls.length > 0) await openExternalBrowserUrls(selected.urls);
+      return sendJson(res, 200, {
+        ok: true,
+        platform: selected.platform,
+        openedCount: selected.urls.length,
+        skippedCount: selected.skippedCount,
+        urls: selected.urls,
+      });
+    }
     if (p[1] === 'search-suggest' && method === 'POST') {
       const { q } = await readJson(req);
       if (!q || !q.trim()) return sendJson(res, 400, { error: '查询内容不能为空' });
@@ -453,11 +505,14 @@ async function handleApi(req, res, url, segs) {
     if (p.length === 1 && method === 'GET') return sendJson(res, 200, listReports());
     if (p[1] === 'generate' && method === 'POST') {
       const body = await readJson(req);
+      let runCtrl = null;
       try {
+        if (body.skipRpa !== true) runCtrl = beginPatrolRun({ source: 'report-generate', platforms: ['xiaohongshu', 'douyin'] });
         const r = await runDailyReport({
           windowType: body.window || cfg.schedule.window,
           force: !!body.force,
           skipRpa: body.skipRpa === true,
+          shouldStop: runCtrl?.shouldStop || (() => false),
         });
         return sendJson(res, 200, {
           id: r.report.id,
@@ -467,7 +522,12 @@ async function handleApi(req, res, url, segs) {
           rpaError: r.rpaError || null,
         });
       } catch (e) {
+        if (e.code === 'VBP_PATROL_ACTIVE') {
+          return sendJson(res, 409, { error: e.message, active: e.active });
+        }
         return sendJson(res, 200, { error: String(e.message || e) });
+      } finally {
+        if (runCtrl) endPatrolRun(runCtrl.id);
       }
     }
     const id = p[1];

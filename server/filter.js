@@ -1,5 +1,5 @@
 /**
- * 筛选引擎 —— 任一互动指标超过 1000 + 时间窗口 + 数据状态分层。
+ * 筛选引擎 —— 平台必需互动指标 + 时间窗口 + 数据状态分层。
  *
  * 全部为确定性逻辑，不经过 AI。是否「达标入榜」完全由这里决定，
  * 因此关键判定不可能因为模型幻觉而出错。
@@ -9,12 +9,14 @@ export const THRESHOLD = 1000;
 export const ELIGIBLE_TYPES = ['video', 'article'];
 export const ELIGIBLE_PLATFORMS = ['douyin', 'xiaohongshu'];
 export const QUALIFYING_METRICS = ['like', 'share', 'favorite'];
+export const PLATFORM_REQUIRED_METRICS = {
+  xiaohongshu: ['like', 'favorite'],
+  douyin: ['like', 'favorite', 'share'],
+};
 
 /**
- * 「双千」里第二个指标按平台取——因为各平台公开的指标不同：
- * - douyin / wechat_channels：公开「转发/分享」→ 用 share
- * - xiaohongshu：根本不公开转发数，但公开「收藏」→ 用 favorite
- * 这样小红书也能自动判定达标（赞 + 收藏），而不是永远卡在「缺转发数」。
+ * 平台常用第二指标的兼容辅助。当前入选口径由
+ * PLATFORM_REQUIRED_METRICS 决定；这里保留给旧调用方和平台展示逻辑使用。
  */
 export const SECOND_METRIC = { douyin: 'share', xiaohongshu: 'favorite', wechat_channels: 'share' };
 export function secondMetric(platform) { return SECOND_METRIC[platform] || 'share'; }
@@ -79,6 +81,32 @@ export function trustedQualifyingMetrics(c) {
   ));
 }
 
+export function requiredMetricsForPlatform(platform) {
+  return PLATFORM_REQUIRED_METRICS[platform] || QUALIFYING_METRICS;
+}
+
+export function trustedRequiredMetrics(c) {
+  return requiredMetricsForPlatform(c.platform).filter((metric) => (
+    metricExceedsThreshold(c, metric)
+    && (
+      c.user_confirmed === 1
+      || c.user_confirmed === true
+      || ['manual', 'authorized'].includes(c.metrics_source)
+      || metricIsTrusted(c, metric)
+    )
+  ));
+}
+
+export function platformThresholdMet(c) {
+  const required = requiredMetricsForPlatform(c.platform);
+  const met = trustedRequiredMetrics(c);
+  return required.every((metric) => met.includes(metric));
+}
+
+function requiredMetricKnown(c, metric) {
+  return known(metricValue(c, metric));
+}
+
 function metricIsTrusted(c, metric) {
   const evidence = metricEvidence(c, metric);
   if (evidence?.source) return trustedConfidence(evidence.source);
@@ -87,18 +115,18 @@ function metricIsTrusted(c, metric) {
 
 export function eligibleReason(c) {
   const labels = { like: '点赞', share: '转发/分享', favorite: '收藏' };
-  const parts = trustedQualifyingMetrics(c).map((metric) => {
+  const parts = trustedRequiredMetrics(c).map((metric) => {
     const raw = metricRaw(c, metric) || metricEvidence(c, metric)?.raw;
     const value = metricValue(c, metric);
     return `${labels[metric]} ${raw || value}`;
   });
-  return parts.length ? parts.join('，') : null;
+  return parts.length ? `${parts.join('，')} 均达标` : null;
 }
 
 /**
  * 计算单条内容的 data_status。优先级经过精心设计：
- *   duplicate > archived > needs_review(未确认的自动数据)
- *   > below_threshold(已知值 < 1000) > missing(已知值都 >=1000 但有缺失) > confirmed
+ *   duplicate > archived > monitoring(未确认且 24h 内)
+ *   > needs_review(未确认自动数据/缺关键值) > confirmed / below_threshold
  *
  * 关键原则「无法确认就不入榜」：只有 confirmed 才能进入正式日报。
  */
@@ -121,12 +149,15 @@ export function computeDataStatus(c) {
     return 'needs_review';
   }
 
-  if (trustedQualifyingMetrics(c).length > 0) return 'confirmed';
+  if (platformThresholdMet(c)) return 'confirmed';
 
-  if (qualifyingMetrics(c).length > 0) return 'needs_review';
+  const required = requiredMetricsForPlatform(c.platform);
+  if (required.some((metric) => metricExceedsThreshold(c, metric) && !trustedRequiredMetrics(c).includes(metric))) {
+    return 'needs_review';
+  }
 
-  const hasAnyMetric = QUALIFYING_METRICS.some((metric) => known(metricValue(c, metric)));
-  return hasAnyMetric ? 'below_threshold' : 'needs_review';
+  const hasAllRequired = required.every((metric) => requiredMetricKnown(c, metric));
+  return hasAllRequired ? 'below_threshold' : 'needs_review';
 }
 
 /**
@@ -161,7 +192,7 @@ export function windowStartISO(windowType, now = new Date()) {
 
 /**
  * 最终入选判定（防御性二次校验）。
- * data_status === 'confirmed' 已经隐含了超过 1000，但这里再显式核一遍，
+ * data_status === 'confirmed' 已经隐含了平台所需指标达标，但这里再显式核一遍，
  * 宁可多写几行也要保证「绝不把不达标的算成达标」。
  */
 export function isEligible(c) {
@@ -170,6 +201,6 @@ export function isEligible(c) {
     ELIGIBLE_PLATFORMS.includes(c.platform) &&
     known(c.account_id) &&
     ELIGIBLE_TYPES.includes(c.content_type) &&
-    trustedQualifyingMetrics(c).length > 0
+    platformThresholdMet(c)
   );
 }

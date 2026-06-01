@@ -16,23 +16,27 @@ import {
   upsertAccount,
   contentExistsByUrl,
   markAccountPatrolled,
+  beijingDayStartISO,
 } from '../store.js';
 import { SCREENSHOTS_DIR } from '../lib/paths.js';
 import { log } from '../lib/log.js';
 import { deriveMetricsWithEvidence, parseCount } from '../../extension/extract-core.js';
 import { clickRectLikeHuman, executeHumanActions } from './human-actions.js';
 import { looksLikeRealProfile, platformSearchUrl } from '../lib/platform-links.js';
-import { normalizeWindowType, THRESHOLD, windowStartISO as computeWindowStartISO } from '../filter.js';
+import { normalizeWindowType, windowStartISO as computeWindowStartISO } from '../filter.js';
 
 const DEFAULT_PLATFORMS = ['xiaohongshu', 'douyin'];
 const DEFAULT_MAX_CANDIDATES = 8;
-const DEFAULT_MAX_TABS_PER_BATCH = 10;
-const MIN_MEMORY_SAFE_TABS = 2;
+const DEFAULT_MAX_TABS_PER_BATCH = 6;
+const MAX_TABS_PER_BATCH = 10;
+const MIN_MEMORY_SAFE_TABS = 1;
 const MEMORY_PER_RPA_TAB_BYTES = 600 * 1024 * 1024;
 const MEMORY_RESERVE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_XHS_SCAN_CANDIDATES = 120;
 const MAX_XHS_SCROLLS = 20;
 const MAX_XHS_EMPTY_SCROLLS = 3;
+const XHS_ROW_TOLERANCE_PX = 72;
+const XHS_ROW_SCROLL_DELTA_Y = 180;
 
 export async function discoverFollowedCreators(client, opts = {}) {
   const platforms = opts.platforms || DEFAULT_PLATFORMS;
@@ -61,6 +65,8 @@ export async function runPatrol(client, opts = {}) {
     discoverFollows = false,
     maxCandidatesPerAccount = DEFAULT_MAX_CANDIDATES,
     clientFactory = null,
+    shouldStop = () => false,
+    includePatrolledToday = false,
   } = opts;
   const orderedPlatforms = orderPlatforms(platforms);
   const normalizedWindowType = normalizeWindowType(opts.windowType || 'last_1_days');
@@ -102,6 +108,7 @@ export async function runPatrol(client, opts = {}) {
     freeMemoryBytes,
     windowType: normalizedWindowType,
     windowStartISO: patrolWindowStartISO,
+    stopped: false,
   };
 
   progress(`开始自动巡检: ${orderedPlatforms.join(', ')}`);
@@ -125,63 +132,91 @@ export async function runPatrol(client, opts = {}) {
   }
 
   const placeholders = orderedPlatforms.map(() => '?').join(',');
-  const accounts = all(
-    `SELECT * FROM accounts WHERE monitor_enabled = 1 AND platform IN (${placeholders}) ORDER BY priority ASC, last_patrolled_at ASC NULLS FIRST, created_at DESC`,
+  const rawAccounts = all(
+    `SELECT * FROM accounts WHERE monitor_enabled = 1 AND platform IN (${placeholders})`,
     orderedPlatforms,
   );
+  const sortedAccounts = sortPatrolAccounts(rawAccounts);
+  const todayStart = beijingDayStartISO();
+  const skippedToday = includePatrolledToday ? [] : sortedAccounts.filter((acc) => isPatrolledSince(acc, todayStart));
+  const accounts = includePatrolledToday ? sortedAccounts : sortedAccounts.filter((acc) => !isPatrolledSince(acc, todayStart));
   result.total = accounts.length;
+  result.skippedToday = skippedToday.length;
   for (const acc of accounts) {
     initPlatformResult(result, acc.platform).total++;
   }
 
   if (clientFactory) {
     if (maxTabsPerBatch < requestedMaxTabsPerBatch) {
-      progress(`启用混合批量巡检: 目标每批 ${requestedMaxTabsPerBatch} 个账号；可用内存不足，自动降到 ${maxTabsPerBatch} 个`);
+      progress(`启用分平台批量巡检: 目标每批 ${requestedMaxTabsPerBatch} 个账号；可用内存不足，自动降到 ${maxTabsPerBatch} 个`);
     } else {
-      progress(`启用混合批量巡检: 每批最多同时打开 ${maxTabsPerBatch} 个小红书/抖音账号标签页`);
+      progress(`启用分阶段批量巡检: 每批最多同时打开 ${maxTabsPerBatch} 个账号标签页`);
     }
     let primaryAvailable = true;
-    for (let start = 0; start < accounts.length; start += maxTabsPerBatch) {
-      const batch = accounts.slice(start, start + maxTabsPerBatch);
-      const outcomes = await patrolMixedBatch(batch, {
-        client,
-        clientFactory,
-        progress,
-        startIndex: start,
-        total: accounts.length,
-        maxCandidates: maxCandidatesPerAccount,
-        windowStartISO: patrolWindowStartISO,
-        usePrimary: primaryAvailable,
-      });
-      primaryAvailable = false;
-      for (const outcome of outcomes) applyPatrolOutcome(result, outcome);
+    let globalStart = 0;
+    for (const platform of orderedPlatforms) {
+      if (shouldStop()) break;
+      const platformAccounts = accounts.filter((acc) => acc.platform === platform);
+      if (platformAccounts.length === 0) continue;
+      progress(`开始巡检${platformName(platform)}账号: ${platformAccounts.length} 个`);
+      for (let localStart = 0; localStart < platformAccounts.length; localStart += maxTabsPerBatch) {
+        if (shouldStop()) break;
+        const batch = platformAccounts.slice(localStart, localStart + maxTabsPerBatch);
+        const outcomes = await patrolMixedBatch(batch, {
+          client,
+          clientFactory,
+          progress,
+          startIndex: globalStart + localStart,
+          total: accounts.length,
+          maxCandidates: maxCandidatesPerAccount,
+          windowStartISO: patrolWindowStartISO,
+          usePrimary: primaryAvailable,
+          shouldStop,
+        });
+        primaryAvailable = false;
+        for (const outcome of outcomes) applyPatrolOutcome(result, outcome);
+      }
+      globalStart += platformAccounts.length;
     }
   } else {
-    for (let i = 0; i < accounts.length; i++) {
-      const outcome = await patrolAccount(client, accounts[i], progress, {
-        index: i,
-        total: accounts.length,
-        maxCandidates: maxCandidatesPerAccount,
-        windowStartISO: patrolWindowStartISO,
-      });
-      applyPatrolOutcome(result, outcome);
-      await client.sleep(1400 + Math.random() * 1600);
+    let index = 0;
+    for (const platform of orderedPlatforms) {
+      if (shouldStop()) break;
+      const platformAccounts = accounts.filter((acc) => acc.platform === platform);
+      if (platformAccounts.length === 0) continue;
+      progress(`开始巡检${platformName(platform)}账号: ${platformAccounts.length} 个`);
+      for (const acc of platformAccounts) {
+        if (shouldStop()) break;
+        const outcome = await patrolAccount(client, acc, progress, {
+          index,
+          total: accounts.length,
+          maxCandidates: maxCandidatesPerAccount,
+          windowStartISO: patrolWindowStartISO,
+          shouldStop,
+        });
+        applyPatrolOutcome(result, outcome);
+        index++;
+        await client.sleep(1400 + Math.random() * 1600);
+      }
     }
   }
 
-  progress(`巡检完成: 发现 ${result.discovered}, 成功 ${result.success}, 失败 ${result.failed}, 新增 ${result.newItems}, 去重 ${result.duplicates}`);
+  result.stopped = !!shouldStop();
+  progress(`${result.stopped ? '巡检已停止' : '巡检完成'}: 发现 ${result.discovered}, 成功 ${result.success}, 失败 ${result.failed}, 新增 ${result.newItems}, 去重 ${result.duplicates}, 今日已跳过 ${result.skippedToday}`);
   return result;
 }
 
 function orderPlatforms(platforms) {
   const requested = Array.isArray(platforms) && platforms.length ? platforms : DEFAULT_PLATFORMS;
-  return [...new Set(requested.filter(Boolean))];
+  const priority = new Map(DEFAULT_PLATFORMS.map((platform, i) => [platform, i]));
+  return [...new Set(requested.filter(Boolean))]
+    .sort((a, b) => (priority.get(a) ?? 99) - (priority.get(b) ?? 99));
 }
 
 function normalizeMaxTabs(v, fallback = DEFAULT_MAX_TABS_PER_BATCH) {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
-  return Math.max(1, Math.min(30, Math.floor(n)));
+  return Math.max(1, Math.min(MAX_TABS_PER_BATCH, Math.floor(n)));
 }
 
 function memorySafeBatchSize(requested, freeBytes) {
@@ -190,6 +225,40 @@ function memorySafeBatchSize(requested, freeBytes) {
   const memoryTabs = Math.floor(availableForTabs / MEMORY_PER_RPA_TAB_BYTES);
   const safeTabs = Math.max(MIN_MEMORY_SAFE_TABS, memoryTabs);
   return Math.max(1, Math.min(requestedTabs, safeTabs));
+}
+
+export function priorityRank(priority) {
+  const first = String(priority || 'B').trim().toUpperCase()[0] || 'B';
+  const rank = { S: 0, A: 1, B: 2, C: 3, D: 4 };
+  return rank[first] ?? 50;
+}
+
+function platformRank(platform) {
+  if (platform === 'xiaohongshu') return 0;
+  if (platform === 'douyin') return 1;
+  return 9;
+}
+
+export function sortPatrolAccounts(accounts = []) {
+  return [...accounts].sort((a, b) => {
+    const priorityDelta = priorityRank(a.priority) - priorityRank(b.priority);
+    if (priorityDelta) return priorityDelta;
+    const platformDelta = platformRank(a.platform) - platformRank(b.platform);
+    if (platformDelta) return platformDelta;
+    const aCreated = Date.parse(a.created_at || '');
+    const bCreated = Date.parse(b.created_at || '');
+    const aHasCreated = Number.isFinite(aCreated);
+    const bHasCreated = Number.isFinite(bCreated);
+    if (aHasCreated && bHasCreated && aCreated !== bCreated) return aCreated - bCreated;
+    if (aHasCreated !== bHasCreated) return aHasCreated ? -1 : 1;
+    return Math.random() - 0.5;
+  });
+}
+
+function isPatrolledSince(acc, startISO) {
+  const t = Date.parse(acc?.last_patrolled_at || '');
+  const start = Date.parse(startISO || '');
+  return Number.isFinite(t) && Number.isFinite(start) && t >= start;
 }
 
 function platformName(platform) {
@@ -218,6 +287,8 @@ function applyPatrolOutcome(result, outcome) {
         platformResult.newItems++;
       }
     }
+  } else if (outcome.status === 'stopped') {
+    result.stopped = true;
   } else {
     result.failed++;
     platformResult.failed++;
@@ -225,14 +296,16 @@ function applyPatrolOutcome(result, outcome) {
   result.details.push(outcome);
 }
 
-async function patrolMixedBatch(accounts, { client, clientFactory, progress, startIndex, total, maxCandidates, windowStartISO, usePrimary }) {
+async function patrolMixedBatch(accounts, { client, clientFactory, progress, startIndex, total, maxCandidates, windowStartISO, usePrimary, shouldStop }) {
   const endIndex = startIndex + accounts.length;
   progress(`批次 ${startIndex + 1}-${endIndex}/${total}: 同时打开 ${accounts.length} 个账号主页`);
+  if (shouldStop?.()) return accounts.map((acc) => stoppedOutcome(acc));
 
   const opened = await Promise.allSettled(accounts.map(async (acc, localIndex) => {
     const index = startIndex + localIndex;
     let worker = null;
     try {
+      if (shouldStop?.()) return { outcome: stoppedOutcome(acc) };
       worker = usePrimary && localIndex === 0 ? client : await clientFactory();
       const session = await openPatrolSession(worker, acc, progress, { index, total });
       if (session.outcome) {
@@ -258,9 +331,14 @@ async function patrolMixedBatch(accounts, { client, clientFactory, progress, sta
   }
 
   progress(`批次 ${startIndex + 1}-${endIndex}/${total}: 主页打开完成，开始处理 ${sessions.length} 个账号`);
-  const processed = await Promise.allSettled(sessions.map((session) => (
-    patrolOpenSession(session, progress, { total, maxCandidates, windowStartISO })
-  )));
+  const processed = await Promise.allSettled(sessions.map(async (session) => {
+    try {
+      if (shouldStop?.()) return stoppedOutcome(session.acc);
+      return await patrolOpenSession(session, progress, { total, maxCandidates, windowStartISO, shouldStop });
+    } finally {
+      await closeWorker(session.worker, progress, session.acc);
+    }
+  }));
   for (let i = 0; i < processed.length; i++) {
     const item = processed[i];
     if (item.status === 'fulfilled') outcomes.push(item.value);
@@ -270,7 +348,6 @@ async function patrolMixedBatch(accounts, { client, clientFactory, progress, sta
     }
   }
 
-  await Promise.allSettled(sessions.map((session) => closeWorker(session.worker, progress, session.acc)));
   progress(`批次 ${startIndex + 1}-${endIndex}/${total}: 标签已全部关闭`);
   return outcomes;
 }
@@ -293,20 +370,23 @@ async function openPatrolSession(worker, acc, progress, { index, total }) {
   return { worker, acc, homepage, index };
 }
 
-async function patrolOpenSession(session, progress, { total, maxCandidates, windowStartISO }) {
+async function patrolOpenSession(session, progress, { total, maxCandidates, windowStartISO, shouldStop }) {
   const { worker, acc, homepage, index } = session;
   progress(`(${index + 1}/${total}) 处理已打开的${platformName(acc.platform)}主页 ${acc.nickname || homepage || acc.id}`);
   const accountProgress = progressForAccount(acc, progress);
+  if (shouldStop?.()) {
+    return stoppedOutcome(acc);
+  }
 
   if (acc.platform === 'xiaohongshu') {
-    const result = await collectXiaohongshuItems(worker, acc, homepage, accountProgress, { windowStartISO });
+    const result = await collectXiaohongshuItems(worker, acc, homepage, accountProgress, { maxCandidates, windowStartISO, shouldStop });
     markAccountPatrolledFromItems(acc.id, result.items);
     return okOutcome(acc, result.items, result.skipReasons);
   }
 
-  const result = await collectDouyinItems(worker, acc, accountProgress, { maxCandidates, windowStartISO });
-  const items = result.item ? [result.item] : [];
-  if (!result.item && result.skipReasons.length === 0) {
+  const result = await collectDouyinItems(worker, acc, accountProgress, { maxCandidates, windowStartISO, shouldStop });
+  const items = result.items || [];
+  if (items.length === 0 && result.skipReasons.length === 0) {
     return errorOutcome(acc, '未能提取到新增内容');
   }
   markAccountPatrolledFromItems(acc.id, items);
@@ -349,12 +429,25 @@ function errorOutcome(acc, error) {
   };
 }
 
+function stoppedOutcome(acc) {
+  return {
+    accountId: acc?.id || null,
+    nickname: acc?.nickname || null,
+    platform: acc?.platform || 'unknown',
+    status: 'stopped',
+    error: '用户已请求停止巡检',
+    item: null,
+    items: [],
+    skipReasons: [],
+  };
+}
+
 function progressForAccount(acc, progress) {
   const label = `${acc.platform}/${acc.nickname || acc.homepage_url || acc.id}`;
   return (msg) => progress(`[${label}] ${String(msg || '').trimStart()}`);
 }
 
-async function patrolAccount(client, acc, progress, { index, total, maxCandidates, windowStartISO }) {
+async function patrolAccount(client, acc, progress, { index, total, maxCandidates, windowStartISO, shouldStop }) {
   const label = `${acc.platform}/${acc.nickname || acc.homepage_url || acc.id}`;
   const accountProgress = (msg) => progress(`[${label}] ${String(msg || '').trimStart()}`);
 
@@ -364,18 +457,19 @@ async function patrolAccount(client, acc, progress, { index, total, maxCandidate
 
   progress(`(${index + 1}/${total}) 打开标签页巡检 ${label}`);
   try {
+    if (shouldStop?.()) return stoppedOutcome(acc);
     if (acc.platform === 'xiaohongshu') {
-      const result = await patrolXiaohongshu(client, acc, accountProgress, { windowStartISO });
+      const result = await patrolXiaohongshu(client, acc, accountProgress, { maxCandidates, windowStartISO, shouldStop });
       markAccountPatrolledFromItems(acc.id, result.items);
       return okOutcome(acc, result.items, result.skipReasons);
     }
 
-    const result = await patrolDouyin(client, acc, accountProgress, { maxCandidates, windowStartISO });
-    if (!result?.item && !result?.skipReasons?.length) {
+    const result = await patrolDouyin(client, acc, accountProgress, { maxCandidates, windowStartISO, shouldStop });
+    if (!result?.items?.length && !result?.skipReasons?.length) {
       return { accountId: acc.id, nickname: acc.nickname, platform: acc.platform, status: 'error', error: '未能提取到新增内容', item: null };
     }
 
-    const items = result.item ? [result.item] : [];
+    const items = result.items || [];
     markAccountPatrolledFromItems(acc.id, items);
     return okOutcome(acc, items, result.skipReasons);
   } catch (e) {
@@ -424,33 +518,34 @@ async function discoverDouyinCreators(client, progress) {
   return creators;
 }
 
-async function patrolDouyin(client, acc, progress, { maxCandidates, windowStartISO }) {
+async function patrolDouyin(client, acc, progress, { maxCandidates, windowStartISO, shouldStop }) {
   const homepage = await openAccountHomepage(client, acc, 'douyin', progress, { waitMs: 4500 });
-  if (!homepage) return { item: null, skipReasons: [{ reason: 'homepage_unavailable', detail: '未能打开抖音主页' }] };
-  return collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO });
+  if (!homepage) return { items: [], skipReasons: [{ reason: 'homepage_unavailable', detail: '未能打开抖音主页' }] };
+  return collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO, shouldStop });
 }
 
-async function collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO }) {
+async function collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO, shouldStop }) {
   const skipReasons = [];
   const postCandidates = await waitForPostCandidates(client, 'douyin');
   if (postCandidates.length === 0) {
     progress('  未找到最新视频链接');
-    return { item: null, skipReasons };
+    return { items: [], skipReasons };
   }
 
-  const item = await patrolCandidateUrls(client, acc, 'douyin', postCandidates, progress, {
+  const items = await patrolCandidateUrls(client, acc, 'douyin', postCandidates, progress, {
     maxCandidates,
     waitMs: 4500,
     windowStartISO,
     skipReasons,
+    shouldStop,
   });
-  return { item, skipReasons };
+  return { items, skipReasons };
 }
 
-async function patrolXiaohongshu(client, acc, progress, { windowStartISO }) {
+async function patrolXiaohongshu(client, acc, progress, { maxCandidates, windowStartISO, shouldStop }) {
   const homepage = await openAccountHomepage(client, acc, 'xiaohongshu', progress, { waitMs: 5000 });
   if (!homepage) return { items: [], skipReasons: [{ reason: 'homepage_unavailable' }] };
-  return collectXiaohongshuItems(client, acc, homepage, progress, { windowStartISO });
+  return collectXiaohongshuItems(client, acc, homepage, progress, { maxCandidates, windowStartISO, shouldStop });
 }
 
 async function openAccountHomepage(client, acc, platform, progress, { waitMs }) {
@@ -765,60 +860,80 @@ function creatorIdFromUrl(platform, url) {
   }
 }
 
-async function collectXiaohongshuItems(client, acc, homepage, progress, { windowStartISO }) {
+async function collectXiaohongshuItems(client, acc, homepage, progress, { maxCandidates = DEFAULT_MAX_CANDIDATES, windowStartISO, shouldStop }) {
   const items = [];
   const skipReasons = [];
   const seenCandidates = new Set();
+  const accountState = createAccountVisitState();
+  const candidateLimit = normalizeCandidateLimit(maxCandidates);
   let scrolls = 0;
   let emptyScrolls = 0;
   let stop = false;
 
-  while (!stop && seenCandidates.size < MAX_XHS_SCAN_CANDIDATES && scrolls <= MAX_XHS_SCROLLS) {
+  progress(`  小红书候选最多检查 ${candidateLimit} 条`);
+  while (!stop && seenCandidates.size < candidateLimit && scrolls <= MAX_XHS_SCROLLS) {
+    if (shouldStop?.()) break;
     const candidates = await waitForPostCandidates(client, 'xiaohongshu', seenCandidates.size === 0 ? 12000 : 1500);
-    const fresh = candidates.filter((candidate) => candidate?.url && !seenCandidates.has(candidate.url));
+    const fresh = sortXiaohongshuCandidates(
+      candidates.filter((candidate) => candidate?.url && !seenCandidates.has(candidate.url)),
+    );
 
     if (fresh.length === 0) {
       emptyScrolls++;
       if (emptyScrolls >= MAX_XHS_EMPTY_SCROLLS) break;
       await scrollPage(client, 1);
+      resetClickPosition(accountState);
       scrolls++;
       continue;
     }
     emptyScrolls = 0;
 
-    for (const candidate of fresh) {
-      if (seenCandidates.size >= MAX_XHS_SCAN_CANDIDATES) break;
-      seenCandidates.add(candidate.url);
+    const rows = groupXiaohongshuCandidateRows(fresh);
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+      for (const candidate of rows[rowIndex]) {
+        if (seenCandidates.size >= candidateLimit) break;
+        seenCandidates.add(candidate.url);
 
-      const decision = assessXiaohongshuCandidate(candidate, windowStartISO);
-      if (decision.action === 'skip') {
-        recordSkip(skipReasons, candidate, decision.reason, decision.detail);
-        progress(`  跳过候选: ${decision.detail}`);
-        continue;
-      }
-      if (decision.action === 'stop') {
-        recordSkip(skipReasons, candidate, decision.reason, decision.detail);
-        progress(`  停止继续检查: ${decision.detail}`);
-        if (decision.item) items.push(decision.item);
-        stop = true;
-        break;
+        const decision = assessXiaohongshuCandidate(candidate, windowStartISO);
+        if (decision.action === 'skip') {
+          recordSkip(skipReasons, candidate, decision.reason, decision.detail);
+          progress(`  跳过候选: ${decision.detail}`);
+          continue;
+        }
+        if (decision.action === 'stop') {
+          recordSkip(skipReasons, candidate, decision.reason, decision.detail);
+          progress(`  停止继续检查: ${decision.detail}`);
+          if (decision.item) items.push(decision.item);
+          stop = true;
+          break;
+        }
+
+        const item = await captureXiaohongshuCandidate(client, acc, homepage, candidate, progress, { windowStartISO, skipReasons, accountState, shouldStop });
+        if (item?.stop) {
+          if (item.item) items.push(item.item);
+          stop = true;
+          break;
+        }
+        if (item?.item) items.push(item.item);
+
+        const keptHomepageState = await restoreXiaohongshuHomepage(client, homepage, progress);
+        if (!keptHomepageState) resetClickPosition(accountState);
+        await client.sleep(900 + Math.random() * 700);
+        await assertNotBlocked(client, 'xiaohongshu');
       }
 
-      const item = await captureXiaohongshuCandidate(client, acc, homepage, candidate, progress, { windowStartISO, skipReasons });
-      if (item?.stop) {
-        if (item.item) items.push(item.item);
-        stop = true;
-        break;
+      if (!stop && rowIndex < rows.length - 1) {
+        progress('  当前行检查完成，向下滑动查看下一行');
+        await scrollXiaohongshuRow(client);
+        resetClickPosition(accountState);
+        scrolls++;
       }
-      if (item?.item) items.push(item.item);
-
-      await client.goto(homepage);
-      await client.sleep(1200 + Math.random() * 1000);
-      await assertNotBlocked(client, 'xiaohongshu');
+      if (stop || seenCandidates.size >= candidateLimit) break;
     }
 
-    if (!stop) {
+    if (!stop && seenCandidates.size < candidateLimit) {
       await scrollPage(client, 1);
+      resetClickPosition(accountState);
       scrolls++;
     }
   }
@@ -828,14 +943,54 @@ async function collectXiaohongshuItems(client, acc, homepage, progress, { window
   return { items, skipReasons };
 }
 
+function normalizeCandidateLimit(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_MAX_CANDIDATES;
+  return Math.max(1, Math.min(MAX_XHS_SCAN_CANDIDATES, Math.floor(n)));
+}
+
+function sortXiaohongshuCandidates(candidates) {
+  return [...candidates].sort(compareCandidateGridPosition);
+}
+
+function compareCandidateGridPosition(a, b) {
+  const ar = a?.rect;
+  const br = b?.rect;
+  if (ar && br) {
+    const topDiff = Number(ar.top) - Number(br.top);
+    if (Math.abs(topDiff) > XHS_ROW_TOLERANCE_PX) return topDiff;
+    const leftDiff = Number(ar.left) - Number(br.left);
+    if (leftDiff !== 0) return leftDiff;
+    return topDiff;
+  }
+  if (ar && !br) return -1;
+  if (!ar && br) return 1;
+  return String(a?.url || '').localeCompare(String(b?.url || ''));
+}
+
+function groupXiaohongshuCandidateRows(candidates) {
+  const rows = [];
+  for (const candidate of sortXiaohongshuCandidates(candidates)) {
+    const last = rows[rows.length - 1];
+    const rowTop = last?.[0]?.rect?.top;
+    const candidateTop = candidate?.rect?.top;
+    if (
+      last
+      && Number.isFinite(Number(rowTop))
+      && Number.isFinite(Number(candidateTop))
+      && Math.abs(Number(candidateTop) - Number(rowTop)) <= XHS_ROW_TOLERANCE_PX
+    ) {
+      last.push(candidate);
+    } else {
+      rows.push([candidate]);
+    }
+  }
+  return rows.map(sortXiaohongshuCandidates);
+}
+
 function assessXiaohongshuCandidate(candidate, windowStartISO) {
   if (candidate.isPinned) {
     return { action: 'skip', reason: 'pinned', detail: '置顶内容不算真正最新内容' };
-  }
-
-  const cardPublishTime = normalizedPublishTime(candidate.publishTime || candidate.publishRaw);
-  if (isBeforeWindow(cardPublishTime, windowStartISO)) {
-    return { action: 'stop', reason: 'out_of_window', detail: `候选发布时间超出窗口: ${candidate.publishRaw || cardPublishTime}` };
   }
 
   if (contentExistsByUrl(candidate.url)) {
@@ -847,30 +1002,36 @@ function assessXiaohongshuCandidate(candidate, windowStartISO) {
     };
   }
 
-  if (candidate.likeCount === null || candidate.likeCount === undefined) {
-    return { action: 'skip', reason: 'unknown_like', detail: '主页卡片未识别到点赞数，按规则不点击' };
-  }
-
-  if (!cardLikeQualifies(candidate.likeRaw, candidate.likeCount)) {
-    return { action: 'skip', reason: 'below_threshold', detail: `主页卡片点赞未达标: ${candidate.likeRaw ?? candidate.likeCount}` };
-  }
-
-  return { action: 'capture', reason: 'qualified', detail: `主页卡片点赞达标: ${candidate.likeRaw ?? candidate.likeCount}` };
+  return { action: 'capture', reason: 'inspect_detail', detail: '进入详情页读取发布时间和完整指标' };
 }
 
-async function captureXiaohongshuCandidate(client, acc, homepage, candidate, progress, { windowStartISO, skipReasons }) {
-  progress(`  进入达标候选: ${candidate.url}（主页点赞=${candidate.likeRaw ?? candidate.likeCount}）`);
+async function captureXiaohongshuCandidate(client, acc, homepage, candidate, progress, { windowStartISO, skipReasons, accountState, shouldStop }) {
+  if (shouldStop?.()) return { stop: true };
+  if (accountState?.openedCandidateUrls?.has(candidate.url)) {
+    recordSkip(skipReasons, candidate, 'opened_twice', '同一内容在本轮已打开过，停止该博主');
+    progress('  发现同一候选被重复打开，停止该博主');
+    return { stop: true };
+  }
+  progress(`  进入候选详情: ${candidate.url}`);
   if (candidate.rect && homepage) {
+    const guard = rightwardClickGuard(accountState, candidate);
+    if (!guard.ok) {
+      recordSkip(skipReasons, candidate, 'not_right_of_previous_click', guard.detail);
+      progress(`  跳过候选: ${guard.detail}`);
+      return null;
+    }
     const opened = await openXiaohongshuCandidateFromHomepage(client, homepage, candidate, progress, { waitMs: 7000 });
     if (opened?.skipped === 'pinned') {
       recordSkip(skipReasons, candidate, 'pinned', '回到主页后识别为置顶内容，跳过点击');
       return null;
     }
+    rememberClickPosition(accountState, candidate);
   } else {
     progress('  候选缺少可点击卡片范围，改用详情链接兜底');
     await client.goto(candidate.url);
     await client.sleep(7000);
   }
+  accountState?.openedCandidateUrls?.add(candidate.url);
 
   try {
     await assertNotBlocked(client, 'xiaohongshu');
@@ -890,30 +1051,37 @@ async function captureXiaohongshuCandidate(client, acc, homepage, candidate, pro
   const raw = await extractPageRaw(client, 'xiaohongshu');
   const data = buildCaptureData(raw, 'xiaohongshu');
   const finalUrl = isDetailUrl('xiaohongshu', data.pageUrl) ? data.pageUrl : candidate.url;
+  if (accountState?.openedDetailUrls?.has(finalUrl)) {
+    recordSkip(skipReasons, candidate, 'opened_twice', '同一详情页在本轮已打开过，停止该博主');
+    progress('  发现同一详情页被重复打开，停止该博主');
+    return { stop: true };
+  }
+  accountState?.openedDetailUrls?.add(finalUrl);
   const titleDecision = titleMismatchDecision(candidate, data.title, skipReasons);
   if (titleDecision) {
     recordSkip(skipReasons, candidate, titleDecision.reason, titleDecision.detail);
-    progress(`  候选标题校验失败，跳过: ${titleDecision.detail}`);
-    return null;
+    progress(`  候选标题与详情不一致，仍按已打开详情入库: ${titleDecision.detail}`);
   }
 
+  const timeGate = assessDetailPublishTime(data, windowStartISO);
+  if (timeGate.reason === 'unknown_time') {
+    recordSkip(skipReasons, candidate, timeGate.reason, timeGate.detail);
+    progress('  详情页未识别到发布时间，先入库等待后续复核');
+  }
+  if (timeGate.reason === 'out_of_window') {
+    recordSkip(skipReasons, candidate, timeGate.reason, timeGate.detail);
+    progress(`  详情页发布时间超出窗口，仍先入库，巡检结束后统一筛选: ${timeGate.displayTime}`);
+  }
+  if (timeGate.action === 'continue') {
+    progress(`  详情页发布时间确认在窗口内: ${timeGate.displayTime}`);
+  }
+  data.publishTime = timeGate.publishTime;
+
   if (contentExistsByUrl(finalUrl)) {
-    const item = duplicateItem(finalUrl);
+    const item = duplicateItem(finalUrl, timeGate.publishTime);
     recordSkip(skipReasons, candidate, 'already_seen', '详情页已采集，停止该账号后续检查');
     progress('  详情页已采集，停止该账号后续检查');
     return { stop: true, item };
-  }
-
-  const detailPublishTime = normalizedPublishTime(data.pubTime);
-  if (!detailPublishTime) {
-    recordSkip(skipReasons, candidate, 'unknown_time', '详情页未识别到发布时间，按规则不保存');
-    progress('  详情页未识别到发布时间，跳过该候选');
-    return null;
-  }
-  if (isBeforeWindow(detailPublishTime, windowStartISO)) {
-    recordSkip(skipReasons, candidate, 'out_of_window', `详情页发布时间超出窗口: ${data.pubTime || detailPublishTime}`);
-    progress(`  详情页发布时间超出窗口，停止该账号后续检查: ${data.pubTime || detailPublishTime}`);
-    return { stop: true };
   }
 
   if (isUnavailablePage(raw) || !hasCaptureSignal(data)) {
@@ -922,7 +1090,7 @@ async function captureXiaohongshuCandidate(client, acc, homepage, candidate, pro
     return null;
   }
 
-  progress(`  抓取到数据: 点赞=${data.like}, 转发=${data.share}, 收藏=${data.favorite}, 证据=${data.metricsConfidence}`);
+  progress(`  抓取到数据: 点赞=${data.like}, 转发=${data.share}, 收藏=${data.favorite}, 标签=${data.hashtags?.length || 0}, 证据=${data.metricsConfidence}`);
   const screenshotPath = await takeScreenshot(client, acc, 'xiaohongshu');
   const item = saveData(acc, finalUrl, data, screenshotPath);
   if (item.duplicate) {
@@ -933,15 +1101,169 @@ async function captureXiaohongshuCandidate(client, acc, homepage, candidate, pro
   return { item };
 }
 
-function cardLikeQualifies(raw, count) {
-  if (!Number.isFinite(Number(count))) return false;
-  if (Number(count) > THRESHOLD) return true;
-  return Number(count) >= THRESHOLD && /\+/.test(String(raw ?? ''));
+async function restoreXiaohongshuHomepage(client, homepage, progress) {
+  const current = await safeCurrentUrl(client);
+  if (!isDetailUrl('xiaohongshu', current)) return true;
+
+  progress('  点击左上角关闭按钮返回小红书主页');
+  const clicked = await clickXiaohongshuCloseButton(client);
+  if (clicked && await waitForXiaohongshuHomepage(client, homepage, 4500)) {
+    return true;
+  }
+
+  progress('  左上角关闭未回到主页，兜底恢复主页');
+  await client.goto(homepage);
+  await client.sleep(2200 + Math.random() * 1200);
+  return false;
+}
+
+async function clickXiaohongshuCloseButton(client) {
+  const rect = await client.evaluate(`
+    (() => {
+      // vbp-xhs-close-button
+      const visible = (el) => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        if (r.width < 8 || r.height < 8 || style.display === 'none' || style.visibility === 'hidden') return null;
+        if (r.right < 0 || r.bottom < 0 || r.left > innerWidth || r.top > innerHeight) return null;
+        return r;
+      };
+      const labelOf = (el) => [
+        el.getAttribute('aria-label'),
+        el.getAttribute('title'),
+        el.getAttribute('data-testid'),
+        el.className,
+        el.innerText || el.textContent,
+      ].filter(Boolean).join(' ');
+      const candidates = [];
+      const nodes = Array.from(document.querySelectorAll('button, [role="button"], a, svg, [class*="close"], [class*="back"], [class*="modal"]')).slice(0, 800);
+      for (const node of nodes) {
+        const target = node.closest('button, [role="button"], a') || node;
+        const r = visible(target);
+        if (!r) continue;
+        const centerX = r.left + r.width / 2;
+        const centerY = r.top + r.height / 2;
+        if (centerX > 220 || centerY > 180) continue;
+        const label = labelOf(target);
+        let score = 0;
+        if (/关闭|返回|close|back|cancel|退出/i.test(label)) score += 100;
+        if (/x|close|back|left/i.test(String(target.className || ''))) score += 25;
+        score += Math.max(0, 120 - centerX) + Math.max(0, 90 - centerY);
+        candidates.push({ x: centerX, y: centerY, width: innerWidth, height: innerHeight, score });
+      }
+      candidates.sort((a, b) => b.score - a.score);
+      return candidates[0] || null;
+    })()
+  `);
+  if (!rect) return false;
+  await executeHumanActions(client, [
+    { type: 'move', x: rect.x, y: rect.y, duration_ms: 220 },
+    { type: 'click', x: rect.x, y: rect.y, hold_ms: 80 },
+    { type: 'wait', milliseconds: 500 },
+  ], { width: rect.width, height: rect.height });
+  return true;
+}
+
+async function waitForXiaohongshuHomepage(client, homepage, timeoutMs = 4000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const url = await safeCurrentUrl(client);
+    if (!isDetailUrl('xiaohongshu', url) && (!homepage || sameCleanUrl(url, homepage) || /xiaohongshu\.com\/user\/profile\//.test(String(url || '')))) {
+      return true;
+    }
+    await client.sleep(350);
+  }
+  return false;
+}
+
+function createAccountVisitState() {
+  return {
+    openedCandidateUrls: new Set(),
+    openedDetailUrls: new Set(),
+    lastClickX: null,
+    lastClickRowTop: null,
+  };
+}
+
+function candidateClickPoint(candidate) {
+  const rect = candidate?.rect;
+  if (!rect) return null;
+  return {
+    x: Number(rect.left) + Number(rect.width) / 2,
+    y: Number(rect.top) + Number(rect.height) / 2,
+    rowTop: Number(rect.top),
+  };
+}
+
+function rightwardClickGuard(state, candidate) {
+  const point = candidateClickPoint(candidate);
+  if (!state || !point) return { ok: true };
+  const sameRow = Number.isFinite(state.lastClickRowTop)
+    && Math.abs(point.rowTop - state.lastClickRowTop) <= XHS_ROW_TOLERANCE_PX;
+  if (sameRow && Number.isFinite(state.lastClickX) && point.x <= state.lastClickX + 4) {
+    return {
+      ok: false,
+      detail: `候选点击位置没有位于上一次点击右侧: ${Math.round(point.x)} <= ${Math.round(state.lastClickX)}`,
+    };
+  }
+  return { ok: true };
+}
+
+function rememberClickPosition(state, candidate) {
+  const point = candidateClickPoint(candidate);
+  if (!state || !point) return;
+  state.lastClickX = point.x;
+  state.lastClickRowTop = point.rowTop;
+}
+
+function resetClickPosition(state) {
+  if (!state) return;
+  state.lastClickX = null;
+  state.lastClickRowTop = null;
 }
 
 function normalizedPublishTime(value) {
   if (!value) return null;
   return parseHumanTime(value);
+}
+
+function assessDetailPublishTime(data, windowStartISO) {
+  const publishTime = normalizedPublishTime(data?.pubTime);
+  const displayTime = data?.pubTime || publishTime;
+  if (!publishTime) {
+    return {
+      action: 'record',
+      reason: 'unknown_time',
+      detail: '详情页未识别到发布时间，先入库等待后续复核',
+      publishTime: null,
+      displayTime: '',
+    };
+  }
+  if (isBeforeWindow(publishTime, windowStartISO)) {
+    return {
+      action: 'record',
+      reason: 'out_of_window',
+      detail: `详情页发布时间超出窗口，先入库等待巡检后筛选: ${displayTime}`,
+      publishTime,
+      displayTime,
+    };
+  }
+  return {
+    action: 'continue',
+    reason: 'in_window',
+    detail: `详情页发布时间在窗口内: ${displayTime}`,
+    publishTime,
+    displayTime,
+  };
+}
+
+function decideAfterDetailPublishTime(platform, timeGate) {
+  const exitAccount = platform === 'douyin' && timeGate?.reason === 'out_of_window';
+  return {
+    exitAccount,
+    reason: exitAccount ? 'douyin_publish_time_before_window' : 'continue_after_detail_publish_time',
+  };
 }
 
 function isBeforeWindow(publishTime, windowStartISO) {
@@ -1018,13 +1340,13 @@ function titleMismatchDecision(candidate, detailTitle, skipReasons = []) {
   return null;
 }
 
-function duplicateItem(url) {
+function duplicateItem(url, publishTime = null) {
   return {
     url,
     title: '候选内容已采集',
     duplicate: true,
     dataStatus: 'already_seen',
-    publishTime: null,
+    publishTime,
     screenshotPath: null,
   };
 }
@@ -1035,10 +1357,15 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
   homepage = null,
   windowStartISO = null,
   skipReasons = [],
+  shouldStop = () => false,
 }) {
   progress(`  找到 ${postCandidates.length} 个候选内容，最多检查 ${maxCandidates} 条`);
+  const items = [];
+  const openedThisAccount = new Set();
   let duplicateUrl = null;
+  let duplicateItemResult = null;
   for (let i = 0; i < Math.min(postCandidates.length, maxCandidates); i++) {
+    if (shouldStop?.()) break;
     const candidate = normalizePostCandidate(postCandidates[i]);
     const postUrl = candidate?.url;
     if (!postUrl) continue;
@@ -1047,10 +1374,9 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
       progress(`  候选 ${i + 1} 是置顶内容，跳过`);
       continue;
     }
-    const cardPublishTime = normalizedPublishTime(candidate.publishTime || candidate.publishRaw);
-    if (isBeforeWindow(cardPublishTime, windowStartISO)) {
-      recordSkip(skipReasons, candidate, 'out_of_window', `候选发布时间超出窗口: ${candidate.publishRaw || cardPublishTime}`);
-      progress(`  候选 ${i + 1} 发布时间超出窗口，停止该账号后续检查`);
+    if (openedThisAccount.has(postUrl)) {
+      recordSkip(skipReasons, candidate, 'opened_twice', '同一内容在本轮已打开过，停止该博主');
+      progress(`  候选 ${i + 1} 在本轮已打开过，停止该账号后续检查`);
       break;
     }
     if (contentExistsByUrl(postUrl)) {
@@ -1066,8 +1392,15 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
     } else {
       if (platform === 'xiaohongshu') progress('  候选缺少可点击卡片范围，改用详情链接兜底');
       await client.goto(postUrl);
-      await client.sleep(waitMs);
+      if (platform === 'douyin') {
+        await client.sleep(300);
+        await pauseDouyinVideo(client, progress);
+        await client.sleep(Math.max(0, waitMs - 300));
+      } else {
+        await client.sleep(waitMs);
+      }
     }
+    openedThisAccount.add(postUrl);
     try {
       await assertNotBlocked(client, platform);
     } catch (e) {
@@ -1086,60 +1419,257 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
       }
     }
 
+    const preferredPubTime = platform === 'douyin'
+      ? await readDouyinDetailPublishTime(client, progress)
+      : null;
     const raw = await extractPageRaw(client, platform);
+    if (preferredPubTime) raw.pubTime = preferredPubTime;
     const data = buildCaptureData(raw, platform);
     const finalUrl = isDetailUrl(platform, data.pageUrl) ? data.pageUrl : postUrl;
+    if (openedThisAccount.has(finalUrl) && finalUrl !== postUrl) {
+      recordSkip(skipReasons, candidate, 'opened_twice', '同一详情页在本轮已打开过，停止该博主');
+      progress('  发现同一详情页被重复打开，停止该账号后续检查');
+      break;
+    }
+    openedThisAccount.add(finalUrl);
     const titleDecision = titleMismatchDecision(candidate, data.title, skipReasons);
     if (titleDecision) {
       recordSkip(skipReasons, candidate, titleDecision.reason, titleDecision.detail);
-      progress(`  候选标题校验失败，跳过: ${titleDecision.detail}`);
-      continue;
+      progress(`  候选标题与详情不一致，仍按已打开详情入库: ${titleDecision.detail}`);
     }
 
+    const timeGate = assessDetailPublishTime(data, windowStartISO);
+    const publishDecision = decideAfterDetailPublishTime(platform, timeGate);
+    if (timeGate.reason === 'unknown_time') {
+      recordSkip(skipReasons, candidate, timeGate.reason, timeGate.detail);
+      progress('  详情页未识别到发布时间，先入库等待后续复核');
+    }
+    if (timeGate.reason === 'out_of_window') {
+      recordSkip(skipReasons, candidate, timeGate.reason, timeGate.detail);
+      if (publishDecision.exitAccount) {
+        progress(`  抖音详情页发布时间超出窗口，保存本条后停止该账号: ${timeGate.displayTime}`);
+      } else {
+        progress(`  详情页发布时间超出窗口，仍先入库，巡检结束后统一筛选: ${timeGate.displayTime}`);
+      }
+    }
+    if (timeGate.action === 'continue') {
+      progress(`  详情页发布时间确认在窗口内: ${timeGate.displayTime}`);
+    }
+    data.publishTime = timeGate.publishTime;
+    const stopAfterThisDetail = publishDecision.exitAccount;
+
     if (contentExistsByUrl(finalUrl)) {
-      progress('  详情页已采集，跳过');
+      progress(stopAfterThisDetail ? '  详情页已采集且发布时间超出窗口，停止该账号后续检查' : '  详情页已采集，跳过');
       duplicateUrl ||= finalUrl;
+      duplicateItemResult ||= duplicateItem(finalUrl, timeGate.publishTime);
+      if (stopAfterThisDetail) break;
       continue;
-    }
-    const detailPublishTime = normalizedPublishTime(data.pubTime);
-    if (!detailPublishTime) {
-      recordSkip(skipReasons, candidate, 'unknown_time', '详情页未识别到发布时间，按规则不保存');
-      progress('  详情页未识别到发布时间，跳过该候选');
-      continue;
-    }
-    if (isBeforeWindow(detailPublishTime, windowStartISO)) {
-      recordSkip(skipReasons, candidate, 'out_of_window', `详情页发布时间超出窗口: ${data.pubTime || detailPublishTime}`);
-      progress(`  详情页发布时间超出窗口，停止该账号后续检查: ${data.pubTime || detailPublishTime}`);
-      break;
     }
     if (isUnavailablePage(raw) || !hasCaptureSignal(data)) {
       progress(`  候选不可采，跳过: ${data.title || raw.pageUrl || postUrl}`);
+      if (stopAfterThisDetail) break;
       continue;
     }
 
-    progress(`  抓取到数据: 点赞=${data.like}, 转发=${data.share}, 收藏=${data.favorite}, 证据=${data.metricsConfidence}`);
+    progress(`  抓取到数据: 点赞=${data.like}, 转发=${data.share}, 收藏=${data.favorite}, 标签=${data.hashtags?.length || 0}, 证据=${data.metricsConfidence}`);
     const screenshotPath = await takeScreenshot(client, acc, platform);
     const item = saveData(acc, finalUrl, data, screenshotPath);
     if (item.duplicate) {
-      progress('  内容重复，继续检查下一条');
+      progress(stopAfterThisDetail ? '  内容重复且发布时间超出窗口，停止该账号后续检查' : '  内容重复，继续检查下一条');
       duplicateUrl ||= item.url;
+      duplicateItemResult ||= item;
+      if (stopAfterThisDetail) break;
       continue;
     }
-    return item;
+    items.push(item);
+    if (stopAfterThisDetail) break;
   }
 
+  if (items.length) return items;
   progress('  候选内容均已采集或不可采');
-  if (duplicateUrl) {
-    return {
-      url: duplicateUrl,
-      title: '候选内容已采集',
-      duplicate: true,
-      dataStatus: 'already_seen',
-      publishTime: null,
-      screenshotPath: null,
-    };
+  if (duplicateItemResult) return [duplicateItemResult];
+  if (duplicateUrl) return [duplicateItem(duplicateUrl)];
+  return [];
+}
+
+async function readDouyinDetailPublishTime(client, progress) {
+  try {
+    const state = await client.evaluate(`
+      (() => {
+        // vbp-douyin-layout-publish-time
+        const clean = (text) => String(text || '')
+          .replace(/\\s+/g, ' ')
+          .trim();
+        const textOf = (el) => clean([
+          el?.getAttribute?.('datetime'),
+          el?.getAttribute?.('aria-label'),
+          el?.getAttribute?.('title'),
+          el?.innerText || el?.textContent,
+        ].filter(Boolean).join(' '));
+        const visibleRect = (el) => {
+          if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          if (rect.width <= 3 || rect.height <= 3 || style.display === 'none' || style.visibility === 'hidden') return null;
+          if (rect.bottom < 0 || rect.top > innerHeight || rect.right < 0 || rect.left > innerWidth) return null;
+          return rect;
+        };
+        const publishTimeTextFrom = (text) => {
+          const s = clean(text)
+            .replace(/[０-９]/g, (c) => '0123456789'['０１２３４５６７８９'.indexOf(c)] || c)
+            .replace(/[．。]/g, '.');
+          if (!s) return null;
+          return s.match(/刚刚|今天(?:\\s*\\d{1,2}:\\d{2})?|昨天(?:\\s*\\d{1,2}:\\d{2})?|\\d+\\s*(?:分钟前|小时前|天前)|(?:19|20)\\d{2}\\s*(?:年|[-/.])\\s*\\d{1,2}\\s*(?:月|[-/.])\\s*\\d{1,2}\\s*(?:日|号)?(?:\\s*\\d{1,2}:\\d{2})?|\\d{1,2}\\s*(?:月|[-/])\\s*\\d{1,2}\\s*(?:日|号)?(?:\\s*\\d{1,2}:\\d{2})?/)?.[0] || null;
+        };
+        const rectsForSelectors = (selectors) => {
+          const out = [];
+          for (const selector of selectors) {
+            for (const el of document.querySelectorAll(selector)) {
+              const rect = visibleRect(el);
+              if (rect) out.push(rect);
+            }
+          }
+          return out;
+        };
+        const metricRects = rectsForSelectors([
+          '[data-e2e="video-player-digg"]',
+          '[data-e2e="video-player-comment"]',
+          '[data-e2e="video-player-collect"]',
+          '[data-e2e="video-player-share"]',
+          '[data-e2e*="digg"]',
+          '[data-e2e*="comment"]',
+          '[data-e2e*="collect"]',
+          '[data-e2e*="favorite"]',
+          '[data-e2e*="share"]',
+          '[aria-label*="点赞"]',
+          '[aria-label*="评论"]',
+          '[aria-label*="收藏"]',
+          '[aria-label*="分享"]',
+          '[aria-label*="转发"]',
+        ]);
+        const textNodes = Array.from(document.querySelectorAll('button, a, span, p, div')).slice(0, 2200);
+        for (const el of textNodes) {
+          const text = textOf(el);
+          if (!/点赞|喜欢|评论|收藏|转发|分享/.test(text) || text.length > 80) continue;
+          const rect = visibleRect(el);
+          if (rect) metricRects.push(rect);
+        }
+        const reportNodes = textNodes
+          .filter((el) => {
+            const text = textOf(el);
+            const rect = visibleRect(el);
+            return rect && /举报|投诉|report/i.test(text) && text.length <= 120;
+          })
+          .slice(0, 30);
+        const reportRects = reportNodes.map(visibleRect).filter(Boolean);
+        const videoRect = Array.from(document.querySelectorAll('video'))
+          .map(visibleRect)
+          .filter(Boolean)
+          .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0] || null;
+        const metricBand = metricRects.length ? {
+          left: Math.min(...metricRects.map((r) => r.left)),
+          right: Math.max(...metricRects.map((r) => r.right)),
+          top: Math.min(...metricRects.map((r) => r.top)),
+          bottom: Math.max(...metricRects.map((r) => r.bottom)),
+          centerY: metricRects.reduce((sum, r) => sum + r.top + r.height / 2, 0) / metricRects.length,
+        } : null;
+        const nearAny = (rect, rects, maxDx, maxDy) => {
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          let best = 0;
+          for (const other of rects) {
+            const ox = other.left + other.width / 2;
+            const oy = other.top + other.height / 2;
+            const dx = Math.abs(cx - ox);
+            const dy = Math.abs(cy - oy);
+            if (dx <= maxDx && dy <= maxDy) best = Math.max(best, 100 - Math.round(dx / 6) - Math.round(dy / 3));
+          }
+          return Math.max(0, best);
+        };
+        const narrowText = (text) => {
+          const idx = String(text || '').search(/发布时间|发布于|发布日期|举报|投诉|report/i);
+          if (idx < 0) return clean(text).slice(0, 260);
+          return clean(text).slice(Math.max(0, idx - 80), idx + 220);
+        };
+        const candidates = [];
+        const pushCandidate = (el, baseScore = 0, allowLongText = false) => {
+          const rect = visibleRect(el);
+          if (!rect) return;
+          const rawText = textOf(el);
+          if (!rawText || (!allowLongText && rawText.length > 220)) return;
+          const text = allowLongText ? narrowText(rawText) : rawText;
+          const time = publishTimeTextFrom(text);
+          if (!time) return;
+          let score = baseScore;
+          if (/发布时间|发布于|发布日期/.test(text)) score += 130;
+          if (/发布|时间|日期/.test(text)) score += 45;
+          if (/举报|投诉|report/i.test(text)) score += 45;
+          score += nearAny(rect, reportRects, 520, 110);
+          if (metricBand) {
+            const cy = rect.top + rect.height / 2;
+            if (Math.abs(cy - metricBand.centerY) <= 120) score += 40;
+            if (rect.left >= metricBand.right - 40) score += 45;
+            if (rect.top >= metricBand.top - 80 && rect.top <= metricBand.bottom + 160) score += 25;
+          }
+          if (videoRect) {
+            if (rect.top >= videoRect.bottom - 100 && rect.top <= videoRect.bottom + 280) score += 35;
+            if (rect.left >= videoRect.left + videoRect.width * 0.45 && rect.left <= videoRect.right + 260) score += 25;
+          }
+          if (rect.left > innerWidth * 0.35 && rect.top > innerHeight * 0.4) score += 12;
+          candidates.push({ time, score, text: text.slice(0, 180) });
+        };
+        const publishNodes = Array.from(document.querySelectorAll('time, [datetime], [class*="time"], [class*="date"], [class*="publish"], span, p, div')).slice(0, 2200);
+        for (const report of reportNodes) {
+          for (let el = report, depth = 0; el && el !== document.body && depth < 5; el = el.parentElement, depth++) {
+            pushCandidate(el, 120 - depth * 14, true);
+          }
+          for (const sibling of [report.previousElementSibling, report.nextElementSibling].filter(Boolean)) {
+            pushCandidate(sibling, 110, true);
+          }
+        }
+        for (const node of publishNodes) {
+          const text = textOf(node);
+          const explicit = /发布时间|发布于|发布日期/.test(text);
+          pushCandidate(node, explicit ? 150 : 10, explicit);
+        }
+        candidates.sort((a, b) => b.score - a.score);
+        const best = candidates[0] || null;
+        return best && best.score >= 40 ? best : null;
+      })()
+    `);
+    const raw = typeof state === 'string' ? state : state?.time;
+    if (!raw || !normalizedPublishTime(raw)) return null;
+    progress(`  已先识别抖音发布时间: ${raw}`);
+    return raw;
+  } catch (e) {
+    progress(`  抖音发布时间预识别失败，改用详情提取兜底: ${e.message}`);
+    return null;
   }
-  return null;
+}
+
+async function pauseDouyinVideo(client, progress) {
+  try {
+    const state = await client.evaluate(`
+      (() => {
+        // vbp-douyin-pause-video
+        const videos = Array.from(document.querySelectorAll('video'));
+        let paused = 0;
+        for (const video of videos) {
+          try {
+            video.pause();
+            video.muted = true;
+            if (video.paused) paused++;
+          } catch {}
+        }
+        return { videoCount: videos.length, pausedCount: paused };
+      })()
+    `);
+    if (state?.videoCount) {
+      progress(`  已暂停抖音视频播放: ${state.pausedCount}/${state.videoCount}`);
+    }
+  } catch (e) {
+    progress(`  抖音视频暂停失败，继续提取: ${e.message}`);
+  }
 }
 
 async function openXiaohongshuCandidateFromHomepage(client, homepage, candidate, progress, { waitMs }) {
@@ -1274,22 +1804,42 @@ function postLinksScript(platform, targetUrl = null) {
         return Math.round(num * unit);
       };
       const parseHumanTime = (raw) => {
-        const str = clean(raw);
+        const str = clean(raw).replace(/[０-９]/g, (c) => '0123456789'['０１２３４５６７８９'.indexOf(c)] || c).replace(/[．。]/g, '.');
         if (!str) return null;
         const now = new Date();
+        const dateToISO = (year, month, day, hour = 0, minute = 0) => {
+          const y = Number(year);
+          const m = Number(month);
+          const d = Number(day);
+          const h = Number(hour);
+          const min = Number(minute);
+          if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+          if (m < 1 || m > 12 || d < 1 || d > 31 || h < 0 || h > 23 || min < 0 || min > 59) return null;
+          return new Date(y, m - 1, d, h, min).toISOString();
+        };
         if (str.includes('刚刚')) return now.toISOString();
+        if (str.includes('今天')) {
+          const hm = str.match(/(\\d{1,2}):(\\d{2})/);
+          return new Date(now.getFullYear(), now.getMonth(), now.getDate(), Number(hm?.[1] || 0), Number(hm?.[2] || 0)).toISOString();
+        }
         const min = str.match(/(\\d+)\\s*分钟前/);
         if (min) return new Date(now.getTime() - Number(min[1]) * 60000).toISOString();
         const hour = str.match(/(\\d+)\\s*小时前/);
         if (hour) return new Date(now.getTime() - Number(hour[1]) * 3600000).toISOString();
         const day = str.match(/(\\d+)\\s*天前/);
         if (day) return new Date(now.getTime() - Number(day[1]) * 86400000).toISOString();
-        if (str.includes('昨天')) return new Date(now.getTime() - 86400000).toISOString();
-        if (/^\\d{1,2}-\\d{1,2}$/.test(str)) return new Date(\`\${now.getFullYear()}-\${str}\`).toISOString();
+        if (str.includes('昨天')) {
+          const hm = str.match(/(\\d{1,2}):(\\d{2})/);
+          return new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, Number(hm?.[1] || 0), Number(hm?.[2] || 0)).toISOString();
+        }
+        let m = str.match(/((?:19|20)\\d{2})\\s*(?:年|[-/.])\\s*(\\d{1,2})\\s*(?:月|[-/.])\\s*(\\d{1,2})\\s*(?:日|号)?(?:\\s+(\\d{1,2}):(\\d{2}))?/);
+        if (m) return dateToISO(m[1], m[2], m[3], m[4] || 0, m[5] || 0);
+        m = str.match(/(?:^|[^\\d])(\\d{1,2})\\s*(?:月|[-/])\\s*(\\d{1,2})\\s*(?:日|号)?(?:\\s+(\\d{1,2}):(\\d{2}))?(?:$|[^\\d])/);
+        if (m) return dateToISO(now.getFullYear(), m[1], m[2], m[3] || 0, m[4] || 0);
         const d = new Date(str);
         return Number.isNaN(d.getTime()) ? null : d.toISOString();
       };
-      const firstTimeText = (text) => clean(text).match(/刚刚|\\d+\\s*(?:分钟前|小时前|天前)|昨天|\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}|\\d{1,2}[-/]\\d{1,2}/)?.[0] || null;
+      const firstTimeText = (text) => clean(text).match(/刚刚|今天(?:\\s*\\d{1,2}:\\d{2})?|昨天(?:\\s*\\d{1,2}:\\d{2})?|\\d+\\s*(?:分钟前|小时前|天前)|(?:19|20)\\d{2}\\s*(?:年|[-/.])\\s*\\d{1,2}\\s*(?:月|[-/.])\\s*\\d{1,2}\\s*(?:日|号)?|\\d{1,2}\\s*(?:月|[-/])\\s*\\d{1,2}\\s*(?:日|号)?/)?.[0] || null;
       const detailKey = (href) => {
         try {
           const u = new URL(href, location.href);
@@ -1342,6 +1892,14 @@ function postLinksScript(platform, targetUrl = null) {
         link.closest('article, li, section, [class*="note"], [class*="feed"], [class*="card"], [class*="item"], [class*="cover"], [class*="video"], [class*="post"], [class*="aweme"], [data-e2e*="video"]')
         || link
       );
+      const xhsCardElements = () => {
+        const selectors = [
+          'section.note-item',
+          '[class~="note-item"]',
+          '[class*="note-item"]',
+        ];
+        return [...new Set(selectors.flatMap((selector) => [...document.querySelectorAll(selector)]))];
+      };
       const parseColor = (value) => {
         const s = String(value || '').trim();
         let m = s.match(/rgba?\\(\\s*(\\d+(?:\\.\\d+)?)\\s*,\\s*(\\d+(?:\\.\\d+)?)\\s*,\\s*(\\d+(?:\\.\\d+)?)/i);
@@ -1408,28 +1966,6 @@ function postLinksScript(platform, targetUrl = null) {
         }
         return false;
       };
-      const findLikeRaw = (card) => {
-        if (!card) return null;
-        const selectors = [
-          '[aria-label*="点赞"]',
-          '[aria-label*="赞"]',
-          '[title*="点赞"]',
-          '[title*="赞"]',
-          '[class*="like"] [class*="count"]',
-          '[class*="like"]',
-          '[class*="liked"]',
-          '[class*="赞"]',
-        ];
-        for (const selector of selectors) {
-          for (const el of card.querySelectorAll(selector)) {
-            const text = clean([el.getAttribute('aria-label'), el.getAttribute('title'), el.innerText || el.textContent].filter(Boolean).join(' '));
-            const m = text.match(/(?:点赞|赞|like)?\\s*[:：]?\\s*([\\d.,]+\\s*[万千wkWK]?\\+?)/i)
-              || text.match(/([\\d.,]+\\s*[万千wkWK]?\\+?)\\s*(?:点赞|赞|like)/i);
-            if (m) return m[1];
-          }
-        }
-        return null;
-      };
       const findPublishRaw = (card) => {
         if (!card) return null;
         for (const el of card.querySelectorAll('time, [datetime], [class*="time"], [class*="date"]')) {
@@ -1459,13 +1995,42 @@ function postLinksScript(platform, targetUrl = null) {
       };
       const out = [];
       const seen = new Set();
+      const pushXhsCard = (card) => {
+        const rect = visibleRect(card);
+        if (!rect) return;
+        if (rect.width > innerWidth * 0.92 || rect.height > innerHeight * 0.95) return;
+        const link = [...card.querySelectorAll('a[href]')]
+          .find((item) => isDetail(toAbs(item.getAttribute('href') || item.href)));
+        if (!link) return;
+        const href = toAbs(link.getAttribute('href') || link.href);
+        const key = detailKey(href);
+        if (!key || seen.has(key)) return;
+        if (targetKey && key !== targetKey) return;
+        const cardText = clean(card.innerText || card.textContent || link.innerText || link.textContent || '').slice(0, 800);
+        const isPinned = isPinnedContent(card, rect);
+        const titleRaw = findTitleRaw(card, link, cardText);
+        seen.add(key);
+        out.push({
+          url: href,
+          rect,
+          viewport: { width: innerWidth, height: innerHeight },
+          isPinned,
+          pinRaw: isPinned ? '置顶' : null,
+          titleRaw,
+          title: titleRaw,
+          publishRaw: findPublishRaw(card),
+          publishTime: parseHumanTime(findPublishRaw(card)),
+          cardText,
+        });
+      };
       const push = (link, allowWithoutRect = false) => {
         const href = toAbs(link.getAttribute('href') || link.href);
         if (!isDetail(href)) return;
         const key = detailKey(href);
         if (!key || seen.has(key)) return;
         if (targetKey && key !== targetKey) return;
-        const rect = findCardRect(link);
+        const linkRect = visibleRect(link);
+        const rect = linkRect ? findCardRect(link) : null;
         const card = findCardElement(link);
         const cardText = clean(card?.innerText || card?.textContent || link.innerText || link.textContent || '').slice(0, 800);
         const isPinned = isPinnedContent(card, rect || visibleRect(card) || visibleRect(link));
@@ -1473,7 +2038,6 @@ function postLinksScript(platform, targetUrl = null) {
         const pinRaw = isPinned ? '置顶' : null;
         if (platform === 'xiaohongshu') {
           if (!rect && !allowWithoutRect) return;
-          const likeRaw = findLikeRaw(card);
           const publishRaw = findPublishRaw(card);
           seen.add(key);
           out.push({
@@ -1484,8 +2048,6 @@ function postLinksScript(platform, targetUrl = null) {
             pinRaw,
             titleRaw,
             title: titleRaw,
-            likeRaw,
-            likeCount: parseCount(likeRaw),
             publishRaw,
             publishTime: parseHumanTime(publishRaw),
             cardText,
@@ -1506,6 +2068,12 @@ function postLinksScript(platform, targetUrl = null) {
           cardText,
         });
       };
+      if (platform === 'xiaohongshu') {
+        for (const card of xhsCardElements()) {
+          pushXhsCard(card);
+        }
+        if (out.length > 0 || targetKey) return out;
+      }
       const links = [...document.querySelectorAll('a[href]')];
       for (const a of links) {
         if (visibleRect(a)) push(a, false);
@@ -1633,6 +2201,141 @@ async function extractPageRaw(client, platform) {
         return null;
       };
       const meta = (name) => document.querySelector(\`meta[property="\${name}"], meta[name="\${name}"]\`)?.content || '';
+      const cleanBlock = (text) => String(text || '').replace(/\\s+/g, ' ').trim();
+      const firstAttr = (selectors, attr) => {
+        for (const selector of selectors) {
+          for (const el of document.querySelectorAll(selector)) {
+            const value = el.getAttribute(attr);
+            if (value) {
+              try { return new URL(value, location.href).href; } catch { return value; }
+            }
+          }
+        }
+        return null;
+      };
+      const readableVideoDuration = () => {
+        const v = document.querySelector('video');
+        if (!v || !Number.isFinite(v.duration) || v.duration <= 0) return null;
+        const total = Math.round(v.duration);
+        const mm = Math.floor(total / 60);
+        const ss = String(total % 60).padStart(2, '0');
+        return \`\${mm}:\${ss}\`;
+      };
+      const collectText = (selectors) => {
+        const out = [];
+        const seen = new Set();
+        for (const selector of selectors) {
+          for (const el of Array.from(document.querySelectorAll(selector)).slice(0, 8)) {
+            const text = cleanBlock(textOf(el));
+            if (!text || text.length < 2 || seen.has(text)) continue;
+            seen.add(text);
+            out.push(text);
+          }
+        }
+        return out.join('\\n').slice(0, 3000);
+      };
+      const extractHashtags = (text) => {
+        const found = [];
+        const seen = new Set();
+        const re = /#[^#\\s，。！？、,.!?;；:：)）(（\\[\\]【】]+/g;
+        for (const match of String(text || '').matchAll(re)) {
+          const tag = match[0].trim();
+          const key = tag.toLowerCase();
+          if (tag.length < 2 || seen.has(key)) continue;
+          seen.add(key);
+          found.push(tag);
+        }
+        return found.slice(0, 24);
+      };
+      const visibleRect = (el) => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        if (rect.width <= 4 || rect.height <= 4 || style.display === 'none' || style.visibility === 'hidden') return null;
+        if (rect.bottom < 0 || rect.top > innerHeight || rect.right < 0 || rect.left > innerWidth) return null;
+        return rect;
+      };
+      const publishTimeTextFrom = (text) => {
+        const s = cleanBlock(text).replace(/[０-９]/g, (c) => '0123456789'['０１２３４５６７８９'.indexOf(c)] || c).replace(/[．。]/g, '.');
+        if (!s) return null;
+        return s.match(/刚刚|今天(?:\\s*\\d{1,2}:\\d{2})?|昨天(?:\\s*\\d{1,2}:\\d{2})?|\\d+\\s*(?:分钟前|小时前|天前)|(?:19|20)\\d{2}\\s*(?:年|[-/.])\\s*\\d{1,2}\\s*(?:月|[-/.])\\s*\\d{1,2}\\s*(?:日|号)?(?:\\s*\\d{1,2}:\\d{2})?|\\d{1,2}\\s*(?:月|[-/])\\s*\\d{1,2}\\s*(?:日|号)?(?:\\s*\\d{1,2}:\\d{2})?/)?.[0] || null;
+      };
+      const findDouyinVisiblePublishTime = () => {
+        // vbp-douyin-visible-publish-time: 抖音详情页常把日期放在“举报”附近，优先读可见文本。
+        const directText = getText([
+          'span[data-e2e="video-author-publishtime"]',
+          '[data-e2e*="publish"]',
+          '.video-publish-time',
+          '[class*="publish"]',
+          '[class*="time"]',
+          'time',
+        ]);
+        const direct = publishTimeTextFrom(directText) || document.querySelector('time')?.dateTime || null;
+        if (direct) return direct;
+
+        const textFor = (el) => cleanBlock([
+          el?.getAttribute?.('datetime'),
+          el?.getAttribute?.('aria-label'),
+          el?.getAttribute?.('title'),
+          el?.innerText || el?.textContent,
+        ].filter(Boolean).join(' '));
+        const reportNodes = Array.from(document.querySelectorAll('button, a, div, span, p'))
+          .filter((el) => {
+            const rect = visibleRect(el);
+            const text = textFor(el);
+            if (!rect || !/举报|投诉|report/i.test(text)) return false;
+            if (text.length > 120) return false;
+            if (rect.width > innerWidth * 0.65 && rect.height > innerHeight * 0.35) return false;
+            return true;
+          })
+          .slice(0, 20);
+        const reportRects = reportNodes.map(visibleRect).filter(Boolean);
+        const nearReportScore = (rect) => {
+          if (!rect || reportRects.length === 0) return 0;
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          let best = 0;
+          for (const rr of reportRects) {
+            const rx = rr.left + rr.width / 2;
+            const ry = rr.top + rr.height / 2;
+            const dx = Math.abs(cx - rx);
+            const dy = Math.abs(cy - ry);
+            if (dx <= 420 && dy <= 96) best = Math.max(best, 140 - Math.round(dx / 5) - Math.round(dy / 3));
+          }
+          return Math.max(0, best);
+        };
+        const candidates = [];
+        const pushCandidate = (el, baseScore = 0, allowLongText = false) => {
+          const rect = visibleRect(el);
+          if (!rect) return;
+          const text = textFor(el);
+          if (!text || (!allowLongText && text.length > 180)) return;
+          const time = publishTimeTextFrom(text);
+          if (!time) return;
+          let score = baseScore + nearReportScore(rect);
+          if (rect.left > innerWidth * 0.35 && rect.top > innerHeight * 0.35) score += 18;
+          if (/发布|时间|日期/.test(text)) score += 25;
+          if (/举报|投诉|report/i.test(text)) score += 35;
+          candidates.push({ time, score });
+        };
+
+        for (const report of reportNodes) {
+          for (let el = report, depth = 0; el && el !== document.body && depth < 4; el = el.parentElement, depth++) {
+            pushCandidate(el, 100 - depth * 12, true);
+          }
+          for (const sibling of [report.previousElementSibling, report.nextElementSibling].filter(Boolean)) {
+            pushCandidate(sibling, 95, true);
+          }
+        }
+        const nodes = Array.from(document.querySelectorAll('time, [datetime], [class*="time"], [class*="date"], [class*="publish"], span, p, div')).slice(0, 1600);
+        for (const node of nodes) {
+          const name = String(node.tagName || '').toLowerCase();
+          const base = name === 'time' || node.hasAttribute?.('datetime') ? 90 : 20;
+          pushCandidate(node, base, false);
+        }
+        candidates.sort((a, b) => b.score - a.score);
+        return candidates[0]?.time || null;
+      };
       const scripts = [...document.querySelectorAll('script:not([src]), script[type="application/json"]')]
         .map((s) => s.textContent || '')
         .filter((s) => /(digg|share|comment|collect|liked|interact|aweme|note|favorite)/i.test(s))
@@ -1649,13 +2352,24 @@ async function extractPageRaw(client, platform) {
         .filter(Boolean)
         .join('\\n')
         .slice(0, 30000);
-      const bodyText = (document.body?.innerText || '').slice(0, 60000);
+      const fullPageText = (document.body?.innerText || '').slice(0, 60000);
       const common = {
         dataBlobs: scripts,
-        textSample: [bodyText, ariaText].filter(Boolean).join('\\n'),
+        textSample: [fullPageText, ariaText].filter(Boolean).join('\\n'),
         pageUrl: location.href,
       };
       if (platform === 'douyin') {
+        const title = getText(['h1.video-title', '[data-e2e="video-desc"]', 'h1']) || meta('og:title') || document.title;
+        const bodyText = collectText([
+          '[data-e2e="video-desc"]',
+          'h1.video-title',
+          '[class*="video-desc"]',
+          '[class*="desc"]',
+          '[class*="caption"]',
+        ]) || cleanBlock(meta('og:description'));
+        const coverUrl = meta('og:image')
+          || document.querySelector('video')?.poster
+          || firstAttr(['img[src*="douyin"]', 'img[src]', 'picture img'], 'src');
         return {
           ...common,
           domTexts: {
@@ -1664,11 +2378,27 @@ async function extractPageRaw(client, platform) {
             comment: getText(['[data-e2e="comment-count"]', '.comment-cnt', '[aria-label*="评论"]']),
             favorite: getText(['[data-e2e*="collect"]', '[data-e2e*="favorite"]', '[aria-label*="收藏"]']),
           },
-          title: getText(['h1.video-title', '[data-e2e="video-desc"]', 'h1']) || meta('og:title') || document.title,
-          pubTime: getText(['span[data-e2e="video-author-publishtime"]', '.video-publish-time', 'time']) || document.querySelector('time')?.dateTime || null,
+          title,
+          bodyText,
+          hashtags: extractHashtags([bodyText, title, fullPageText].filter(Boolean).join('\\n')),
+          pubTime: findDouyinVisiblePublishTime(),
           contentType: 'video',
+          coverUrl,
+          durationText: getText(['[class*="duration"]', '[data-e2e*="duration"]']) || readableVideoDuration(),
         };
       }
+      const title = getText(['#detail-title', '.note-title', '[class*="title"]', 'h1']) || meta('og:title') || document.title;
+      const bodyText = collectText([
+        '#detail-desc',
+        '.note-content',
+        '[class*="note-content"]',
+        '[class*="desc"]',
+        '[class*="content"]',
+        'article',
+      ]) || cleanBlock(meta('og:description'));
+      const coverUrl = meta('og:image')
+        || document.querySelector('video')?.poster
+        || firstAttr(['.note-content img[src]', '[class*="swiper"] img[src]', 'img[src]'], 'src');
       return {
         ...common,
         domTexts: {
@@ -1677,9 +2407,13 @@ async function extractPageRaw(client, platform) {
           comment: getText(['.interact-container .chat-wrapper .count', '[class*="comment-wrapper"] .count', '[class*="comment"] [class*="count"]', '[aria-label*="评论"]']),
           favorite: getText(['.interact-container .collect-wrapper .count', '[class*="collect-wrapper"] .count', '[class*="collect"] [class*="count"]', '[aria-label*="收藏"]']),
         },
-        title: getText(['#detail-title', '.note-title', '[class*="title"]', 'h1']) || meta('og:title') || document.title,
+        title,
+        bodyText,
+        hashtags: extractHashtags([bodyText, title, fullPageText].filter(Boolean).join('\\n')),
         pubTime: getText(['.bottom-container .date', '.note-publish-date', '[class*="date"]', 'time']) || document.querySelector('time')?.dateTime || null,
         contentType: 'article',
+        coverUrl,
+        durationText: getText(['[class*="duration"]', '[class*="video-time"]']) || readableVideoDuration(),
       };
     })()
   `);
@@ -1687,12 +2421,19 @@ async function extractPageRaw(client, platform) {
 
 function buildCaptureData(raw, platform) {
   const { metrics, evidence, confidence } = deriveMetricsWithEvidence(raw);
+  const bodyText = cleanupBodyExcerpt(raw.bodyText || '', platform);
+  const hashtags = normalizeHashtags(raw.hashtags || extractHashtagsFromText(`${raw.bodyText || ''}\n${raw.title || ''}\n${raw.textSample || ''}`));
   return {
     ...metrics,
     title: cleanupTitle(raw.title, platform),
+    bodyText,
+    hashtags,
+    bodyExcerpt: formatBodyExcerpt(bodyText, hashtags),
     pubTime: raw.pubTime,
     pageUrl: raw.pageUrl,
     contentType: raw.contentType,
+    coverUrl: raw.coverUrl || null,
+    durationText: raw.durationText || null,
     metricsEvidence: evidence,
     metricsConfidence: confidence,
   };
@@ -1734,6 +2475,49 @@ function cleanupTitle(title, platform) {
   return s;
 }
 
+function cleanupBodyExcerpt(text, platform) {
+  let s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  if (platform === 'xiaohongshu') s = s.replace(/\s*-\s*小红书\s*$/, '').trim();
+  if (platform === 'douyin') s = s.replace(/\s*-\s*抖音\s*$/, '').trim();
+  return s.slice(0, 2400);
+}
+
+function extractHashtagsFromText(text) {
+  const found = [];
+  const seen = new Set();
+  const re = /#[^#\s，。！？、,.!?;；:：)）(（\[\]【】]+/g;
+  for (const match of String(text || '').matchAll(re)) {
+    const tag = match[0].trim();
+    const key = tag.toLowerCase();
+    if (tag.length < 2 || seen.has(key)) continue;
+    seen.add(key);
+    found.push(tag);
+  }
+  return found;
+}
+
+function normalizeHashtags(tags) {
+  const list = Array.isArray(tags) ? tags : extractHashtagsFromText(String(tags || ''));
+  const out = [];
+  const seen = new Set();
+  for (const raw of list) {
+    const text = String(raw || '').trim();
+    if (!text) continue;
+    const tag = text.startsWith('#') ? text : `#${text}`;
+    const key = tag.toLowerCase();
+    if (tag.length < 2 || seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag);
+  }
+  return out.slice(0, 24);
+}
+
+function formatBodyExcerpt(bodyText, hashtags = []) {
+  const tagLine = hashtags.length ? `标签：${hashtags.join(' ')}` : '';
+  return [bodyText, tagLine].filter(Boolean).join('\n').slice(0, 3000);
+}
+
 async function takeScreenshot(client, acc, platform) {
   try {
     mkdirSync(SCREENSHOTS_DIR, { recursive: true });
@@ -1750,7 +2534,7 @@ async function takeScreenshot(client, acc, platform) {
 }
 
 function saveData(acc, url, data, screenshotPath) {
-  const publishTime = parseHumanTime(data.pubTime);
+  const publishTime = data.publishTime || parseHumanTime(data.pubTime);
   const payload = {
     platform: acc.platform,
     account_id: acc.id,
@@ -1767,8 +2551,11 @@ function saveData(acc, url, data, screenshotPath) {
     metrics_source: 'rpa',
     metrics_confidence: data.metricsConfidence,
     metrics_evidence: data.metricsEvidence,
+    body_excerpt: data.bodyExcerpt || null,
     publish_time: publishTime,
     screenshot_path: screenshotPath,
+    cover_url: data.coverUrl || null,
+    duration_text: data.durationText || null,
   };
 
   const res = upsertCapture(payload);
@@ -1785,17 +2572,48 @@ function saveData(acc, url, data, screenshotPath) {
 
 function parseHumanTime(str) {
   if (!str) return null;
+  const text = String(str)
+    .replace(/[０-９]/g, (c) => '0123456789'['０１２３４５６７８９'.indexOf(c)] || c)
+    .replace(/[．。]/g, '.')
+    .replace(/\s+/g, ' ')
+    .trim();
   const now = new Date();
-  if (str.includes('刚刚')) return now.toISOString();
-  const minMatch = str.match(/(\d+)\s*分钟前/);
+  const dateToISO = (year, month, day, hour = 0, minute = 0) => {
+    const y = Number(year);
+    const m = Number(month);
+    const d = Number(day);
+    const h = Number(hour);
+    const min = Number(minute);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+    if (m < 1 || m > 12 || d < 1 || d > 31 || h < 0 || h > 23 || min < 0 || min > 59) return null;
+    return new Date(y, m - 1, d, h, min).toISOString();
+  };
+  if (text.includes('刚刚')) return now.toISOString();
+  if (text.includes('今天')) {
+    const hm = text.match(/(\d{1,2}):(\d{2})/);
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate(), Number(hm?.[1] || 0), Number(hm?.[2] || 0)).toISOString();
+  }
+  const minMatch = text.match(/(\d+)\s*分钟前/);
   if (minMatch) return new Date(now.getTime() - Number(minMatch[1]) * 60000).toISOString();
-  const hrMatch = str.match(/(\d+)\s*小时前/);
+  const hrMatch = text.match(/(\d+)\s*小时前/);
   if (hrMatch) return new Date(now.getTime() - Number(hrMatch[1]) * 3600000).toISOString();
-  const dayMatch = str.match(/(\d+)\s*天前/);
+  const dayMatch = text.match(/(\d+)\s*天前/);
   if (dayMatch) return new Date(now.getTime() - Number(dayMatch[1]) * 86400000).toISOString();
-  if (str.includes('昨天')) return new Date(now.getTime() - 86400000).toISOString();
-  if (/^\d{2}-\d{2}$/.test(str)) return new Date(`${now.getFullYear()}-${str}`).toISOString();
-  const d = new Date(str);
+  if (text.includes('昨天')) {
+    const hm = text.match(/(\d{1,2}):(\d{2})/);
+    return new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - 1,
+      Number(hm?.[1] || 0),
+      Number(hm?.[2] || 0),
+    ).toISOString();
+  }
+  let m = text.match(/((?:19|20)\d{2})\s*(?:年|[-/.])\s*(\d{1,2})\s*(?:月|[-/.])\s*(\d{1,2})\s*(?:日|号)?(?:\s*(\d{1,2}):(\d{2}))?/);
+  if (m) return dateToISO(m[1], m[2], m[3], m[4] || 0, m[5] || 0);
+  m = text.match(/(?:^|[^\d])(\d{1,2})\s*(?:月|[-/])\s*(\d{1,2})\s*(?:日|号)?(?:\s*(\d{1,2}):(\d{2}))?(?:$|[^\d])/);
+  if (m) return dateToISO(now.getFullYear(), m[1], m[2], m[3] || 0, m[4] || 0);
+  const d = new Date(text);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
@@ -1832,6 +2650,13 @@ async function scrollPage(client, times) {
       { type: 'wait', milliseconds: 450 },
     ], { width: 1600, height: 1200 });
   }
+}
+
+async function scrollXiaohongshuRow(client) {
+  await executeHumanActions(client, [
+    { type: 'scroll', delta_y: XHS_ROW_SCROLL_DELTA_Y, x: 640, y: 620 },
+    { type: 'wait', milliseconds: 360 },
+  ], { width: 1600, height: 1200 });
 }
 
 if (fileURLToPath(import.meta.url) === process.argv[1]) {

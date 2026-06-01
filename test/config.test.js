@@ -15,18 +15,33 @@ const { redact } = await import('../server/lib/log.js');
 test('默认配置：openai + 自动生成配对 token', () => {
   const c = loadConfig();
   assert.ok(c.pairingToken && c.pairingToken.length >= 24);
-  assert.equal(c.rpa.maxTabsPerBatch, 10);
+  assert.equal(c.rpa.maxTabsPerBatch, 6);
   assert.equal(getPublicConfig().hasApiKey, false);
 });
 
-test('巡检每轮标签数会保存并限制在合理范围', () => {
-  let pub = saveConfig({ rpa: { maxTabsPerBatch: 14.8 } });
-  assert.equal(pub.rpa.maxTabsPerBatch, 14);
+test('巡检每轮标签数会保存并限制在 1-10 范围', () => {
+  let pub = saveConfig({ rpa: { maxTabsPerBatch: 7.8 } });
+  assert.equal(pub.rpa.maxTabsPerBatch, 7);
   pub = saveConfig({ rpa: { maxTabsPerBatch: 999 } });
-  assert.equal(pub.rpa.maxTabsPerBatch, 30);
+  assert.equal(pub.rpa.maxTabsPerBatch, 10);
   pub = saveConfig({ rpa: { maxTabsPerBatch: -5 } });
   assert.equal(pub.rpa.maxTabsPerBatch, 1);
-  saveConfig({ rpa: { maxTabsPerBatch: 10 } });
+  saveConfig({ rpa: { maxTabsPerBatch: 6 } });
+});
+
+test('默认回溯天数与每日自动运行设置会持久保存', () => {
+  const pub = saveConfig({
+    schedule: { enabled: true, time: '08:30', window: 'last_5_days' },
+    rpa: { maxTabsPerBatch: 6 },
+  });
+  assert.equal(pub.schedule.enabled, true);
+  assert.equal(pub.schedule.time, '08:30');
+  assert.equal(pub.schedule.window, 'last_5_days');
+
+  const fresh = loadConfigFresh();
+  assert.equal(fresh.schedule.enabled, true);
+  assert.equal(fresh.schedule.time, '08:30');
+  assert.equal(fresh.schedule.window, 'last_5_days');
 });
 
 test('API Key 加密往返：存进去能解出来', () => {

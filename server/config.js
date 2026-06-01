@@ -18,7 +18,7 @@ const DEFAULTS = {
   retries: 2,
   budgetDailyTokens: 0,        // 0 = 不限制，仅记录用量
   schedule: { enabled: false, time: '09:00', window: 'last_1_day', catchUp: true },
-  rpa: { maxTabsPerBatch: 10 },
+  rpa: { maxTabsPerBatch: 6 },
   pairingToken: '',
   apiKeyEnc: null,
   apiKeyEnc2: null,
@@ -56,7 +56,7 @@ function normalizeRpaConfig(input = {}) {
     ...DEFAULTS.rpa,
     ...input,
     maxTabsPerBatch: Number.isFinite(maxTabs)
-      ? Math.max(1, Math.min(30, Math.floor(maxTabs)))
+      ? Math.max(1, Math.min(10, Math.floor(maxTabs)))
       : DEFAULTS.rpa.maxTabsPerBatch,
   };
 }

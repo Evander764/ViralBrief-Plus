@@ -3,8 +3,10 @@
  * 与桌面端共用同一套管线与数据库。
  */
 import { runDailyReport } from '../server/pipeline.js';
+import { normalizeWindowType } from '../server/filter.js';
 
-const windowType = process.argv.includes('last_7_days') ? 'last_7_days' : 'last_3_days';
+const windowArg = process.argv.slice(2).find((arg) => /^last_\d+_days?$/.test(arg));
+const windowType = normalizeWindowType(windowArg || 'last_3_days');
 
 runDailyReport({ windowType })
   .then((r) => {

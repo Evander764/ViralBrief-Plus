@@ -12,6 +12,8 @@ import { log } from '../lib/log.js';
 import {
   SYSTEM_PAGE_STATE, buildPageStateUser, validatePageState,
   SYSTEM_OBSERVE, buildObserveUser, validateObservation,
+  SYSTEM_WECHAT_LOCATE, buildWechatLocateUser, validateWechatLocate,
+  SYSTEM_WECHAT_READ, buildWechatReadUser, validateWechatRead,
 } from './prompts.js';
 import { getObservation, upsertObservation } from '../store.js';
 import { loadConfig } from '../config.js';
@@ -72,4 +74,44 @@ export async function observeVideo(screenshotB64, ctx = {}) {
 
   log.info(`[observe] activity="${json.observed_activity}" topic=${json.topic_category} conf=${json.confidence}`);
   return { observation: json, cached: false };
+}
+
+/**
+ * 在截图里定位一个可点击元素，返回像素坐标（用于驱动微信桌面端）。
+ * 不走缓存（每帧都不同）。敏感按钮（点赞/支付/验证码等）会被模型拒绝。
+ * @param {string} screenshotB64 纯 base64
+ * @param {{description:string, imageWidth:number, imageHeight:number}} ctx
+ * @returns {Promise<{found:boolean, x?:number, y?:number, confidence:number, note?:string}>}
+ */
+export async function locateWechatTarget(screenshotB64, { description, imageWidth, imageHeight } = {}) {
+  const { json } = await callJSON({
+    system: SYSTEM_WECHAT_LOCATE,
+    user: buildWechatLocateUser(description, imageWidth, imageHeight),
+    images: [{ data: screenshotB64, media_type: 'image/png' }],
+    validate: validateWechatLocate,
+    task: 'wechat_locate',
+    maxTokens: 400,
+  });
+  log.info(`[wechat_locate] "${description}" found=${json.found} (${json.x},${json.y}) conf=${json.confidence}`);
+  return json;
+}
+
+/**
+ * 读取微信视频号/公众号详情截图：标题、发布时间、互动数字（原始文本）。
+ * 数字以原始展示文本返回，交由 normalize.js 换算；看不清为 null。
+ * @param {string} screenshotB64 纯 base64
+ * @param {{platform:string, creator?:string}} ctx
+ * @returns {Promise<{title:?string, publish_time:?string, is_pinned:boolean, is_paid:boolean, metrics:object, confidence:number}>}
+ */
+export async function readWechatDetail(screenshotB64, ctx = {}) {
+  const { json } = await callJSON({
+    system: SYSTEM_WECHAT_READ,
+    user: buildWechatReadUser(ctx),
+    images: [{ data: screenshotB64, media_type: 'image/png' }],
+    validate: validateWechatRead,
+    task: 'wechat_read',
+    maxTokens: 800,
+  });
+  log.info(`[wechat_read] title="${(json.title || '').slice(0, 20)}" pinned=${json.is_pinned} paid=${json.is_paid} conf=${json.confidence}`);
+  return json;
 }

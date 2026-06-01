@@ -7,7 +7,15 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const PLATFORM_LABEL = {
-  douyin: '抖音', xiaohongshu: '小红书', wechat_channels: '视频号', other: '其他',
+  douyin: '抖音', xiaohongshu: '小红书', wechat_channels: '视频号', wechat_article: '公众号', other: '其他',
+};
+// 视频号·公众号热点档位（与后端 wechat/score.js 的 tier 对应）。
+const WECHAT_TIER = {
+  early_breakout: { label: '早期爆发', kind: 'confirmed' },
+  qualified: { label: '达标', kind: 'confirmed' },
+  watch: { label: '观察中', kind: 'monitoring' },
+  below: { label: '未达标', kind: 'below_threshold' },
+  unknown: { label: '待补录', kind: 'needs_review' },
 };
 const STATUS_LABEL = {
   confirmed: '已确认', needs_review: '待复核', missing_share: '缺转发数',
@@ -1312,8 +1320,134 @@ async function loadOverviewPage() {
   await loadCandidates();
 }
 
+// ---------------------------------------------------------------- 微信热点 ----
+function wechatTierBadge(score) {
+  const t = WECHAT_TIER[score?.tier] || WECHAT_TIER.unknown;
+  const age = score && score.ageHours !== null && score.ageHours !== undefined
+    ? `发布 ${score.ageHours < 24 ? `${Math.round(score.ageHours)} 小时前` : `${Math.round(score.ageHours / 24)} 天前`}`
+    : '发布时间待补录';
+  const reasons = (score?.reasons || []).join('；');
+  return `<span class="badge ${t.kind}">${t.label}</span>
+    <span class="muted" style="margin-left:8px">${age}${reasons ? ` ｜ ${esc(reasons)}` : ''}</span>`;
+}
+
+function wechatCard(it, accounts) {
+  const shot = mediaPreviewHtml(it);
+  const isArticle = it.platform === 'wechat_article';
+  return `<div class="item" data-id="${it.id}" tabindex="0">
+    ${shot}
+    <div class="body">
+      <div class="t">${esc(it.title) || '(无标题)'} ${wechatTierBadge(it.score)}</div>
+      <div class="sub">${PLATFORM_LABEL[it.platform] || it.platform} ｜ ${esc(it.author_name) || esc(it.account_nickname) || '未知作者'} ｜ 采集来源：${esc(it.metrics_source)} ｜ 状态：${STATUS_LABEL[it.data_status] || it.data_status}${it.url ? ` ｜ <a href="${esc(it.url)}" target="_blank" rel="noreferrer">原链接</a>` : ''}</div>
+      <div class="metricgrid">
+        ${isArticle ? `<label>阅读<input type="number" data-f="read_count" value="${it.read_count ?? ''}" placeholder="${esc(it.read_raw || '')}" /></label>` : ''}
+        <label>${isArticle ? '点赞' : '赞'}<input type="number" data-f="like_count" value="${it.like_count ?? ''}" placeholder="${esc(it.like_raw || '')}" /></label>
+        <label>${isArticle ? '在看' : '转发'}<input type="number" data-f="share_count" value="${it.share_count ?? ''}" placeholder="${esc(it.share_raw || '')}" /></label>
+        <label>收藏<input type="number" data-f="favorite_count" value="${it.favorite_count ?? ''}" placeholder="${esc(it.favorite_raw || '')}" /></label>
+        <label>${isArticle ? '留言' : '评论'}<input type="number" data-f="comment_count" value="${it.comment_count ?? ''}" /></label>
+        <label>账号池<select data-f="account_id">${accountOptions(it, accounts)}</select></label>
+      </div>
+      <div class="row" style="margin:6px 0 0">
+        <label style="flex-direction:row;align-items:center;gap:6px">发布时间 <input type="date" data-f="publish_time" value="${it.publish_time ? it.publish_time.slice(0, 10) : ''}" /></label>
+      </div>
+      <div class="actions">
+        <button class="primary" data-act="confirm">确认数据</button>
+        <button data-act="analyze">AI 分析</button>
+        <button class="danger" data-act="delete">删除</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function bindWechatCardActions(root) {
+  $$('.item', root).forEach((card) => {
+    const id = card.dataset.id;
+    card.querySelector('[data-act="confirm"]')?.addEventListener('click', async () => {
+      try {
+        await api(`/contents/${id}/confirm`, { method: 'POST', body: JSON.stringify(collectCardData(card)) });
+        toast('已确认', 'ok'); loadWechat();
+      } catch (e) { toast('确认失败：' + e.message, 'bad'); }
+    });
+    card.querySelector('[data-act="analyze"]')?.addEventListener('click', async () => {
+      toast('正在分析...');
+      try {
+        const r = await api(`/contents/${id}/analyze`, { method: 'POST' });
+        toast(r.error ? '分析失败：' + r.error : '分析完成', r.error ? 'bad' : 'ok');
+      } catch (e) { toast('分析失败：' + e.message, 'bad'); }
+    });
+    card.querySelector('[data-act="delete"]')?.addEventListener('click', async () => {
+      if (!(await askConfirm('确定删除这条内容？'))) return;
+      await api(`/contents/${id}`, { method: 'DELETE' }); toast('已删除'); loadWechat();
+    });
+  });
+}
+
+async function loadWechat() {
+  const platform = $('#wxPlatform').value;
+  const win = $('#wxWindow').value;
+  const qs = new URLSearchParams({ window: win });
+  if (platform) qs.set('platform', platform);
+  const list = $('#wxList');
+  let data;
+  try {
+    data = await api(`/wechat/hotspots?${qs.toString()}`);
+  } catch (e) {
+    $('#wxMsg').textContent = '加载失败：' + e.message;
+    return;
+  }
+  const accounts = await getAccountsCache();
+  if (!data.items.length) {
+    $('#wxMsg').textContent = `${windowLabel(data.window)} ｜ 暂无数据`;
+    list.innerHTML = '<div class="muted" style="padding:16px">暂无视频号/公众号数据。点「微信热点巡检」开始采集，或先在账号池添加视频号/公众号博主。</div>';
+    return;
+  }
+  $('#wxMsg').textContent = `${windowLabel(data.window)} ｜ 共 ${data.count} 条`;
+  list.innerHTML = data.items.map((it) => wechatCard(it, accounts)).join('');
+  bindMediaFallbacks(list);
+  bindWechatCardActions(list);
+}
+
+function setWechatPatrolRunning(running) {
+  $('#wxRunPatrol').disabled = running;
+  $('#wxStopPatrol').disabled = !running;
+}
+
+async function runWechatPatrol() {
+  const prog = $('#wxProgress');
+  setWechatPatrolRunning(true);
+  prog.style.display = 'block';
+  prog.textContent = '正在启动微信视觉巡检（视频号 → 公众号）...';
+  const summary = { newItems: 0, duplicates: 0, total: 0, stopped: false };
+  try {
+    for (const stage of [
+      { platform: 'wechat_channels', label: '视频号' },
+      { platform: 'wechat_article', label: '公众号' },
+    ]) {
+      prog.textContent = `正在巡检${stage.label}...`;
+      const res = await api('/wechat/patrol/run', { method: 'POST', body: JSON.stringify({ platform: stage.platform }) });
+      if (res.error) throw new Error(res.error);
+      summary.newItems += res.newItems || 0;
+      summary.duplicates += res.duplicates || 0;
+      summary.total += res.total || 0;
+      if (res.stopped) { summary.stopped = true; break; }
+    }
+    toast(`${summary.stopped ? '微信巡检已停止' : '微信巡检完成'}：巡检 ${summary.total} 个博主，新增 ${summary.newItems} 条`, summary.stopped ? '' : 'ok');
+  } catch (e) {
+    toast('微信巡检失败：' + e.message, 'bad');
+  } finally {
+    setWechatPatrolRunning(false);
+    prog.style.display = 'none';
+    loadWechat();
+  }
+}
+
+$('#wxRunPatrol').addEventListener('click', runWechatPatrol);
+$('#wxStopPatrol').addEventListener('click', stopPatrol);
+$('#wxRefresh').addEventListener('click', loadWechat);
+['wxPlatform', 'wxWindow'].forEach((id) => $(`#${id}`).addEventListener('change', loadWechat));
+
 const loaders = {
   overview: loadOverviewPage, library: loadLibrary,
-  accounts: loadAccounts, reports: loadReports, settings: loadSettings,
+  accounts: loadAccounts, wechat: loadWechat, reports: loadReports, settings: loadSettings,
 };
 loadOverviewPage().catch((e) => toast('加载失败：' + e.message, 'bad'));

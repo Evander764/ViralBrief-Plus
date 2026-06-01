@@ -268,6 +268,62 @@ export function buildObserveUser(context) {
   return parts.join('\n');
 }
 
+/**
+ * 桌面 UI 元素定位：输入截图 + 目标描述 → 该元素中心的「像素坐标」。
+ * 用于驱动微信桌面端（无 CDP），让坐标点击落到正确的按钮上。
+ */
+export const SYSTEM_WECHAT_LOCATE = `你是桌面 UI 定位助手。任务：在截图里找到用户描述的那个可点击元素，返回它中心点的像素坐标。
+
+严格禁令：
+- 绝不定位/建议点击「点赞、评论、关注、私信、购买、充值、红包、支付、密码、验证码」等敏感按钮。若用户描述的是这类元素，found 置 false 并在 note 说明。
+- 找不到就 found 置 false，绝不编坐标。
+- 坐标单位是截图像素，必须落在 0..宽 与 0..高 之内。
+- 输出严格 JSON，不要代码块或解释文字。
+
+JSON 结构：
+{ "found": true/false, "x": 像素X整数, "y": 像素Y整数, "confidence": 0.0-1.0, "note": "简要说明" }`;
+
+export function buildWechatLocateUser(description, imageWidth, imageHeight) {
+  return `截图尺寸：宽 ${imageWidth} 像素、高 ${imageHeight} 像素。
+请在截图中找到这个元素并返回其中心像素坐标：${description}
+只输出 JSON。`;
+}
+
+/**
+ * 微信详情读数：输入视频号/公众号详情截图 → 标题、发布时间、互动数字。
+ * 数字保留原始展示文本（交给 normalize.js 换算）；看不清一律 null（绝不当 0）。
+ * 读出的数字以 desktop_agent 入库 → needs_review，人工确认前不可信。
+ */
+export const SYSTEM_WECHAT_READ = `你是内容详情读数助手。任务：从微信（视频号/公众号）详情截图中读出标题、发布时间和互动数字。
+
+规则：
+- 只读截图里实际显示的数字。看不清或没有就给 null，绝不编造、绝不当作 0。
+- 数字保留原始展示文本（如 "1.2万"、"10万+"、"315"），不要自己换算。
+- 发布时间尽量精确：优先"编辑于 XXX"、"举报"附近的时间，或"X小时前"、具体日期。按北京时间理解。
+- 判断是否置顶内容（is_pinned）、是否付费/付费可见内容（is_paid）。
+- 指标键固定为 like/share/favorite/comment/read，按平台对应图标取数：
+  · 视频号：like=赞(👍)，share=转发(↗)，favorite=收藏/喜欢(❤️)，comment=评论(💬)，read=null。
+  · 公众号：read=阅读，like=赞(👍)，share=在看，favorite=收藏，comment=留言/评论。
+- 输出严格 JSON，中文，不要代码块。
+
+JSON 结构：
+{
+  "title": "标题文本或 null",
+  "publish_time": "发布时间原文或 null",
+  "is_pinned": true/false,
+  "is_paid": true/false,
+  "metrics": { "like": "原文或null", "share": "原文或null", "favorite": "原文或null", "comment": "原文或null", "read": "原文或null" },
+  "confidence": 0.0-1.0
+}`;
+
+export function buildWechatReadUser(context = {}) {
+  const platform = context.platform === 'wechat_article' ? '公众号文章' : '视频号';
+  const parts = [`请读取这张${platform}详情截图的标题、发布时间和互动数字。`];
+  if (context.creator) parts.push(`- 博主：${context.creator}`);
+  parts.push('看不清的项给 null，数字保留原始文本。只输出 JSON。');
+  return parts.join('\n');
+}
+
 // ---- 视觉 Prompt 的校验函数 ----
 
 const VALID_PAGE_TYPES = new Set(['creator_home', 'video_detail', 'search', 'login', 'captcha', 'other']);
@@ -288,5 +344,18 @@ export function validateObservation(json) {
   if (!json || typeof json !== 'object') return '返回值不是对象';
   if (!json.observed_activity || typeof json.observed_activity !== 'string') return 'observed_activity 必须是非空字符串';
   if (typeof json.confidence !== 'number') return 'confidence 必须是数字';
+  return null;
+}
+
+export function validateWechatLocate(json) {
+  if (!json || typeof json !== 'object') return '返回值不是对象';
+  if (typeof json.found !== 'boolean') return 'found 必须是布尔值';
+  if (json.found && (typeof json.x !== 'number' || typeof json.y !== 'number')) return 'found 为真时 x/y 必须是数字';
+  return null;
+}
+
+export function validateWechatRead(json) {
+  if (!json || typeof json !== 'object') return '返回值不是对象';
+  if (!json.metrics || typeof json.metrics !== 'object') return 'metrics 必须是对象';
   return null;
 }

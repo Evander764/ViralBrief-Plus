@@ -18,6 +18,7 @@
       <button data-tab="overview" class="active">概览</button>
       <button data-tab="library">内容库</button>
       <button data-tab="accounts">账号池</button>
+      <button data-tab="wechat">微信热点</button>
       <button data-tab="reports">每日结果</button>
       <button data-tab="settings">设置</button>
     </nav>
@@ -99,6 +100,8 @@
             <option value="">全部平台</option>
             <option value="douyin">抖音</option>
             <option value="xiaohongshu">小红书</option>
+            <option value="wechat_channels">视频号</option>
+            <option value="wechat_article">公众号</option>
             <option value="other">其他</option>
           </select>
           <button id="libRefresh">刷新</button>
@@ -128,6 +131,8 @@
                 <select id="acPlatform">
                   <option value="douyin">抖音</option>
                   <option value="xiaohongshu">小红书</option>
+                  <option value="wechat_channels">视频号</option>
+                  <option value="wechat_article">公众号</option>
                   <option value="other">其他</option>
                 </select>
               </label>
@@ -191,6 +196,40 @@
 
         <hr />
         <div id="acTable"></div>
+      </div>
+    </section>
+
+    <!-- 微信热点（视频号·公众号，独立视图，不入正式日报） -->
+    <section id="tab-wechat" class="tab hidden">
+      <div class="panel">
+        <h3>视频号 · 公众号热点</h3>
+        <p class="muted" style="margin:2px 0 10px">
+          OS 级视觉巡检：截图 + 坐标点击驱动微信桌面端，按时间衰减评分。数字由视觉读出（待复核），
+          人工确认后才可信；这里的内容不进正式每日爆款日报。
+        </p>
+        <div class="row" style="align-items:center;flex-wrap:wrap;gap:10px">
+          <button class="primary" id="wxRunPatrol">微信热点巡检</button>
+          <button class="danger" id="wxStopPatrol" disabled>停止巡检</button>
+          <label style="flex-direction:row;align-items:center;gap:6px">平台
+            <select id="wxPlatform">
+              <option value="">全部</option>
+              <option value="wechat_channels">视频号</option>
+              <option value="wechat_article">公众号</option>
+            </select>
+          </label>
+          <label style="flex-direction:row;align-items:center;gap:6px">窗口
+            <select id="wxWindow">
+              <option value="last_1_days">最近 1 天</option>
+              <option value="last_3_days">最近 3 天</option>
+              <option value="last_7_days" selected>最近 7 天</option>
+              <option value="last_14_days">最近 14 天</option>
+            </select>
+          </label>
+          <button id="wxRefresh">刷新</button>
+          <span class="muted" id="wxMsg"></span>
+        </div>
+        <div id="wxProgress" class="muted" style="display:none;margin-top:8px"></div>
+        <div id="wxList" class="list" style="margin-top:12px"></div>
       </div>
     </section>
 

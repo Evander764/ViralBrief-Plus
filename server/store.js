@@ -10,7 +10,9 @@ import { normalizeUrl, contentFingerprint } from './dedup.js';
 import { computeDataStatus, ELIGIBLE_PLATFORMS, eligibleReason } from './filter.js';
 
 const nowISO = () => new Date().toISOString();
-const METRICS = ['like', 'share', 'comment', 'favorite'];
+// read = 公众号阅读量。它不是 1000 阈值的入选指标（见 filter.QUALIFYING_METRICS），
+// 但作为热点视图与时间衰减评分的核心信号，统一走同一套标准化/合并/确认逻辑。
+const METRICS = ['like', 'share', 'comment', 'favorite', 'read'];
 
 const cleanId = (v) => (v == null || String(v).trim() === '' ? null : String(v).trim());
 const cleanText = (v) => String(v || '').trim().toLowerCase();
@@ -49,8 +51,8 @@ export function parsePublishTime(raw) {
 const CONTENT_COLS = [
   'id', 'platform', 'content_type', 'url', 'url_key', 'fingerprint', 'account_id',
   'author_name', 'title', 'body_excerpt', 'publish_time', 'captured_at',
-  'like_count', 'share_count', 'comment_count', 'favorite_count',
-  'like_raw', 'share_raw', 'comment_raw', 'favorite_raw',
+  'like_count', 'share_count', 'comment_count', 'favorite_count', 'read_count',
+  'like_raw', 'share_raw', 'comment_raw', 'favorite_raw', 'read_raw',
   'metrics_source', 'metrics_confidence', 'metrics_evidence_json', 'eligible_reason',
   'data_status', 'user_confirmed', 'is_duplicate', 'duplicate_of',
   'archived', 'screenshot_path', 'cover_url', 'duration_text', 'created_at', 'updated_at',
@@ -204,10 +206,12 @@ export function upsertCapture(payload) {
     share_count: norm.share.value,
     comment_count: norm.comment.value,
     favorite_count: norm.favorite.value,
+    read_count: norm.read.value,
     like_raw: norm.like.raw,
     share_raw: norm.share.raw,
     comment_raw: norm.comment.raw,
     favorite_raw: norm.favorite.raw,
+    read_raw: norm.read.raw,
     metrics_source: source,
     metrics_confidence: payload.metrics_confidence || null,
     metrics_evidence_json: payload.metrics_evidence ? JSON.stringify(payload.metrics_evidence) : null,
@@ -318,6 +322,36 @@ export function countsByStatus() {
   const out = {};
   for (const r of rows) out[r.data_status] = r.n;
   return out;
+}
+
+/** 视频号 / 公众号两个平台代码。它们可保存、可做热点分析，但不入正式日报（不变量 #4）。 */
+export const WECHAT_PLATFORMS = ['wechat_channels', 'wechat_article'];
+
+/**
+ * 取「视频号·公众号热点」原始行（含账号昵称），供独立热点视图使用。
+ * 不做入选判定：评分交给 wechat/score.js 在路由层叠加，行本身保持 DB 真值。
+ * @param {{platform?:string, windowStart?:string, limit?:number}} opts
+ */
+export function listWechatHotspots({ platform, windowStart, limit = 300 } = {}) {
+  const platforms = platform && WECHAT_PLATFORMS.includes(platform) ? [platform] : WECHAT_PLATFORMS;
+  const placeholders = platforms.map(() => '?').join(',');
+  const where = [`c.platform IN (${placeholders})`, 'c.archived = 0', 'c.is_duplicate = 0'];
+  const params = [...platforms];
+  if (windowStart) {
+    // 发布时间未知（待补录）也保留展示，但有时间就按窗口收紧。
+    where.push('(c.publish_time IS NULL OR c.publish_time >= ?)');
+    params.push(windowStart);
+  }
+  params.push(limit);
+  return all(
+    `SELECT c.*, a.nickname AS account_nickname, a.category AS account_category, a.priority AS account_priority
+     FROM contents c
+     LEFT JOIN accounts a ON a.id = c.account_id
+     WHERE ${where.join(' AND ')}
+     ORDER BY c.captured_at DESC
+     LIMIT ?`,
+    params,
+  );
 }
 
 // ----------------------------------------------------------------------------

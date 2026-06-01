@@ -47,6 +47,15 @@
 - 发布时间缺失、超窗口、标题不匹配或互动未达标都不阻断保存；抖音详情发布日期早于窗口时，保存本条后结束该博主巡检；是否入选留到巡检后判断。
 - 全部账号完成或剩余账号正在跑时不再额外开新标签；单个账号跑完立即关闭自己的标签。
 
+### 微信视觉巡检阶段（视频号 / 公众号，OS 级，独立于抖音/小红书）
+- **为什么不一样**：视频号/公众号互动数只在微信桌面端 App 内显示，微信不暴露 CDP 调试端口，Chrome 那套 `goto`/`evaluate` 够不到。所以这条线走 **OS 级视觉 Agent**：`screencapture` 截图 + `osascript`（JXA + CoreGraphics CGEvent）坐标点击/滚动（`server/rpa/macos-input.js`，零依赖、仅 macOS），视觉模型 `ai/observe.js` 的 `locateWechatTarget`（定位按钮像素坐标）/ `readWechatDetail`（读标题/发布时间/互动数）驱动导航（`server/rpa/wechat.js`）。
+- **数字不可信**：视觉读出的数字一律 `metrics_source='desktop_agent'` → needs_review，人工确认前绝不自动达标（不变量 #1）。视觉定位 prompt 禁止点击点赞/支付/验证码等敏感按钮。
+- **不入日报**：视频号/公众号只进独立「视频号·公众号热点」视图（`GET /api/wechat/hotspots`，前端「微信热点」页），按 `server/wechat/score.js` 的时间衰减档位（early_breakout/qualified/watch/below/unknown）排序；绝不进正式每日日报（不变量 #4）。
+- **视频号导航**：朋友圈下方视频号入口 → 右上小人 → 赞和收藏 → 关注 → 逐个关注博主 → 首进先 Esc 关掉自动播放的第一个视频（防外放/省内存）→ 跳置顶 → 开第一条读数入库 → 点右侧下箭头翻页 → 默认每博主 `cfg.wechat.maxVideosPerCreator`(3) 条 → 关详情回关注总览。
+- **公众号导航**：左上搜索 → 搜博主 → 进主页（没进就点右上小人）→ 跳置顶/付费 → 按窗口开文章 → `parseChinesePublishTime` 读精确发布时间（北京时间）→ 早于窗口即结束该博主 → 入库。
+- **入口**：`POST /api/wechat/patrol/run`（body `{platform:'wechat_channels'|'wechat_article'}`），复用 `control.js` 单活跃巡检 + `/api/patrol/stop` 停止控制（与抖音/小红书互斥）。前端「微信热点巡检」先视频号阶段、后公众号阶段。
+- **坐标导航需在本机实跑校准**：窗口位置因人而异，找不到目标时记录跳过原因、不瞎点。
+
 ## 数据流
 - 采集（三条入口，殊途同归到 `store.upsertCapture()`）：
   - 插件 `popup.js` 注入页面提取 → `POST /api/capture`（`metrics_source='manual'`/`page_text'`）。
@@ -63,7 +72,7 @@
 - 准：`ai/client.callJSON` 校验失败带原因重试（`cfg.retries`）；用量始终记账（即便 JSON 不合法）；预算仅软提醒，不为省钱牺牲日报。
 
 ## 数据库（node:sqlite，`db.js`）
-表：`accounts` / `contents` / `ai_analysis`(content_id UNIQUE) / `daily_reports` / `usage_log` / `meta`。
+表：`accounts` / `contents` / `ai_analysis`(content_id UNIQUE) / `daily_reports` / `usage_log` / `meta` / `agent_observations`。`contents` 的指标列：`like/share/comment/favorite/read`（`read_count` 是公众号阅读量，热点评分主信号，非 1000 阈值入选指标）。
 `db.js` 暴露 `run/get/all` 三个 helper，参数经 `sanitize`（boolean→0/1，undefined→null）；node:sqlite 只接受 null/number/bigint/string/Uint8Array，用位置参数 `?`。
 
 ## AI 供应商（`ai/client.js`）

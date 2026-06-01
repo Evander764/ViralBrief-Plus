@@ -46,10 +46,12 @@ CREATE TABLE IF NOT EXISTS contents (
   share_count INTEGER,
   comment_count INTEGER,
   favorite_count INTEGER,
+  read_count INTEGER,
   like_raw TEXT,
   share_raw TEXT,
   comment_raw TEXT,
   favorite_raw TEXT,
+  read_raw TEXT,
   metrics_source TEXT,
   metrics_confidence TEXT,
   metrics_evidence_json TEXT,
@@ -154,6 +156,9 @@ ensureColumn('contents', 'metrics_evidence_json', 'metrics_evidence_json TEXT');
 ensureColumn('contents', 'eligible_reason', 'eligible_reason TEXT');
 ensureColumn('contents', 'cover_url', 'cover_url TEXT');
 ensureColumn('contents', 'duration_text', 'duration_text TEXT');
+// 公众号阅读量：作为一等指标列，便于热点视图与时间衰减评分直接查询。
+ensureColumn('contents', 'read_count', 'read_count INTEGER');
+ensureColumn('contents', 'read_raw', 'read_raw TEXT');
 
 /** node:sqlite 只接受 null/number/bigint/string/Uint8Array。统一清洗参数。 */
 export function sanitize(v) {

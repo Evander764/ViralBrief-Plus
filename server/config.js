@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { CONFIG_PATH } from './lib/paths.js';
 import { encryptSecret, decryptSecret } from './lib/secret.js';
 import { addRedaction, clearRedaction } from './lib/log.js';
+import { wechatScoreConfig, WECHAT_SCORE_DEFAULTS } from './wechat/score.js';
 
 const DEFAULTS = {
   provider: 'openai',          // 'openai' | 'openai-compatible' | 'anthropic'
@@ -19,6 +20,7 @@ const DEFAULTS = {
   budgetDailyTokens: 0,        // 0 = 不限制，仅记录用量
   schedule: { enabled: false, time: '09:00', window: 'last_1_day', catchUp: true },
   rpa: { maxTabsPerBatch: 6 },
+  wechat: WECHAT_SCORE_DEFAULTS, // 视频号·公众号热点：窗口/每博主条数/时间衰减阈值，全部可改
   pairingToken: '',
   apiKeyEnc: null,
   apiKeyEnc2: null,
@@ -61,6 +63,16 @@ function normalizeRpaConfig(input = {}) {
   };
 }
 
+/** 视频号·公众号热点配置：深合并默认值，并夹紧每博主条数到 1-10。 */
+function normalizeWechatConfig(input = {}) {
+  const merged = wechatScoreConfig({ wechat: input });
+  const n = Number(merged.maxVideosPerCreator);
+  merged.maxVideosPerCreator = Number.isFinite(n)
+    ? Math.max(1, Math.min(10, Math.floor(n)))
+    : WECHAT_SCORE_DEFAULTS.maxVideosPerCreator;
+  return merged;
+}
+
 function refreshRedaction() {
   clearRedaction();
   const k = getApiKey();
@@ -77,6 +89,7 @@ export function loadConfig() {
     ...raw,
     schedule: { ...DEFAULTS.schedule, ...(raw.schedule || {}) },
     rpa: normalizeRpaConfig(raw.rpa || {}),
+    wechat: normalizeWechatConfig(raw.wechat || {}),
   };
   let changed = false;
   if (!cfg.pairingToken) { cfg.pairingToken = randomBytes(24).toString('hex'); changed = true; }
@@ -98,11 +111,12 @@ export function loadConfig() {
 export function saveConfig(patch = {}) {
   const cfg = loadConfig();
   const {
-    apiKeyEnc, apiKeyEnc2, apiKey, apiKeyUpdatedAt, apiKey2UpdatedAt, pairingToken, provider, rpa, ...safe
+    apiKeyEnc, apiKeyEnc2, apiKey, apiKeyUpdatedAt, apiKey2UpdatedAt, pairingToken, provider, rpa, wechat, ...safe
   } = patch; // 过滤掉 provider / Key 相关字段，不允许手动指定
   Object.assign(cfg, safe);
   if (patch.schedule) cfg.schedule = { ...cfg.schedule, ...patch.schedule };
   if (rpa) cfg.rpa = normalizeRpaConfig({ ...cfg.rpa, ...rpa });
+  if (wechat) cfg.wechat = normalizeWechatConfig({ ...cfg.wechat, ...wechat });
   
   // 重新推断并保存
   const key = getApiKey();
@@ -124,6 +138,7 @@ function readMerged() {
     ...raw,
     schedule: { ...DEFAULTS.schedule, ...(raw.schedule || {}) },
     rpa: normalizeRpaConfig(raw.rpa || {}),
+    wechat: normalizeWechatConfig(raw.wechat || {}),
   };
 }
 

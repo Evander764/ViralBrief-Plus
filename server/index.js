@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { CDPClient } from './rpa/cdp.js';
 import { runPatrol, discoverFollowedCreators } from './rpa/patrol.js';
+import { runWechatPatrol } from './rpa/wechat.js';
 import { launchChrome, killChrome } from './rpa/chrome-launcher.js';
 import { beginPatrolRun, endPatrolRun, requestPatrolStop, getPatrolRunState } from './rpa/control.js';
 
@@ -27,10 +28,12 @@ import {
 } from './config.js';
 import {
   upsertCapture, confirmContent, archiveContent, deleteContent, getContent, listContents,
-  beijingDayStartISO,
+  beijingDayStartISO, listWechatHotspots,
   countsByStatus, listAccounts, upsertAccount, deleteAccount, importAccountsCsv, importAccountsLines,
   listReports, getReport, deleteReport, getUsageForDay, getAnalysis, getObservation, upsertObservation,
 } from './store.js';
+import { scoreAndSortHotspots } from './wechat/score.js';
+import { windowStartISO, normalizeWindowType } from './filter.js';
 import { runDailyReport } from './pipeline.js';
 import { materializeReportExport } from './report/recovery.js';
 import { startScheduler, restartScheduler } from './scheduler.js';
@@ -313,6 +316,39 @@ async function handleApi(req, res, url, segs) {
     } finally {
       if (runCtrl) endPatrolRun(runCtrl.id);
     }
+  }
+
+  // ---- wechat 视觉巡检（OS 级，复用单活跃巡检/停止控制）----
+  if (p[0] === 'wechat' && p[1] === 'patrol' && p[2] === 'run' && method === 'POST') {
+    let runCtrl = null;
+    try {
+      const body = await readJson(req);
+      const platform = body.platform === 'wechat_article' ? 'wechat_article' : 'wechat_channels';
+      runCtrl = beginPatrolRun({ source: 'wechat', platforms: [platform] });
+      const result = await runWechatPatrol({
+        platform,
+        includePatrolledToday: body.includePatrolledToday === true,
+        onProgress: (msg) => log.info(`[WeChat] ${msg}`),
+        shouldStop: runCtrl.shouldStop,
+      });
+      return sendJson(res, 200, { success: true, message: result.stopped ? '微信巡检已停止。' : '微信巡检完成。', ...result });
+    } catch (e) {
+      if (e.code === 'VBP_PATROL_ACTIVE') return sendJson(res, 409, { error: e.message, active: e.active });
+      log.error('微信视觉巡检失败: ' + e.message);
+      return sendJson(res, 500, { error: '微信视觉巡检失败: ' + e.message });
+    } finally {
+      if (runCtrl) endPatrolRun(runCtrl.id);
+    }
+  }
+
+  // ---- wechat 热点（视频号·公众号，独立视图，不入正式日报）----
+  if (p[0] === 'wechat' && p[1] === 'hotspots' && method === 'GET') {
+    const cfgNow = loadConfig();
+    const platform = url.searchParams.get('platform') || undefined;
+    const windowType = normalizeWindowType(url.searchParams.get('window') || cfgNow.wechat?.window || 'last_7_days');
+    const rows = listWechatHotspots({ platform, windowStart: windowStartISO(windowType) });
+    const scored = scoreAndSortHotspots(rows, cfgNow);
+    return sendJson(res, 200, { window: windowType, count: scored.length, items: scored });
   }
 
   // ---- follows discovery only ----

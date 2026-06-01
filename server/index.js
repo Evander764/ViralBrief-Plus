@@ -11,7 +11,7 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { writeFileSync, existsSync, createReadStream, statSync, unlinkSync } from 'node:fs';
-import { join, basename, extname } from 'node:path';
+import { join, basename, dirname, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { CDPClient } from './rpa/cdp.js';
@@ -105,6 +105,27 @@ async function serveStatic(res, filePath, { inline = true, downloadName } = {}) 
   if (!inline) headers['content-disposition'] = `attachment; filename="${encodeURIComponent(downloadName || basename(filePath))}"`;
   res.writeHead(200, headers);
   createReadStream(filePath).pipe(res);
+}
+
+function reportExportPath(report, fmt = 'md') {
+  return fmt === 'html' ? report.export_html_path
+    : fmt === 'csv' ? report.export_csv_path
+      : fmt === 'zip' ? report.export_zip_path
+        : report.export_md_path;
+}
+
+function revealInFileManager(filePath) {
+  return new Promise((resolve, reject) => {
+    if (process.platform === 'darwin') {
+      execFile('open', ['-R', filePath], (error) => (error ? reject(error) : resolve()));
+      return;
+    }
+    if (process.platform === 'win32') {
+      execFile('explorer.exe', ['/select,', filePath], (error) => (error ? reject(error) : resolve()));
+      return;
+    }
+    execFile('xdg-open', [dirname(filePath)], (error) => (error ? reject(error) : resolve()));
+  });
 }
 
 function removeReportFiles(report) {
@@ -541,14 +562,24 @@ async function handleApi(req, res, url, segs) {
       removeReportFiles(r);
       return sendJson(res, 200, { ok: true });
     }
+    if (id && p[2] === 'reveal' && method === 'POST') {
+      const r = getReport(id);
+      if (!r) return sendJson(res, 404, { error: '未找到' });
+      const fmt = url.searchParams.get('format') || 'md';
+      const path = reportExportPath(r, fmt);
+      if (!path || !existsSync(path)) return sendJson(res, 404, { error: '导出文件不存在' });
+      try {
+        await revealInFileManager(path);
+        return sendJson(res, 200, { ok: true, format: fmt, file: basename(path) });
+      } catch (e) {
+        return sendJson(res, 500, { error: `打开导出文件失败：${e.message}` });
+      }
+    }
     if (id && p[2] === 'export' && method === 'GET') {
       const r = getReport(id);
       if (!r) return sendJson(res, 404, { error: '未找到' });
       const fmt = url.searchParams.get('format') || 'md';
-      const path = fmt === 'html' ? r.export_html_path
-        : fmt === 'csv' ? r.export_csv_path
-          : fmt === 'zip' ? r.export_zip_path
-            : r.export_md_path;
+      const path = reportExportPath(r, fmt);
       if (!path) return sendJson(res, 404, { error: '导出文件不存在' });
       const inline = url.searchParams.get('inline') === '1';
       return serveStatic(res, path, { inline, downloadName: basename(path) });

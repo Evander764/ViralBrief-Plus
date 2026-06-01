@@ -50,6 +50,23 @@ test('概览和每日结果共用设置里的默认回溯天数', () => {
   assert.match(appJs, /generateReport\(await getDefaultWindowType\(\), \$\('#rpMsg'\), true/);
 });
 
+test('每日结果在页面内预览日报，导出文件通过本地接口显示', () => {
+  const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
+  const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
+  const serverJs = readFileSync(join(root, 'server', 'index.js'), 'utf8');
+  const swift = readFileSync(join(root, 'scripts', 'LauncherWindow.swift'), 'utf8');
+
+  assert.match(html, /id="rpViewer"/);
+  assert.match(html, /id="rpViewerFrame"/);
+  assert.match(appJs, /function showReportPreview\(/);
+  assert.match(appJs, /data-rp-view/);
+  assert.match(appJs, /data-rp-reveal/);
+  assert.match(appJs, /\/reveal\?format=/);
+  assert.match(serverJs, /p\[2\] === 'reveal'/);
+  assert.match(swift, /createWebViewWith configuration/);
+  assert.doesNotMatch(appJs, /target="_blank">查看日报/);
+});
+
 test('今日候选并入概览，顶部不再有独立候选页入口', () => {
   const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
   const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');

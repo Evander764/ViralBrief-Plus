@@ -876,31 +876,88 @@ $('#acSearchAdd').addEventListener('click', async () => {
 });
 
 // ---------------------------------------------------------------- reports ----
+let reportsCache = [];
+
+function reportExportUrl(id, format, { inline = false } = {}) {
+  const qs = new URLSearchParams({ format, token: TOKEN });
+  if (inline) qs.set('inline', '1');
+  return `/api/reports/${encodeURIComponent(id)}/export?${qs.toString()}`;
+}
+
+function closeReportPreview() {
+  const viewer = $('#rpViewer');
+  const frame = $('#rpViewerFrame');
+  if (frame) frame.removeAttribute('src');
+  if (viewer) viewer.classList.add('hidden');
+}
+
+async function showReportPreview(id) {
+  const report = reportsCache.find((r) => r.id === id) || await api(`/reports/${encodeURIComponent(id)}`);
+  $('#rpViewerTitle').textContent = `${report.report_date} ｜ ${windowLabel(report.window_type)} ｜ 达标 ${report.eligible_count} 条`;
+  $('#rpViewerMeta').textContent = `生成于 ${new Date(report.created_at).toLocaleString('zh-CN')}`;
+  $('#rpViewerFrame').src = reportExportUrl(id, 'html', { inline: true });
+  $('#rpViewer').classList.remove('hidden');
+  $('#rpViewer').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function revealReportExport(id, format, button) {
+  const oldText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = '打开中...';
+  }
+  try {
+    await api(`/reports/${encodeURIComponent(id)}/reveal?format=${encodeURIComponent(format)}`, { method: 'POST' });
+    toast('已在 Finder 显示导出文件', 'ok');
+  } catch (e) {
+    toast('打开导出文件失败：' + e.message, 'bad');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = oldText;
+    }
+  }
+}
+
 async function loadReports() {
   const rows = await api('/reports');
+  reportsCache = rows;
   $('#rpList').innerHTML = rows.length ? rows.map((r) => `
     <div class="item"><div class="body">
       <div class="t">${r.report_date} ｜ ${windowLabel(r.window_type)} ｜ 达标 ${r.eligible_count} 条</div>
       <div class="sub">生成于 ${new Date(r.created_at).toLocaleString('zh-CN')}</div>
       <div class="actions">
-        <a class="filebtn" href="/api/reports/${r.id}/export?format=html&inline=1&token=${TOKEN}" target="_blank">查看日报</a>
-        <a class="filebtn" href="/api/reports/${r.id}/export?format=md&token=${TOKEN}">导出 Markdown</a>
-        <a class="filebtn" href="/api/reports/${r.id}/export?format=csv&token=${TOKEN}">导出 CSV</a>
-        ${r.export_zip_path ? `<a class="filebtn" href="/api/reports/${r.id}/export?format=zip&token=${TOKEN}">下载压缩包</a>` : ''}
+        <button type="button" class="filebtn" data-rp-view="${esc(r.id)}">查看日报</button>
+        <button type="button" class="filebtn" data-rp-reveal="${esc(r.id)}" data-rp-format="md">显示 Markdown</button>
+        <button type="button" class="filebtn" data-rp-reveal="${esc(r.id)}" data-rp-format="csv">显示 CSV</button>
+        ${r.export_zip_path ? `<button type="button" class="filebtn" data-rp-reveal="${esc(r.id)}" data-rp-format="zip">显示压缩包</button>` : ''}
         <button class="danger" data-rp-del="${r.id}">删除日报</button>
       </div>
     </div></div>`).join('') : '<p class="muted">还没有日报。点上方「生成日报」。</p>';
+  $$('#rpList [data-rp-view]').forEach((b) => b.addEventListener('click', async () => {
+    try {
+      await showReportPreview(b.dataset.rpView);
+    } catch (e) {
+      toast('查看日报失败：' + e.message, 'bad');
+    }
+  }));
+  $$('#rpList [data-rp-reveal]').forEach((b) => b.addEventListener('click', async () => {
+    await revealReportExport(b.dataset.rpReveal, b.dataset.rpFormat, b);
+  }));
   $$('#rpList [data-rp-del]').forEach((b) => b.addEventListener('click', async () => {
     if (!(await askConfirm('确认删除这份日报及其导出文件？', { okText: '删除日报' }))) return;
     try {
+      const deletingVisibleReport = $('#rpViewerFrame')?.src?.includes(`/reports/${encodeURIComponent(b.dataset.rpDel)}/export`);
       await api(`/reports/${b.dataset.rpDel}`, { method: 'DELETE' });
+      if (deletingVisibleReport) closeReportPreview();
       toast('日报已删除', 'ok');
     } catch (e) {
-      toast('删除失败: ' + e.message, 'error');
+      toast('删除失败: ' + e.message, 'bad');
     }
     loadReports();
   }));
 }
+$('#rpViewerClose').addEventListener('click', closeReportPreview);
 $('#rpGenerate').addEventListener('click', async () => {
   try {
     await generateReport(await getDefaultWindowType(), $('#rpMsg'), true, { button: $('#rpGenerate'), progressEl: null, progressText: null });

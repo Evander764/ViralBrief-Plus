@@ -663,6 +663,38 @@ button:disabled {
 
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 
+.report-viewer {
+  margin-top: 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--glass-1);
+  box-shadow: var(--shadow-sm);
+}
+.report-viewer.hidden { display: none; }
+.report-viewer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+.report-viewer-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.report-viewer iframe {
+  display: block;
+  width: 100%;
+  height: min(72vh, 760px);
+  min-height: 420px;
+  border: 0;
+  background: #fff;
+}
+
 /* ─── Badges ─── */
 .badge {
   display: inline-block;

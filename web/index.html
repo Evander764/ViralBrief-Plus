@@ -203,6 +203,16 @@
           <span class="muted" id="rpMsg"></span>
         </div>
         <div id="rpList" class="list"></div>
+        <div id="rpViewer" class="report-viewer hidden">
+          <div class="report-viewer-head">
+            <div>
+              <div class="report-viewer-title" id="rpViewerTitle">日报预览</div>
+              <div class="muted" id="rpViewerMeta"></div>
+            </div>
+            <button type="button" id="rpViewerClose">关闭预览</button>
+          </div>
+          <iframe id="rpViewerFrame" title="日报预览"></iframe>
+        </div>
       </div>
     </section>
 

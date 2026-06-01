@@ -80,6 +80,20 @@ test('今日候选并入概览，顶部不再有独立候选页入口', () => {
   assert.match(html, /北京时间当天抓取记录/);
 });
 
+test('今日候选媒体预览优先显示视频截图或小红书封面，并支持中文截图名', () => {
+  const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
+  const serverJs = readFileSync(join(root, 'server', 'index.js'), 'utf8');
+
+  assert.match(appJs, /function localScreenshotUrl\(/);
+  assert.match(appJs, /encodeURIComponent\(name\)/);
+  assert.match(appJs, /function itemMediaSources\(/);
+  assert.match(appJs, /it\.platform === 'xiaohongshu'/);
+  assert.match(appJs, /it\.content_type === 'video'/);
+  assert.match(appJs, /data-fallback-src/);
+  assert.match(appJs, /bindMediaFallbacks\(\$\('#candList'\)\)/);
+  assert.match(serverJs, /safeUrlBasename\(segs\[1\]\)/);
+});
+
 test('浏览器巡检默认每轮 6 个标签，且可在 1-10 间调整', () => {
   const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
   const configJs = readFileSync(join(root, 'server', 'config.js'), 'utf8');

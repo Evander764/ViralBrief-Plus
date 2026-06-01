@@ -40,6 +40,7 @@ import { fetchAndExtract } from './ingest/scrape.js';
 import { openExternalBrowser, openExternalBrowserUrls } from './lib/browser-open.js';
 import { accountOpenUrlsForPlatform } from './lib/account-open.js';
 import { cleanupStorage, inspectStorage } from './lib/storage-cleanup.js';
+import { safeUrlBasename } from './lib/url-path.js';
 
 
 ensureDirs();
@@ -622,7 +623,7 @@ const server = http.createServer(async (req, res) => {
 
     // 静态：截图
     if (segs[0] === 'screenshots' && segs[1]) {
-      return serveStatic(res, join(SCREENSHOTS_DIR, basename(segs[1])));
+      return serveStatic(res, join(SCREENSHOTS_DIR, safeUrlBasename(segs[1])));
     }
     // 静态：仪表盘
     if (url.pathname === '/' || url.pathname === '/index.html') return serveIndex(res);

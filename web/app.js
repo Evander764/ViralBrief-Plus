@@ -58,6 +58,45 @@ const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<
 // 统一窗口格式与中文标签（与后端 filter.js 保持一致，单复数都解析为「最近 N 天」）。
 const windowStr = (days) => `last_${Math.max(1, Number(days) || 1)}_days`;
 const windowLabel = (wt) => { const m = String(wt).match(/last_(\d+)_days?/); return `最近 ${m ? m[1] : 1} 天`; };
+function localScreenshotUrl(path) {
+  const raw = String(path || '').trim().replace(/\\/g, '/');
+  const name = raw.split('/').filter(Boolean).pop();
+  return name ? `/screenshots/${encodeURIComponent(name)}` : '';
+}
+function itemMediaSources(it) {
+  const shot = localScreenshotUrl(it.screenshot_path);
+  const cover = String(it.cover_url || '').trim();
+  const preferred = it.platform === 'xiaohongshu'
+    ? [cover, shot]
+    : (it.content_type === 'video' ? [shot, cover] : [cover, shot]);
+  const seen = new Set();
+  return preferred.filter((src) => {
+    if (!src || seen.has(src)) return false;
+    seen.add(src);
+    return true;
+  });
+}
+function mediaPreviewHtml(it) {
+  const sources = itemMediaSources(it);
+  if (sources.length === 0) return '<div class="shot"></div>';
+  const fallback = sources[1] ? ` data-fallback-src="${esc(sources[1])}"` : '';
+  return `<img class="shot" src="${esc(sources[0])}"${fallback} alt="封面或截图" />`;
+}
+function bindMediaFallbacks(root) {
+  $$('img.shot', root).forEach((img) => {
+    img.addEventListener('error', () => {
+      const fallback = img.dataset.fallbackSrc || '';
+      if (fallback && img.dataset.fallbackTried !== '1') {
+        img.dataset.fallbackTried = '1';
+        img.src = fallback;
+        return;
+      }
+      const placeholder = document.createElement('div');
+      placeholder.className = 'shot';
+      img.replaceWith(placeholder);
+    });
+  });
+}
 
 function askConfirm(message, { okText = '确认', cancelText = '取消' } = {}) {
   const dialog = $('#confirmDialog');
@@ -275,6 +314,7 @@ async function loadCandidates() {
   $('#candList').innerHTML = all.length
     ? all.map((it, i) => itemCard(it, accounts, i)).join('')
     : '<p class="muted">今日暂无待处理内容。新抓取或重复补抓的内容会出现在这里，旧候选按北京时间自然清空。</p>';
+  bindMediaFallbacks($('#candList'));
   bindItemCards($('#candList'));
   updateCandSelectedCount();
 }
@@ -290,12 +330,7 @@ function accountOptions(it, accounts) {
 }
 
 function itemCard(it, accounts, idx) {
-  const mediaSrc = it.screenshot_path
-    ? `/screenshots/${esc(it.screenshot_path.split('/').pop())}`
-    : (it.cover_url ? esc(it.cover_url) : '');
-  const shot = mediaSrc
-    ? `<img class="shot" src="${mediaSrc}" alt="封面或截图" />`
-    : '<div class="shot"></div>';
+  const shot = mediaPreviewHtml(it);
   
   let obsHtml = '';
   if (it.observation) {

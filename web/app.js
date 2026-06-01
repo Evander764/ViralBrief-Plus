@@ -42,6 +42,18 @@ function toast(msg, kind = '') {
   toastTimer = setTimeout(() => el.classList.add('hidden'), duration);
 }
 const fmt = (n) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('en-US'));
+const fmtBytes = (bytes) => {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = n / 1024;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx++;
+  }
+  return `${value >= 10 || idx === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[idx]}`;
+};
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 // 统一窗口格式与中文标签（与后端 filter.js 保持一致，单复数都解析为「最近 N 天」）。
 const windowStr = (days) => `last_${Math.max(1, Number(days) || 1)}_days`;
@@ -1042,6 +1054,7 @@ async function loadSettings() {
   $('#stEndpoint').textContent = `http://127.0.0.1:${PORT}`;
   renderSettingsKeyState(c);
   renderKeyState(c.hasApiKey, c.schedule);
+  loadStorageSummary().catch(() => {});
 }
 
 function fmtSavedAt(iso) {
@@ -1195,6 +1208,58 @@ $('#stSaveSettings').addEventListener('click', async () => {
   $('#stRpaMaxTabs').value = pub.rpa?.maxTabsPerBatch || 6;
   $('#stSaveMsg').textContent = `已保存：每轮 ${pub.rpa?.maxTabsPerBatch || 6} 个账号标签`;
   toast('设置已保存', 'ok'); loadOverview();
+});
+
+function renderStorageSummary(s) {
+  if (!$('#stStorageTotal')) return;
+  $('#stStorageTotal').textContent = fmtBytes(s.totalBytes);
+  $('#stStorageChrome').textContent = fmtBytes(s.chromeProfileBytes);
+  $('#stStorageShots').textContent = fmtBytes(s.screenshotsBytes);
+  const oldShots = $('#stCleanOldScreenshots')?.checked ? s.oldScreenshotBytes : 0;
+  $('#stStorageCleanable').textContent = fmtBytes((s.safeCleanableBytes || 0) + (oldShots || 0));
+  const top = (s.chromeTargets || [])[0];
+  $('#stStorageMsg').textContent = top
+    ? `最大项：${top.label} ${fmtBytes(top.bytes)}`
+    : '暂无可清理缓存';
+}
+
+async function loadStorageSummary() {
+  const s = await api('/storage');
+  renderStorageSummary(s);
+  return s;
+}
+
+$('#stRefreshStorage')?.addEventListener('click', async () => {
+  $('#stStorageMsg').textContent = '正在刷新...';
+  try {
+    await loadStorageSummary();
+    toast('存储占用已刷新', 'ok');
+  } catch (e) {
+    $('#stStorageMsg').textContent = '';
+    toast('刷新失败：' + e.message, 'bad');
+  }
+});
+$('#stCleanOldScreenshots')?.addEventListener('change', () => loadStorageSummary().catch(() => {}));
+$('#stCleanupStorage')?.addEventListener('click', async () => {
+  const includeOldScreenshots = !!$('#stCleanOldScreenshots')?.checked;
+  const suffix = includeOldScreenshots ? '，并删除 30 天前截图' : '';
+  if (!(await askConfirm(`清理 Chrome 自动缓存和模型${suffix}？登录态和数据库会保留。`, { okText: '开始清理' }))) return;
+  $('#stCleanupStorage').disabled = true;
+  $('#stStorageMsg').textContent = '正在清理...';
+  try {
+    const r = await api('/storage/cleanup', {
+      method: 'POST',
+      body: JSON.stringify({ includeOldScreenshots, screenshotDays: 30 }),
+    });
+    renderStorageSummary(r.after);
+    $('#stStorageMsg').textContent = `已释放 ${fmtBytes(r.removedBytes)}`;
+    toast(`已释放 ${fmtBytes(r.removedBytes)}`, 'ok');
+  } catch (e) {
+    $('#stStorageMsg').textContent = '';
+    toast('清理失败：' + e.message, 'bad');
+  } finally {
+    $('#stCleanupStorage').disabled = false;
+  }
 });
 $('#stCopyToken').addEventListener('click', async () => {
   await navigator.clipboard.writeText($('#stToken').textContent); toast('已复制 token');

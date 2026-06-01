@@ -92,6 +92,19 @@ test('浏览器巡检默认每轮 6 个标签，且可在 1-10 间调整', () =>
   assert.match(patrolJs, /const DEFAULT_MAX_TABS_PER_BATCH = 6/);
 });
 
+test('设置页提供安全存储瘦身入口', () => {
+  const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
+  const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
+  const serverJs = readFileSync(join(root, 'server', 'index.js'), 'utf8');
+
+  assert.match(html, /id="stCleanupStorage"/);
+  assert.match(html, /id="stStorageCleanable"/);
+  assert.match(appJs, /\/storage\/cleanup/);
+  assert.match(appJs, /includeOldScreenshots/);
+  assert.match(serverJs, /inspectStorage/);
+  assert.match(serverJs, /cleanupStorage/);
+});
+
 test('小米 MiMo 预设使用当前 V2.5 模型', () => {
   const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
   const xiaomiPreset = appJs.match(/xiaomi:\s*\{[^}]+\}/)?.[0] || '';

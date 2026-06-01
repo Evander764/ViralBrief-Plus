@@ -39,6 +39,7 @@ import { recognizePageState, observeVideo } from './ai/observe.js';
 import { fetchAndExtract } from './ingest/scrape.js';
 import { openExternalBrowser, openExternalBrowserUrls } from './lib/browser-open.js';
 import { accountOpenUrlsForPlatform } from './lib/account-open.js';
+import { cleanupStorage, inspectStorage } from './lib/storage-cleanup.js';
 
 
 ensureDirs();
@@ -160,7 +161,7 @@ async function handleApi(req, res, url, segs) {
 
   // health 不需要 token，供插件探测桌面端是否在运行
   if (p[0] === 'health') {
-    return sendJson(res, 200, { ok: true, app: 'viral-brief-plus', version: '1.0.0', hasApiKey: hasApiKey() });
+    return sendJson(res, 200, { ok: true, app: 'viral-brief-plus', version: '1.0.1', hasApiKey: hasApiKey() });
   }
 
   // 鉴权
@@ -212,6 +213,22 @@ async function handleApi(req, res, url, segs) {
       schedule: cfg.schedule,
       hasApiKey: hasApiKey(),
     });
+  }
+
+  // ---- storage ----
+  if (p[0] === 'storage') {
+    if (p.length === 1 && method === 'GET') {
+      return sendJson(res, 200, inspectStorage());
+    }
+    if (p[1] === 'cleanup' && method === 'POST') {
+      const active = getPatrolRunState();
+      if (active) return sendJson(res, 409, { error: '巡检运行中，先停止巡检再清理缓存', active });
+      const body = await readJson(req);
+      return sendJson(res, 200, cleanupStorage({
+        includeOldScreenshots: body.includeOldScreenshots === true,
+        screenshotDays: body.screenshotDays || 30,
+      }));
+    }
   }
 
   // ---- settings ----

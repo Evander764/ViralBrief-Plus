@@ -275,6 +275,21 @@
           </label>
           <p class="muted" style="align-self:end; margin:0;">默认 6，可在 1-10 间调整。</p>
         </div>
+        <div class="storage-box">
+          <div class="storage-grid">
+            <div><strong id="stStorageTotal">—</strong><span>本地数据</span></div>
+            <div><strong id="stStorageChrome">—</strong><span>RPA 浏览器</span></div>
+            <div><strong id="stStorageShots">—</strong><span>截图</span></div>
+            <div><strong id="stStorageCleanable">—</strong><span>可安全瘦身</span></div>
+          </div>
+          <div class="row">
+            <button id="stRefreshStorage">刷新占用</button>
+            <button class="danger" id="stCleanupStorage">安全瘦身</button>
+            <label class="check"><input type="checkbox" id="stCleanOldScreenshots" /> 清理 30 天前截图</label>
+            <span class="muted" id="stStorageMsg"></span>
+          </div>
+          <p class="muted">保留登录态、数据库、API Key 和近期截图；清理 Chrome 自动模型、组件缓存和页面缓存。</p>
+        </div>
         <div class="row"><button class="primary" id="stSaveSettings">保存设置</button><span class="muted" id="stSaveMsg"></span></div>
 
         <h3>浏览器插件配对</h3>

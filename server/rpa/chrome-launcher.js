@@ -28,6 +28,46 @@ const CHROME_PATHS_MAC = [
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
 ];
 
+export const CHROME_SYNC_EXCLUDES = [
+  '--exclude=Singleton*',
+  '--exclude=RunningChromeVersion',
+  '--exclude=Crashpad',
+  '--exclude=BrowserMetrics*',
+  '--exclude=OptGuideOnDeviceModel',
+  '--exclude=OptGuideOnDeviceClassifierModel',
+  '--exclude=optimization_guide_model_store',
+  '--exclude=component_crx_cache',
+  '--exclude=extensions_crx_cache',
+  '--exclude=WasmTtsEngine',
+  '--exclude=Safe Browsing',
+  '--exclude=*/Cache',
+  '--exclude=*/Code Cache',
+  '--exclude=*/GPUCache',
+  '--exclude=*/GrShaderCache',
+  '--exclude=*/GraphiteDawnCache',
+  '--exclude=*/DawnGraphiteCache',
+  '--exclude=*/DawnWebGPUCache',
+  '--exclude=*/ShaderCache',
+  '--exclude=*/DawnCache',
+  '--exclude=*/Media Cache',
+  '--exclude=*/Service Worker/CacheStorage',
+  '--exclude=*/blob_storage',
+];
+
+export function chromeStorageSaverArgs() {
+  const rawMb = Number(process.env.VBP_RPA_CHROME_CACHE_MB || process.env.VB_RPA_CHROME_CACHE_MB || 256);
+  const cacheMb = Math.min(2048, Math.max(32, Number.isFinite(rawMb) ? Math.floor(rawMb) : 256));
+  const diskCacheBytes = cacheMb * 1024 * 1024;
+  const mediaCacheBytes = Math.max(32, Math.floor(cacheMb / 2)) * 1024 * 1024;
+  return [
+    `--disk-cache-size=${diskCacheBytes}`,
+    `--media-cache-size=${mediaCacheBytes}`,
+    '--disable-background-networking',
+    '--disable-component-update',
+    '--disable-features=OptimizationHints,OptimizationHintsFetching,OptimizationGuideModelDownloading,OnDeviceModelExecution',
+  ];
+}
+
 /**
  * 查找本机可用的 Chrome 路径。
  * @returns {string|null}
@@ -169,24 +209,11 @@ function syncLoggedInProfile(session) {
   }
 
   mkdirSync(session.userDataDir, { recursive: true });
-  const excludes = [
-    '--exclude=Singleton*',
-    '--exclude=RunningChromeVersion',
-    '--exclude=Crashpad',
-    '--exclude=BrowserMetrics*',
-    '--exclude=*/Cache',
-    '--exclude=*/Code Cache',
-    '--exclude=*/GPUCache',
-    '--exclude=*/GrShaderCache',
-    '--exclude=*/GraphiteDawnCache',
-    '--exclude=*/ShaderCache',
-    '--exclude=*/DawnCache',
-  ];
   log.info(`同步已登录 Chrome 资料到 RPA 镜像: ${session.sourceUserDataDir} -> ${session.userDataDir}`);
   execFileSync('rsync', [
     '-a',
     '--delete',
-    ...excludes,
+    ...CHROME_SYNC_EXCLUDES,
     `${session.sourceUserDataDir}/`,
     `${session.userDataDir}/`,
   ], { timeout: 120000 });
@@ -247,6 +274,7 @@ export async function launchChrome({ port = DEFAULT_PORT, dataDir, waitMs = 1500
     '--no-first-run',
     '--no-default-browser-check',
     '--restore-last-session',
+    ...chromeStorageSaverArgs(),
   ];
 
   log.info(`启动 RPA Chrome: port=${port}, profile=${session.profileDirectory}, dataDir=${session.userDataDir}`);

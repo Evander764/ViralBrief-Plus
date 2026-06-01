@@ -46,7 +46,10 @@ class FakeClient {
     this.bodyByUrl = opts.bodyByUrl || {};
     this.hashtagsByUrl = opts.hashtagsByUrl || {};
     this.dataByUrl = opts.dataByUrl || {};
+    this.douyinNextByUrl = opts.douyinNextByUrl || {};
+    this.douyinNextButtonRect = opts.douyinNextButtonRect || { x: 1180, y: 126, width: 1280, height: 800, score: 220, label: '下一个' };
     this.pauseCalls = 0;
+    this.screenshots = 0;
   }
 
   async goto(url) {
@@ -56,7 +59,7 @@ class FakeClient {
   }
 
   async sleep() {}
-  async screenshot() { return Buffer.from('fakepng'); }
+  async screenshot() { this.screenshots++; return Buffer.from('fakepng'); }
   async currentUrl() { return this.url; }
   async typeText(text) { this.typed += text; }
   async keyPress(key) {
@@ -67,10 +70,17 @@ class FakeClient {
   async mouseMove() {}
   async mouseClick(x, y, options) {
     const isXhsClose = this.url.includes('xiaohongshu.com/explore/') && x <= 220 && y <= 180;
-    this.clicks.push({ x, y, options, from: this.url, kind: isXhsClose ? 'xhs-close' : 'card' });
+    const isDouyinNext = this.url.includes('douyin.com/video/') && x >= 900;
+    this.clicks.push({ x, y, options, from: this.url, kind: isXhsClose ? 'xhs-close' : (isDouyinNext ? 'douyin-next' : 'card') });
     if (isXhsClose) {
       this.closedDetails++;
       this.url = this.lastXhsHomepage || 'https://www.xiaohongshu.com/user/profile/fake-home';
+      return;
+    }
+    if (isDouyinNext) {
+      if (Object.hasOwn(this.douyinNextByUrl, this.url)) {
+        this.url = this.douyinNextByUrl[this.url] || this.url;
+      }
       return;
     }
     if (this.url.includes('xiaohongshu.com/user/profile') && this.clickLandingUrls.length > 0) {
@@ -86,6 +96,18 @@ class FakeClient {
   }
 
   async evaluate(expr) {
+    if (expr.includes('vbp-douyin-next-button')) {
+      return this.url.includes('douyin.com/video/') && Object.hasOwn(this.douyinNextByUrl, this.url)
+        ? this.douyinNextButtonRect
+        : null;
+    }
+    if (expr.includes('vbp-douyin-detail-signature')) {
+      return {
+        url: this.url,
+        video: `video:${this.url}`,
+        title: this.titleByUrl[this.url] || '新视频 - 抖音',
+      };
+    }
     if (expr.includes('vbp-douyin-pause-video')) {
       this.pauseCalls++;
       return { videoCount: 1, pausedCount: 1 };
@@ -477,6 +499,268 @@ test('runPatrol falls back to the Douyin detail URL when homepage card click ope
     assert.equal(result.details[0].item.url, postUrl);
     assert.ok(client.clicks.some((click) => click.from === acc.homepage_url && click.kind === 'card'));
     assert.ok(client.gotos.includes(postUrl), 'wrong card landing should fall back to direct detail URL');
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
+test('runPatrol uses the Douyin next button after opening the first homepage video', async () => {
+  const firstUrl = 'https://www.douyin.com/video/next-sequence-first';
+  const secondUrl = 'https://www.douyin.com/video/next-sequence-second';
+  const thirdUrl = 'https://www.douyin.com/video/next-sequence-third';
+  const acc = upsertAccount({
+    platform: 'douyin',
+    nickname: '抖音连续翻页账号',
+    homepage_url: 'https://www.douyin.com/user/douyin-next-sequence',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient({
+    postCandidates: [
+      { url: firstUrl, rect: { left: 220, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '连续第一条', publishRaw: '2小时前' },
+      { url: secondUrl, rect: { left: 440, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '连续第二条', publishRaw: '2小时前' },
+      { url: thirdUrl, rect: { left: 660, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '连续第三条', publishRaw: '2小时前' },
+    ],
+    clickLandingUrls: [firstUrl],
+    douyinNextByUrl: {
+      [firstUrl]: secondUrl,
+      [secondUrl]: thirdUrl,
+    },
+    titleByUrl: {
+      [firstUrl]: '连续第一条 - 抖音',
+      [secondUrl]: '连续第二条 - 抖音',
+      [thirdUrl]: '连续第三条 - 抖音',
+    },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+      maxCandidatesPerAccount: 3,
+    });
+
+    assert.equal(result.success, 1);
+    assert.equal(result.newItems, 3);
+    assert.deepEqual(result.details[0].items.map((item) => item.url), [firstUrl, secondUrl, thirdUrl]);
+    assert.equal(client.gotos.includes(secondUrl), false, 'second video should come from the next button, not direct navigation');
+    assert.equal(client.gotos.includes(thirdUrl), false, 'third video should come from the next button, not direct navigation');
+    assert.equal(client.clicks.filter((click) => click.kind === 'douyin-next').length, 2);
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
+test('runPatrol saves an out-of-window Douyin video reached by the next button and stops the account', async () => {
+  const firstUrl = 'https://www.douyin.com/video/next-out-window-first';
+  const oldUrl = 'https://www.douyin.com/video/next-out-window-old';
+  const laterUrl = 'https://www.douyin.com/video/next-out-window-later';
+  const acc = upsertAccount({
+    platform: 'douyin',
+    nickname: '抖音翻页超窗账号',
+    homepage_url: 'https://www.douyin.com/user/douyin-next-out-window',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient({
+    postCandidates: [
+      { url: firstUrl, rect: { left: 220, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '翻页新视频', publishRaw: '2小时前' },
+      { url: oldUrl, rect: { left: 440, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '翻页旧视频', publishRaw: '2026-05-20' },
+      { url: laterUrl, rect: { left: 660, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '不应打开的视频', publishRaw: '2小时前' },
+    ],
+    clickLandingUrls: [firstUrl],
+    douyinNextByUrl: {
+      [firstUrl]: oldUrl,
+      [oldUrl]: laterUrl,
+    },
+    pubTimeByUrl: {
+      [oldUrl]: '举报 2026年5月20日',
+    },
+    titleByUrl: {
+      [firstUrl]: '翻页新视频 - 抖音',
+      [oldUrl]: '翻页旧视频 - 抖音',
+      [laterUrl]: '不应打开的视频 - 抖音',
+    },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+      maxCandidatesPerAccount: 3,
+      windowStartISO: '2026-05-30T00:00:00.000Z',
+    });
+
+    assert.equal(result.success, 1);
+    assert.deepEqual(result.details[0].items.map((item) => item.url), [firstUrl, oldUrl]);
+    assert.equal(client.gotos.includes(laterUrl), false);
+    assert.equal(client.clicks.filter((click) => click.kind === 'douyin-next').length, 1);
+    assert.ok(result.details[0].skipReasons.some((s) => s.reason === 'out_of_window'));
+    const savedOld = getContent(result.details[0].items[1].id);
+    assert.equal(savedOld.publish_time.slice(0, 10), '2026-05-20');
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
+test('runPatrol falls back to direct Douyin URLs when the next button is unavailable', async () => {
+  const firstUrl = 'https://www.douyin.com/video/next-missing-first';
+  const secondUrl = 'https://www.douyin.com/video/next-missing-second';
+  const acc = upsertAccount({
+    platform: 'douyin',
+    nickname: '抖音按钮缺失账号',
+    homepage_url: 'https://www.douyin.com/user/douyin-next-missing',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient({
+    postCandidates: [
+      { url: firstUrl, rect: { left: 220, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '按钮缺失第一条', publishRaw: '2小时前' },
+      { url: secondUrl, rect: { left: 440, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '按钮缺失第二条', publishRaw: '2小时前' },
+    ],
+    clickLandingUrls: [firstUrl],
+    titleByUrl: {
+      [firstUrl]: '按钮缺失第一条 - 抖音',
+      [secondUrl]: '按钮缺失第二条 - 抖音',
+    },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+      maxCandidatesPerAccount: 2,
+    });
+
+    assert.equal(result.success, 1);
+    assert.deepEqual(result.details[0].items.map((item) => item.url), [firstUrl, secondUrl]);
+    assert.ok(client.gotos.includes(secondUrl), 'missing next button should fall back to direct detail URL');
+    assert.ok(result.details[0].skipReasons.some((s) => s.reason === 'douyin_next_unavailable'));
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
+test('runPatrol falls back to direct Douyin URLs when the next button does not change detail', async () => {
+  const firstUrl = 'https://www.douyin.com/video/next-no-change-first';
+  const secondUrl = 'https://www.douyin.com/video/next-no-change-second';
+  const acc = upsertAccount({
+    platform: 'douyin',
+    nickname: '抖音按钮无变化账号',
+    homepage_url: 'https://www.douyin.com/user/douyin-next-no-change',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient({
+    postCandidates: [
+      { url: firstUrl, rect: { left: 220, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '无变化第一条', publishRaw: '2小时前' },
+      { url: secondUrl, rect: { left: 440, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '无变化第二条', publishRaw: '2小时前' },
+    ],
+    clickLandingUrls: [firstUrl],
+    douyinNextByUrl: {
+      [firstUrl]: firstUrl,
+    },
+    titleByUrl: {
+      [firstUrl]: '无变化第一条 - 抖音',
+      [secondUrl]: '无变化第二条 - 抖音',
+    },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+      maxCandidatesPerAccount: 2,
+    });
+
+    assert.equal(result.success, 1);
+    assert.deepEqual(result.details[0].items.map((item) => item.url), [firstUrl, secondUrl]);
+    assert.equal(client.clicks.filter((click) => click.kind === 'douyin-next').length, 1);
+    assert.ok(client.gotos.includes(secondUrl), 'unchanged detail should fall back to direct detail URL');
+    assert.ok(result.details[0].skipReasons.some((s) => s.reason === 'douyin_next_no_change'));
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
+test('runPatrol stops a Douyin account when next-button navigation loops to an opened detail', async () => {
+  const firstUrl = 'https://www.douyin.com/video/next-loop-first';
+  const secondUrl = 'https://www.douyin.com/video/next-loop-second';
+  const thirdUrl = 'https://www.douyin.com/video/next-loop-third';
+  const acc = upsertAccount({
+    platform: 'douyin',
+    nickname: '抖音翻页循环账号',
+    homepage_url: 'https://www.douyin.com/user/douyin-next-loop',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient({
+    postCandidates: [
+      { url: firstUrl, rect: { left: 220, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '循环第一条', publishRaw: '2小时前' },
+      { url: secondUrl, rect: { left: 440, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '循环第二条', publishRaw: '2小时前' },
+      { url: thirdUrl, rect: { left: 660, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '循环第三条', publishRaw: '2小时前' },
+    ],
+    clickLandingUrls: [firstUrl],
+    douyinNextByUrl: {
+      [firstUrl]: secondUrl,
+      [secondUrl]: firstUrl,
+    },
+    titleByUrl: {
+      [firstUrl]: '循环第一条 - 抖音',
+      [secondUrl]: '循环第二条 - 抖音',
+      [thirdUrl]: '循环第三条 - 抖音',
+    },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+      maxCandidatesPerAccount: 3,
+    });
+
+    assert.equal(result.success, 1);
+    assert.deepEqual(result.details[0].items.map((item) => item.url), [firstUrl, secondUrl]);
+    assert.equal(client.gotos.includes(thirdUrl), false);
+    assert.ok(result.details[0].skipReasons.some((s) => s.reason === 'opened_twice'));
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
+test('runPatrol keeps saved Douyin detail but does not mark account patrolled when stopped between next-button details', async () => {
+  const firstUrl = 'https://www.douyin.com/video/next-stop-first';
+  const secondUrl = 'https://www.douyin.com/video/next-stop-second';
+  const acc = upsertAccount({
+    platform: 'douyin',
+    nickname: '抖音中途停止账号',
+    homepage_url: 'https://www.douyin.com/user/douyin-next-stop',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient({
+    postCandidates: [
+      { url: firstUrl, rect: { left: 220, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '停止第一条', publishRaw: '2小时前' },
+      { url: secondUrl, rect: { left: 440, top: 240, width: 190, height: 250 }, viewport: { width: 1280, height: 800 }, titleRaw: '停止第二条', publishRaw: '2小时前' },
+    ],
+    clickLandingUrls: [firstUrl],
+    douyinNextByUrl: {
+      [firstUrl]: secondUrl,
+    },
+    titleByUrl: {
+      [firstUrl]: '停止第一条 - 抖音',
+      [secondUrl]: '停止第二条 - 抖音',
+    },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+      maxCandidatesPerAccount: 2,
+      shouldStop: () => client.screenshots > 0,
+    });
+
+    assert.equal(result.stopped, true);
+    assert.equal(result.newItems, 1);
+    assert.deepEqual(result.details[0].items.map((item) => item.url), [firstUrl]);
+    assert.equal(client.clicks.some((click) => click.kind === 'douyin-next'), false);
+    const savedAccount = get('SELECT last_patrolled_at FROM accounts WHERE id = ?', [acc.id]);
+    assert.equal(savedAccount.last_patrolled_at, null);
   } finally {
     upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
   }

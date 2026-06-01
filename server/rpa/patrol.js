@@ -274,9 +274,13 @@ function initPlatformResult(result, platform) {
 
 function applyPatrolOutcome(result, outcome) {
   const platformResult = initPlatformResult(result, outcome.platform);
-  if (outcome.status === 'ok') {
-    result.success++;
-    platformResult.success++;
+  if (outcome.status === 'ok' || outcome.status === 'stopped') {
+    if (outcome.status === 'ok') {
+      result.success++;
+      platformResult.success++;
+    } else {
+      result.stopped = true;
+    }
     const items = outcome.items || (outcome.item ? [outcome.item] : []);
     for (const item of items) {
       if (item?.duplicate) {
@@ -287,8 +291,6 @@ function applyPatrolOutcome(result, outcome) {
         platformResult.newItems++;
       }
     }
-  } else if (outcome.status === 'stopped') {
-    result.stopped = true;
   } else {
     result.failed++;
     platformResult.failed++;
@@ -386,6 +388,9 @@ async function patrolOpenSession(session, progress, { total, maxCandidates, wind
 
   const result = await collectDouyinItems(worker, acc, accountProgress, { maxCandidates, windowStartISO, shouldStop, homepage });
   const items = result.items || [];
+  if (result.stopped) {
+    return stoppedOutcome(acc, items, result.skipReasons);
+  }
   if (items.length === 0 && result.skipReasons.length === 0) {
     return errorOutcome(acc, '未能提取到新增内容');
   }
@@ -429,16 +434,16 @@ function errorOutcome(acc, error) {
   };
 }
 
-function stoppedOutcome(acc) {
+function stoppedOutcome(acc, items = [], skipReasons = []) {
   return {
     accountId: acc?.id || null,
     nickname: acc?.nickname || null,
     platform: acc?.platform || 'unknown',
     status: 'stopped',
     error: '用户已请求停止巡检',
-    item: null,
-    items: [],
-    skipReasons: [],
+    item: items[0] || null,
+    items,
+    skipReasons,
   };
 }
 
@@ -465,6 +470,9 @@ async function patrolAccount(client, acc, progress, { index, total, maxCandidate
     }
 
     const result = await patrolDouyin(client, acc, accountProgress, { maxCandidates, windowStartISO, shouldStop });
+    if (result.stopped) {
+      return stoppedOutcome(acc, result.items || [], result.skipReasons || []);
+    }
     if (!result?.items?.length && !result?.skipReasons?.length) {
       return { accountId: acc.id, nickname: acc.nickname, platform: acc.platform, status: 'error', error: '未能提取到新增内容', item: null };
     }
@@ -532,7 +540,7 @@ async function collectDouyinItems(client, acc, progress, { maxCandidates, window
     return { items: [], skipReasons };
   }
 
-  const items = await patrolCandidateUrls(client, acc, 'douyin', postCandidates, progress, {
+  const sequence = await patrolDouyinByNextButton(client, acc, postCandidates, progress, {
     maxCandidates,
     waitMs: 4500,
     homepage,
@@ -540,7 +548,177 @@ async function collectDouyinItems(client, acc, progress, { maxCandidates, window
     skipReasons,
     shouldStop,
   });
+  if (sequence.stopped || sequence.completed) {
+    return { items: sequence.items, skipReasons, stopped: sequence.stopped };
+  }
+
+  const fallbackCandidates = remainingCandidatesForFallback(postCandidates, sequence.openedUrls);
+  const remainingMaxCandidates = Math.max(0, normalizeCandidateLimit(maxCandidates) - Number(sequence.inspected || 0));
+  if (remainingMaxCandidates <= 0) {
+    return { items: sequence.items, skipReasons };
+  }
+  if (sequence.reason) {
+    progress(`  抖音连续翻页不可用，改用详情链接兜底: ${sequence.reason}`);
+  }
+  const fallbackItems = await patrolCandidateUrls(client, acc, 'douyin', fallbackCandidates, progress, {
+    maxCandidates: remainingMaxCandidates,
+    waitMs: 4500,
+    homepage,
+    windowStartISO,
+    skipReasons,
+    shouldStop,
+  });
+  const items = mergePatrolItems(sequence.items, fallbackItems);
   return { items, skipReasons };
+}
+
+async function patrolDouyinByNextButton(client, acc, postCandidates, progress, {
+  maxCandidates,
+  waitMs,
+  homepage = null,
+  windowStartISO = null,
+  skipReasons = [],
+  shouldStop = () => false,
+}) {
+  const candidateLimit = normalizeCandidateLimit(maxCandidates);
+  const normalizedCandidates = normalizePostCandidates(postCandidates);
+  const firstIndex = normalizedCandidates.findIndex((candidate) => candidate?.url && !candidate.isPinned);
+  const openedUrls = new Set();
+  const items = [];
+  let duplicateItemResult = null;
+  let duplicateUrl = null;
+
+  for (const candidate of normalizedCandidates.slice(0, Math.max(0, firstIndex))) {
+    if (candidate?.isPinned) {
+      recordSkip(skipReasons, candidate, 'pinned', '置顶内容不算真正最新内容');
+      progress('  抖音候选是置顶内容，跳过');
+    }
+  }
+  if (firstIndex < 0) {
+    return { items: [], openedUrls, completed: false, reason: '未找到非置顶候选视频', inspected: 0 };
+  }
+
+  const firstCandidate = normalizedCandidates[firstIndex];
+  progress(`  抖音优先进入第一条非置顶视频: ${firstCandidate.url}`);
+  const opened = await openDouyinCandidateForSequence(client, homepage, firstCandidate, progress, { waitMs });
+  if (opened?.skipped === 'pinned') {
+    recordSkip(skipReasons, firstCandidate, 'pinned', '回到主页后识别为置顶内容，跳过点击');
+    return { items: [], openedUrls, completed: false, reason: '第一条候选回到主页后识别为置顶', inspected: 0 };
+  }
+  if (opened?.fallback) {
+    recordSkip(skipReasons, firstCandidate, 'douyin_sequence_fallback', '第一条候选无法从主页卡片进入，改用旧逐链接方案');
+    return { items: [], openedUrls, completed: false, reason: '第一条候选无法从主页卡片进入', inspected: 0 };
+  }
+
+  await settleDouyinCandidateDetail(client, progress, { waitMs });
+  let currentUrl = await safeCurrentUrl(client);
+  if (!sameDetailUrl('douyin', currentUrl, firstCandidate.url) || await currentPageUnavailable(client)) {
+    recordSkip(skipReasons, firstCandidate, 'douyin_sequence_fallback', `第一条候选未进入对应详情页: ${currentUrl || firstCandidate.url}`);
+    return { items: [], openedUrls, completed: false, reason: '第一条候选未进入对应详情页', inspected: 0 };
+  }
+
+  const openedDetailKeys = new Set();
+  let candidate = firstCandidate;
+  let inspected = 0;
+
+  while (inspected < candidateLimit) {
+    if (shouldStop?.()) {
+      return { items: items.length ? items : duplicateOnlyItems(duplicateItemResult, duplicateUrl), openedUrls, completed: true, stopped: true, inspected };
+    }
+    currentUrl = await safeCurrentUrl(client);
+    openedUrls.add(currentUrl || candidate?.url || '');
+    const captured = await captureDouyinCurrentDetail(client, acc, candidate, progress, {
+      windowStartISO,
+      skipReasons,
+      openedDetailKeys,
+      fallbackUrl: candidate?.url || currentUrl,
+    });
+    inspected++;
+
+    if (captured?.duplicateItem) {
+      duplicateItemResult ||= captured.duplicateItem;
+      duplicateUrl ||= captured.duplicateUrl || captured.duplicateItem.url;
+    }
+    if (captured?.item && !captured.item.duplicate) {
+      items.push(captured.item);
+    }
+    if (captured?.finalUrl) openedUrls.add(captured.finalUrl);
+    if (captured?.stopAccount) {
+      return { items: items.length ? items : duplicateOnlyItems(duplicateItemResult, duplicateUrl), openedUrls, completed: true, inspected };
+    }
+    if (captured?.openedTwice) {
+      return { items: items.length ? items : duplicateOnlyItems(duplicateItemResult, duplicateUrl), openedUrls, completed: true, inspected };
+    }
+    if (shouldStop?.()) {
+      return { items: items.length ? items : duplicateOnlyItems(duplicateItemResult, duplicateUrl), openedUrls, completed: true, stopped: true, inspected };
+    }
+    if (inspected >= candidateLimit) {
+      return { items: items.length ? items : duplicateOnlyItems(duplicateItemResult, duplicateUrl), openedUrls, completed: true, inspected };
+    }
+
+    const beforeUrl = await safeCurrentUrl(client);
+    const beforeSignature = await readDouyinDetailSignature(client);
+    const clicked = await clickDouyinNextButton(client, progress);
+    if (!clicked) {
+      recordSkip(skipReasons, { url: beforeUrl }, 'douyin_next_unavailable', '未找到抖音右侧下一个视频按钮，改用旧逐链接方案');
+      return { items, openedUrls, completed: false, reason: '未找到右侧下一个按钮', inspected };
+    }
+    const changed = await waitForDouyinDetailChange(client, beforeUrl, beforeSignature, waitMs);
+    if (!changed) {
+      recordSkip(skipReasons, { url: beforeUrl }, 'douyin_next_no_change', '点击下一个按钮后详情页没有变化，改用旧逐链接方案');
+      return { items, openedUrls, completed: false, reason: '点击下一个按钮后页面未变化', inspected };
+    }
+    await settleDouyinCandidateDetail(client, progress, { waitMs });
+    const nextUrl = await safeCurrentUrl(client);
+    if (!isDetailUrl('douyin', nextUrl) || await currentPageUnavailable(client)) {
+      recordSkip(skipReasons, { url: nextUrl || beforeUrl }, 'douyin_sequence_fallback', `翻到下一条后未停留在详情页: ${nextUrl || beforeUrl}`);
+      return { items, openedUrls, completed: false, reason: '翻到下一条后未停留在详情页', inspected };
+    }
+    candidate = {
+      url: nextUrl,
+      rect: null,
+      viewport: null,
+      titleRaw: '',
+      title: '',
+      isPinned: false,
+      cardText: '',
+    };
+  }
+
+  return { items: items.length ? items : duplicateOnlyItems(duplicateItemResult, duplicateUrl), openedUrls, completed: true, inspected };
+}
+
+async function openDouyinCandidateForSequence(client, homepage, candidate, progress, { waitMs }) {
+  if (candidate.rect && homepage) {
+    return openDouyinCandidateFromHomepage(client, homepage, candidate, progress, { waitMs });
+  }
+  return { opened: false, fallback: true };
+}
+
+function remainingCandidatesForFallback(postCandidates, openedUrls = new Set()) {
+  const opened = [...openedUrls].filter(Boolean);
+  if (opened.length === 0) return postCandidates;
+  return normalizePostCandidates(postCandidates).filter((candidate) => (
+    !opened.some((url) => sameDetailUrl('douyin', url, candidate.url) || sameCleanUrl(url, candidate.url))
+  ));
+}
+
+function mergePatrolItems(primary = [], fallback = []) {
+  const out = [];
+  const seen = new Set();
+  for (const item of [...primary, ...fallback]) {
+    const key = item?.url || item?.id;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+function duplicateOnlyItems(item, url) {
+  if (item) return [item];
+  if (url) return [duplicateItem(url)];
+  return [];
 }
 
 async function patrolXiaohongshu(client, acc, progress, { maxCandidates, windowStartISO, shouldStop }) {
@@ -1365,6 +1543,88 @@ function duplicateItem(url, publishTime = null) {
   };
 }
 
+async function captureDouyinCurrentDetail(client, acc, candidate, progress, {
+  windowStartISO = null,
+  skipReasons = [],
+  openedDetailKeys = new Set(),
+  fallbackUrl = null,
+}) {
+  await assertNotBlocked(client, 'douyin');
+
+  const currentUrl = await safeCurrentUrl(client);
+  if (!isDetailUrl('douyin', currentUrl) || await currentPageUnavailable(client)) {
+    recordSkip(skipReasons, candidate, 'not_detail', `抖音当前页面不是详情页: ${currentUrl || fallbackUrl || candidate?.url}`);
+    progress(`  抖音当前页面不是详情页，跳过: ${currentUrl || fallbackUrl || candidate?.url}`);
+    return { skipped: true };
+  }
+
+  const preferredPubTime = await readDouyinDetailPublishTime(client, progress);
+  const raw = await extractPageRaw(client, 'douyin');
+  if (preferredPubTime) raw.pubTime = preferredPubTime;
+  const data = buildCaptureData(raw, 'douyin');
+  const finalUrl = isDetailUrl('douyin', data.pageUrl) ? data.pageUrl : (currentUrl || fallbackUrl || candidate?.url);
+  const detailKey = detailVisitKey('douyin', finalUrl);
+  if (detailKey && openedDetailKeys.has(detailKey)) {
+    recordSkip(skipReasons, candidate, 'opened_twice', '同一详情页在本轮已打开过，停止该博主');
+    progress('  发现同一抖音详情页被重复打开，停止该账号后续检查');
+    return { openedTwice: true, stopAccount: true, finalUrl };
+  }
+  if (detailKey) openedDetailKeys.add(detailKey);
+
+  const titleDecision = titleMismatchDecision(candidate, data.title, skipReasons);
+  if (titleDecision) {
+    recordSkip(skipReasons, candidate, titleDecision.reason, titleDecision.detail);
+    progress(`  候选标题与详情不一致，仍按已打开详情入库: ${titleDecision.detail}`);
+  }
+
+  const timeGate = assessDetailPublishTime(data, windowStartISO);
+  const publishDecision = decideAfterDetailPublishTime('douyin', timeGate);
+  if (timeGate.reason === 'unknown_time') {
+    recordSkip(skipReasons, candidate, timeGate.reason, timeGate.detail);
+    progress('  详情页未识别到发布时间，先入库等待后续复核');
+  }
+  if (timeGate.reason === 'out_of_window') {
+    recordSkip(skipReasons, candidate, timeGate.reason, timeGate.detail);
+    if (publishDecision.exitAccount) {
+      progress(`  抖音详情页发布时间超出窗口，保存本条后停止该账号: ${timeGate.displayTime}`);
+    } else {
+      progress(`  详情页发布时间超出窗口，仍先入库，巡检结束后统一筛选: ${timeGate.displayTime}`);
+    }
+  }
+  if (timeGate.action === 'continue') {
+    progress(`  详情页发布时间确认在窗口内: ${timeGate.displayTime}`);
+  }
+  data.publishTime = timeGate.publishTime;
+  const stopAfterThisDetail = publishDecision.exitAccount;
+
+  if (contentExistsByUrl(finalUrl)) {
+    const item = duplicateItem(finalUrl, timeGate.publishTime);
+    recordSkip(skipReasons, candidate, 'already_seen', stopAfterThisDetail
+      ? '详情页已采集且发布时间超出窗口，停止该账号后续检查'
+      : '详情页已采集，但发布时间仍在窗口内，继续检查下一条');
+    progress(stopAfterThisDetail ? '  详情页已采集且发布时间超出窗口，停止该账号后续检查' : '  详情页已采集，继续检查下一条');
+    return { duplicateItem: item, duplicateUrl: finalUrl, stopAccount: stopAfterThisDetail, finalUrl };
+  }
+
+  if (isUnavailablePage(raw) || !hasCaptureSignal(data)) {
+    recordSkip(skipReasons, candidate, 'unavailable', data.title || raw.pageUrl || finalUrl);
+    progress(`  候选不可采，跳过: ${data.title || raw.pageUrl || finalUrl}`);
+    return { skipped: true, stopAccount: stopAfterThisDetail, finalUrl };
+  }
+
+  progress(`  抓取到数据: 点赞=${data.like}, 转发=${data.share}, 收藏=${data.favorite}, 标签=${data.hashtags?.length || 0}, 证据=${data.metricsConfidence}`);
+  const screenshotPath = await takeScreenshot(client, acc, 'douyin');
+  const item = saveData(acc, finalUrl, data, screenshotPath);
+  if (item.duplicate) {
+    recordSkip(skipReasons, candidate, 'already_seen', stopAfterThisDetail
+      ? '内容重复且发布时间超出窗口，停止该账号后续检查'
+      : '内容重复，但发布时间仍在窗口内，继续检查下一条');
+    progress(stopAfterThisDetail ? '  内容重复且发布时间超出窗口，停止该账号后续检查' : '  内容重复，继续检查下一条');
+    return { duplicateItem: item, duplicateUrl: item.url, stopAccount: stopAfterThisDetail, finalUrl };
+  }
+  return { item, stopAccount: stopAfterThisDetail, finalUrl };
+}
+
 async function patrolCandidateUrls(client, acc, platform, postCandidates, progress, {
   maxCandidates,
   waitMs,
@@ -1376,6 +1636,7 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
   progress(`  找到 ${postCandidates.length} 个候选内容，最多检查 ${maxCandidates} 条`);
   const items = [];
   const openedThisAccount = new Set();
+  const openedDouyinDetailKeys = new Set();
   let duplicateUrl = null;
   let duplicateItemResult = null;
   for (let i = 0; i < Math.min(postCandidates.length, maxCandidates); i++) {
@@ -1447,11 +1708,22 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
       }
     }
 
-    const preferredPubTime = platform === 'douyin'
-      ? await readDouyinDetailPublishTime(client, progress)
-      : null;
+    if (platform === 'douyin') {
+      const captured = await captureDouyinCurrentDetail(client, acc, candidate, progress, {
+        windowStartISO,
+        skipReasons,
+        openedDetailKeys: openedDouyinDetailKeys,
+        fallbackUrl: postUrl,
+      });
+      if (captured?.duplicateItem) {
+        duplicateUrl ||= captured.duplicateUrl || captured.duplicateItem.url;
+        duplicateItemResult ||= captured.duplicateItem;
+      }
+      if (captured?.item && !captured.item.duplicate) items.push(captured.item);
+      if (captured?.stopAccount || captured?.openedTwice) break;
+      continue;
+    }
     const raw = await extractPageRaw(client, platform);
-    if (preferredPubTime) raw.pubTime = preferredPubTime;
     const data = buildCaptureData(raw, platform);
     const finalUrl = isDetailUrl(platform, data.pageUrl) ? data.pageUrl : postUrl;
     if (openedThisAccount.has(finalUrl) && finalUrl !== postUrl) {
@@ -1954,6 +2226,137 @@ async function settleDouyinCandidateDetail(client, progress, { waitMs }) {
   await client.sleep(Math.max(0, waitMs - 300));
 }
 
+async function clickDouyinNextButton(client, progress) {
+  const rect = await findDouyinNextButtonRect(client);
+  if (!rect) return false;
+  progress('  点击抖音右侧下一个视频按钮');
+  await executeHumanActions(client, [
+    { type: 'move', x: rect.x, y: rect.y, duration_ms: 220 },
+    { type: 'click', x: rect.x, y: rect.y, hold_ms: 90 },
+    { type: 'wait', milliseconds: 500 },
+  ], { width: rect.width, height: rect.height });
+  return true;
+}
+
+async function findDouyinNextButtonRect(client) {
+  return client.evaluate(`
+    (() => {
+      // vbp-douyin-next-button
+      const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const visible = (el) => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        const opacity = Number(style.opacity || 1);
+        if (r.width < 14 || r.height < 14 || style.display === 'none' || style.visibility === 'hidden') return null;
+        if (opacity <= 0.05 || el.getAttribute('aria-hidden') === 'true') return null;
+        if (r.right < 0 || r.bottom < 0 || r.left > innerWidth || r.top > innerHeight) return null;
+        return r;
+      };
+      const labelOf = (el) => clean([
+        el.getAttribute?.('aria-label'),
+        el.getAttribute?.('title'),
+        el.getAttribute?.('data-e2e'),
+        el.getAttribute?.('data-testid'),
+        el.getAttribute?.('class'),
+        el.innerText || el.textContent,
+      ].filter(Boolean).join(' '));
+      const nodes = Array.from(document.querySelectorAll([
+        'button',
+        '[role="button"]',
+        'a',
+        'svg',
+        '[class*="next"]',
+        '[class*="down"]',
+        '[class*="arrow"]',
+        '[class*="chevron"]',
+        '[aria-label*="下"]',
+        '[aria-label*="next" i]',
+        '[title*="下"]',
+        '[title*="next" i]',
+      ].join(','))).slice(0, 1400);
+      const seen = new Set();
+      const candidates = [];
+      for (const node of nodes) {
+        const target = node.closest?.('button, [role="button"], a') || node;
+        if (!target || seen.has(target)) continue;
+        seen.add(target);
+        const rect = visible(target);
+        if (!rect) continue;
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        if (centerX < innerWidth * 0.58 || centerY < 40 || centerY > innerHeight * 0.9) continue;
+        const label = labelOf(target);
+        if (/点赞|喜欢|评论|收藏|分享|转发|关注|搜索|举报|投诉|更多|登录|暂停|播放|音量|全屏|关闭|返回/i.test(label)) continue;
+        let score = 0;
+        if (/下一个|下一条|下一页|下页|向下|下滑|next|down/i.test(label)) score += 170;
+        if (/arrow|chevron|caret|triangle|icon/i.test(label)) score += 45;
+        if (/up|上一个|上一条|上一页|向上/i.test(label)) score -= 120;
+        if (['BUTTON', 'A'].includes(target.tagName) || target.getAttribute('role') === 'button') score += 35;
+        if (centerX > innerWidth * 0.72) score += 45;
+        if (centerX > innerWidth * 0.84) score += 25;
+        if (rect.width <= 96 && rect.height <= 96) score += 24;
+        if (centerY < innerHeight * 0.45) score += 18;
+        if (!label && rect.width <= 80 && rect.height <= 80 && centerX > innerWidth * 0.78) score += 35;
+        if (score < 55) continue;
+        candidates.push({ x: centerX, y: centerY, width: innerWidth, height: innerHeight, score, label: label.slice(0, 120) });
+      }
+      candidates.sort((a, b) => b.score - a.score);
+      return candidates[0] || null;
+    })()
+  `);
+}
+
+async function readDouyinDetailSignature(client) {
+  const url = await safeCurrentUrl(client);
+  try {
+    const state = await client.evaluate(`
+      (() => {
+        // vbp-douyin-detail-signature
+        const video = Array.from(document.querySelectorAll('video'))
+          .filter((item) => {
+            const r = item.getBoundingClientRect?.();
+            return r && r.width > 20 && r.height > 20;
+          })
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return (br.width * br.height) - (ar.width * ar.height);
+          })[0] || document.querySelector('video');
+        const clean = (text) => String(text || '').replace(/\\s+/g, ' ').trim();
+        const title = clean(document.querySelector('[data-e2e="video-desc"], h1.video-title, h1')?.innerText || document.title);
+        return {
+          url: location.href,
+          video: video?.currentSrc || video?.src || video?.poster || '',
+          title: title.slice(0, 180),
+        };
+      })()
+    `);
+    return [url, state?.video, state?.title].filter(Boolean).join('|');
+  } catch {
+    return url || '';
+  }
+}
+
+async function waitForDouyinDetailChange(client, beforeUrl, beforeSignature, timeoutMs = 7000) {
+  const start = Date.now();
+  let attempts = 0;
+  const maxAttempts = Math.max(3, Math.ceil(timeoutMs / 350) + 2);
+  while (Date.now() - start < timeoutMs && attempts < maxAttempts) {
+    attempts++;
+    const currentUrl = await safeCurrentUrl(client);
+    if (isDetailUrl('douyin', currentUrl) && !sameDetailUrl('douyin', currentUrl, beforeUrl)) {
+      return true;
+    }
+    const signature = await readDouyinDetailSignature(client);
+    if (signature && beforeSignature && signature !== beforeSignature && isDetailUrl('douyin', currentUrl)) {
+      return true;
+    }
+    await client.sleep(350);
+  }
+  return false;
+}
+
 async function waitForDetailUrl(client, platform, timeoutMs = 7000, expectedUrl = null) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -1993,6 +2396,17 @@ function sameDetailUrl(platform, a, b) {
     return douyinVideoId(a) === douyinVideoId(b);
   }
   return sameCleanUrl(a, b);
+}
+
+function detailVisitKey(platform, url) {
+  if (!isDetailUrl(platform, url)) return '';
+  if (platform === 'douyin') return douyinVideoId(url) || String(url || '');
+  try {
+    const u = new URL(String(url || ''));
+    return `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return String(url || '');
+  }
 }
 
 function douyinVideoId(url) {

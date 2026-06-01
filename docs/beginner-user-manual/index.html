@@ -627,7 +627,7 @@
       <div class="steps">
         <div class="step">
           <strong>打开 Viral Brief Plus</strong>
-          <p>如果你拿到的是 Mac 应用，双击 <code>Viral Brief Plus.app</code>。如果你拿到的是项目文件夹版本，让安装的人先帮你启动应用。</p>
+          <p>如果你拿到的是 Mac 正式公证版，解压后双击 <code>Viral Brief Plus.app</code>。如果你拿到的是项目文件夹版本，让安装的人先帮你启动应用。</p>
         </div>
         <div class="step">
           <strong>看到本地工作台</strong>
@@ -637,6 +637,9 @@
           <strong>认识顶部五个页面</strong>
           <p>顶部有“概览、内容库、账号池、每日结果、设置”。日常主要用“概览、账号池、每日结果”。</p>
         </div>
+      </div>
+      <div class="callout warn">
+        <p><strong>如果 macOS 提示应用可能危害系统：</strong>说明你拿到的很可能是未签名或未公证的内测包，不是适合普通用户公开下载的正式包。只在确认来源可信时，才使用右键 / Control-click 打开，或到“系统设置 > 隐私与安全性”里选择“仍要打开”。</p>
       </div>
 
       <div class="tabs-demo" aria-label="页面说明">
@@ -1008,6 +1011,12 @@
 
     <section id="faq">
       <h2>11. 常见问题</h2>
+      <details>
+        <summary>第一次打开时，Mac 提示应用可能危害系统怎么办？</summary>
+        <div>
+          <p>正式下载包应该经过 Developer ID 签名和 Apple 公证，正常情况下可以直接双击打开。如果出现这个提示，通常代表当前包是本地开发包或内测包。请先确认来源可信；普通用户建议换成 GitHub Release 里的正式公证版，开发者临时自测才使用右键打开或“系统设置 > 隐私与安全性 > 仍要打开”。</p>
+        </div>
+      </details>
       <details open>
         <summary>生成日报是空的，为什么？</summary>
         <div>

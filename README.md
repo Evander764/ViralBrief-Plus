@@ -14,6 +14,14 @@
 
 前置条件：Node.js 22.5 或更高版本。
 
+### Mac 应用下载版
+
+普通用户优先下载 GitHub Release 里的正式 macOS 包：`Viral Brief Plus-*-mac.zip`。正式包需要已经完成 Developer ID 签名和 Apple 公证；解压后双击 `Viral Brief Plus.app` 即可打开。
+
+如果 macOS 提示“可能会危害系统”或“无法验证开发者”，说明你拿到的多半是未签名/未公证的本地开发包，不应作为公开发布版本发给普通用户。临时内测时，只在确认来源可信的前提下使用“右键 / Control-click 打开”，或到“系统设置 > 隐私与安全性”里选择“仍要打开”。`xattr -dr com.apple.quarantine "Viral Brief Plus.app"` 只适合开发者自测，不作为普通用户安装路径。
+
+### 项目文件夹版
+
 ```bash
 npm start
 ```
@@ -82,7 +90,21 @@ npm start
 npm test
 npm run patrol
 npm run report -- last_7_days
+npm run package:mac
 ```
+
+本地 `npm run package:mac` 默认只生成未签名开发包。正式发布给 GitHub Release 前，需要使用 Apple Developer Program 的 Developer ID 证书和 notary API key：
+
+```bash
+VBP_MAC_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+VBP_MAC_NOTARIZE=1 \
+VBP_NOTARY_KEY_PATH="/path/to/AuthKey_KEYID.p8" \
+VBP_NOTARY_KEY_ID="KEYID" \
+VBP_NOTARY_ISSUER_ID="ISSUER_UUID" \
+npm run package:mac
+```
+
+打包完成后检查 `dist/releases/*-manifest.txt`：公开发布包必须显示 `signed=true` 且 `notarized=true`。
 
 ## 更多文档
 

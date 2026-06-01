@@ -28,6 +28,12 @@ const macosDir = join(contentsDir, 'MacOS');
 const resourcesDir = join(contentsDir, 'Resources');
 const bundledAppDir = join(resourcesDir, 'app');
 
+const signIdentity = (process.env.VBP_MAC_SIGN_IDENTITY || '').trim();
+const shouldNotarize = parseEnvFlag(process.env.VBP_MAC_NOTARIZE);
+const notaryKeyPath = (process.env.VBP_NOTARY_KEY_PATH || '').trim();
+const notaryKeyId = (process.env.VBP_NOTARY_KEY_ID || '').trim();
+const notaryIssuerId = (process.env.VBP_NOTARY_ISSUER_ID || '').trim();
+
 const excludes = new Set([
   '.git',
   '.chrome-data',
@@ -42,6 +48,31 @@ function shouldCopy(src) {
   const rel = relative(ROOT, src);
   const [top] = rel.split('/');
   return rel && !excludes.has(top) && !rel.endsWith('.log');
+}
+
+function parseEnvFlag(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || '').trim());
+}
+
+function run(command, args, options = {}) {
+  console.log(`$ ${[command, ...args].join(' ')}`);
+  execFileSync(command, args, { stdio: 'inherit', ...options });
+}
+
+function requireReleaseInputs() {
+  if (shouldNotarize && !signIdentity) {
+    throw new Error('VBP_MAC_NOTARIZE=1 requires VBP_MAC_SIGN_IDENTITY with a Developer ID Application certificate name.');
+  }
+  if (shouldNotarize) {
+    const missing = [
+      ['VBP_NOTARY_KEY_PATH', notaryKeyPath],
+      ['VBP_NOTARY_KEY_ID', notaryKeyId],
+      ['VBP_NOTARY_ISSUER_ID', notaryIssuerId],
+    ].filter(([, value]) => !value).map(([name]) => name);
+    if (missing.length > 0) {
+      throw new Error(`VBP_MAC_NOTARIZE=1 is missing required notary input(s): ${missing.join(', ')}.`);
+    }
+  }
 }
 
 function copyProject() {
@@ -153,6 +184,9 @@ trap cleanup EXIT INT TERM
 }
 
 function writeReadme() {
+  const distributionNote = signIdentity
+    ? `- 此包已使用证书签名：${signIdentity}。\n${shouldNotarize ? '- 此包会在打包流程中提交 Apple 公证，公证通过后适合发布给普通用户。' : '- 此包尚未启用 Apple 公证；公开发布前请设置 VBP_MAC_NOTARIZE=1 重新打包。'}`
+    : '- 这是本地开发包，尚未签名或公证；从网络下载后 macOS 可能会拦截。公开发给普通用户前，请使用 Developer ID 签名并完成 Apple 公证。';
   const text = `Viral Brief Plus for macOS
 
 版本：${pkg.version}
@@ -171,16 +205,69 @@ function writeReadme() {
 安全说明：
 - API Key、数据库、截图和导出文件都不会写入应用包。
 - 服务仍只监听 127.0.0.1。
+${distributionNote}
 `;
   writeFileSync(join(resourcesDir, 'README.txt'), text);
 }
 
-function makeArchives() {
+function signApp() {
+  if (!signIdentity) {
+    console.warn('WARNING: VBP_MAC_SIGN_IDENTITY is not set. Building an unsigned local development app.');
+    return { signed: false, sign_identity: '' };
+  }
+
+  console.log(`Signing macOS app with identity: ${signIdentity}`);
+  const timestampArgs = signIdentity === '-' ? [] : ['--timestamp'];
+  run('codesign', [
+    '--force',
+    '--deep',
+    '--options',
+    'runtime',
+    ...timestampArgs,
+    '--sign',
+    signIdentity,
+    appBundle,
+  ]);
+  run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appBundle]);
+  return { signed: true, sign_identity: signIdentity };
+}
+
+function notarizeApp() {
+  if (!shouldNotarize) return { notarized: false };
+
+  const notaryZip = join(releasesDir, `${appName}-${versionTag}-notary.zip`);
+  rmSync(notaryZip, { force: true });
+  console.log('Creating temporary notarization archive...');
+  run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', appBundle, notaryZip]);
+
+  console.log('Submitting app to Apple notary service...');
+  run('xcrun', [
+    'notarytool',
+    'submit',
+    notaryZip,
+    '--key',
+    notaryKeyPath,
+    '--key-id',
+    notaryKeyId,
+    '--issuer',
+    notaryIssuerId,
+    '--wait',
+  ]);
+
+  console.log('Stapling notarization ticket...');
+  run('xcrun', ['stapler', 'staple', appBundle]);
+  run('xcrun', ['stapler', 'validate', appBundle]);
+  run('spctl', ['--assess', '--type', 'execute', '--verbose=4', appBundle]);
+  rmSync(notaryZip, { force: true });
+  return { notarized: true };
+}
+
+function makeArchives(distribution) {
   const appZip = join(releasesDir, `${appName}-${versionTag}-mac.zip`);
   const sourceArchive = join(releasesDir, `${productSlug}-${versionTag}-source.tar.gz`);
 
-  execFileSync('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', appBundle, appZip]);
-  execFileSync('tar', [
+  run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', appBundle, appZip]);
+  run('tar', [
     '--exclude', './data',
     '--exclude', './dist',
     '--exclude', './node_modules',
@@ -199,6 +286,10 @@ function makeArchives() {
     `app_bundle=${appBundle}`,
     `app_zip=${appZip}`,
     `source_archive=${sourceArchive}`,
+    `signed=${distribution.signed ? 'true' : 'false'}`,
+    `sign_identity=${distribution.sign_identity || ''}`,
+    `notarized=${distribution.notarized ? 'true' : 'false'}`,
+    `notary_requested=${shouldNotarize ? 'true' : 'false'}`,
     'data_excluded=true',
     'node_modules_excluded=true',
   ].join('\n') + '\n';
@@ -235,10 +326,11 @@ function buildIcns(pngPath, outIcnsPath) {
     execFileSync('sips', ['-s', 'format', 'png', '-z', item.size, item.size, pngPath, '--out', dest], { stdio: 'ignore' });
   }
 
-  execFileSync('iconutil', ['-c', 'icns', iconsetDir, '-o', outIcnsPath]);
+  run('iconutil', ['-c', 'icns', iconsetDir, '-o', outIcnsPath]);
   rmSync(iconsetDir, { recursive: true, force: true });
 }
 
+requireReleaseInputs();
 rmSync(appBundle, { recursive: true, force: true });
 mkdirSync(macosDir, { recursive: true });
 mkdirSync(resourcesDir, { recursive: true });
@@ -248,7 +340,7 @@ mkdirSync(releasesDir, { recursive: true });
 const swiftSrc = join(ROOT, 'scripts', 'LauncherWindow.swift');
 const swiftOut = join(macosDir, 'ViralBriefWindow');
 console.log('Compiling 100% native macOS Cocoa Window binary...');
-execFileSync('swiftc', ['-O', swiftSrc, '-o', swiftOut]);
+run('swiftc', ['-O', swiftSrc, '-o', swiftOut]);
 
 // 生成应用专属 AppIcon.icns
 const pngIconPath = join(ROOT, 'app_icon.png');
@@ -259,6 +351,8 @@ copyProject();
 writeInfoPlist();
 writeLauncher();
 writeReadme();
-const outputs = makeArchives();
+const signing = signApp();
+const notarization = notarizeApp();
+const outputs = makeArchives({ ...signing, ...notarization });
 
 console.log(JSON.stringify(outputs, null, 2));

@@ -384,7 +384,7 @@ async function patrolOpenSession(session, progress, { total, maxCandidates, wind
     return okOutcome(acc, result.items, result.skipReasons);
   }
 
-  const result = await collectDouyinItems(worker, acc, accountProgress, { maxCandidates, windowStartISO, shouldStop });
+  const result = await collectDouyinItems(worker, acc, accountProgress, { maxCandidates, windowStartISO, shouldStop, homepage });
   const items = result.items || [];
   if (items.length === 0 && result.skipReasons.length === 0) {
     return errorOutcome(acc, '未能提取到新增内容');
@@ -521,10 +521,10 @@ async function discoverDouyinCreators(client, progress) {
 async function patrolDouyin(client, acc, progress, { maxCandidates, windowStartISO, shouldStop }) {
   const homepage = await openAccountHomepage(client, acc, 'douyin', progress, { waitMs: 4500 });
   if (!homepage) return { items: [], skipReasons: [{ reason: 'homepage_unavailable', detail: '未能打开抖音主页' }] };
-  return collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO, shouldStop });
+  return collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO, shouldStop, homepage });
 }
 
-async function collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO, shouldStop }) {
+async function collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO, shouldStop, homepage = null }) {
   const skipReasons = [];
   const postCandidates = await waitForPostCandidates(client, 'douyin');
   if (postCandidates.length === 0) {
@@ -535,6 +535,7 @@ async function collectDouyinItems(client, acc, progress, { maxCandidates, window
   const items = await patrolCandidateUrls(client, acc, 'douyin', postCandidates, progress, {
     maxCandidates,
     waitMs: 4500,
+    homepage,
     windowStartISO,
     skipReasons,
     shouldStop,
@@ -1402,15 +1403,29 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
     if (platform === 'xiaohongshu' && candidate.rect && homepage) {
       const opened = await openXiaohongshuCandidateFromHomepage(client, homepage, candidate, progress, { waitMs });
       if (opened?.skipped === 'pinned') continue;
+    } else if (platform === 'douyin' && candidate.rect && homepage) {
+      const opened = await openDouyinCandidateFromHomepage(client, homepage, candidate, progress, { waitMs });
+      if (opened?.skipped === 'pinned') continue;
     } else {
       if (platform === 'xiaohongshu') progress('  候选缺少可点击卡片范围，改用详情链接兜底');
       await client.goto(postUrl);
-      if (platform === 'douyin') {
-        await client.sleep(300);
-        await pauseDouyinVideo(client, progress);
-        await client.sleep(Math.max(0, waitMs - 300));
-      } else {
+      if (platform !== 'douyin') {
         await client.sleep(waitMs);
+      }
+    }
+    if (platform === 'douyin') {
+      await settleDouyinCandidateDetail(client, progress, { waitMs });
+      const currentUrl = await safeCurrentUrl(client);
+      if (!sameDetailUrl(platform, currentUrl, postUrl) || await currentPageUnavailable(client)) {
+        progress(`  抖音候选打开后未停留在对应详情页，改用详情链接兜底: ${currentUrl || postUrl}`);
+        await client.goto(postUrl);
+        await settleDouyinCandidateDetail(client, progress, { waitMs });
+        const finalUrlAfterFallback = await safeCurrentUrl(client);
+        if (!sameDetailUrl(platform, finalUrlAfterFallback, postUrl) || await currentPageUnavailable(client)) {
+          recordSkip(skipReasons, candidate, 'not_detail', `抖音候选打开后未停留在对应详情页: ${finalUrlAfterFallback || postUrl}`);
+          progress(`  抖音候选打开后仍未停留在对应详情页，跳过: ${finalUrlAfterFallback || postUrl}`);
+          continue;
+        }
       }
     }
     openedThisAccount.add(postUrl);
@@ -1830,11 +1845,59 @@ async function openXiaohongshuCandidateFromHomepage(client, homepage, candidate,
   return { opened: true };
 }
 
-async function waitForDetailUrl(client, platform, timeoutMs = 7000) {
+async function openDouyinCandidateFromHomepage(client, homepage, candidate, progress, { waitMs }) {
+  const current = await safeCurrentUrl(client);
+  if (!sameCleanUrl(current, homepage)) {
+    progress('  当前已不在抖音主页，改用详情链接兜底');
+    await client.goto(candidate.url);
+    return { opened: true, fallback: true };
+  }
+
+  const fresh = await findPostCandidateByUrl(client, 'douyin', candidate.url);
+  if (fresh?.isPinned) {
+    progress('  回到主页后识别为置顶内容，跳过点击');
+    return { skipped: 'pinned' };
+  }
+  const clickTarget = fresh?.rect ? fresh : candidate;
+  if (!clickTarget.rect) {
+    progress('  抖音候选回到主页后未找到卡片范围，改用详情链接兜底');
+    await client.goto(candidate.url);
+    return { opened: true, fallback: true };
+  }
+
+  progress('  从抖音主页卡片内随机位置长按点击进入');
+  await clickRectLikeHuman(client, clickTarget.rect, {
+    viewport: clickTarget.viewport || { width: 1600, height: 1200 },
+    minMoveMs: 260,
+    maxMoveMs: 520,
+    minHoldMs: 140,
+    maxHoldMs: 340,
+  });
+
+  const landed = await waitForDetailUrl(client, 'douyin', waitMs, candidate.url);
+  if (!landed) {
+    const currentUrl = await safeCurrentUrl(client);
+    progress(`  抖音卡片点击未进入对应视频，改用详情链接兜底: ${currentUrl || candidate.url}`);
+    await client.goto(candidate.url);
+    return { opened: true, fallback: true };
+  }
+  return { opened: true };
+}
+
+async function settleDouyinCandidateDetail(client, progress, { waitMs }) {
+  await client.sleep(300);
+  await pauseDouyinVideo(client, progress);
+  await client.sleep(Math.max(0, waitMs - 300));
+}
+
+async function waitForDetailUrl(client, platform, timeoutMs = 7000, expectedUrl = null) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const url = await safeCurrentUrl(client);
-    if (isDetailUrl(platform, url)) return true;
+    if (isDetailUrl(platform, url)) {
+      if (!expectedUrl || sameDetailUrl(platform, url, expectedUrl)) return true;
+      return false;
+    }
     if (platform === 'xiaohongshu' && /xiaohongshu\.com\/explore\/?$/.test(String(url || ''))) return false;
     await client.sleep(350);
   }
@@ -1857,6 +1920,22 @@ function sameCleanUrl(a, b) {
     return ua.origin === ub.origin && ua.pathname.replace(/\/+$/, '') === ub.pathname.replace(/\/+$/, '');
   } catch {
     return false;
+  }
+}
+
+function sameDetailUrl(platform, a, b) {
+  if (!isDetailUrl(platform, a) || !isDetailUrl(platform, b)) return false;
+  if (platform === 'douyin') {
+    return douyinVideoId(a) === douyinVideoId(b);
+  }
+  return sameCleanUrl(a, b);
+}
+
+function douyinVideoId(url) {
+  try {
+    return new URL(String(url || '')).pathname.match(/\/video\/([^/?#]+)/)?.[1] || null;
+  } catch {
+    return null;
   }
 }
 

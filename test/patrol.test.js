@@ -74,6 +74,10 @@ class FakeClient {
     }
     if (this.url.includes('xiaohongshu.com/user/profile') && this.clickLandingUrls.length > 0) {
       this.url = this.clickLandingUrls.shift();
+      return;
+    }
+    if (this.url.includes('douyin.com/user/') && this.clickLandingUrls.length > 0) {
+      this.url = this.clickLandingUrls.shift();
     }
   }
   async mouseWheel(deltaX, deltaY, x, y) {
@@ -387,6 +391,84 @@ test('runPatrol pauses Douyin video detail and saves body hashtags', async () =>
     assert.match(saved.body_excerpt, /抖音正文信息/);
     assert.match(saved.body_excerpt, /#选题洞察/);
     assert.match(saved.body_excerpt, /#成交转化/);
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
+test('runPatrol opens first Douyin candidate by clicking the homepage card', async () => {
+  const postUrl = 'https://www.douyin.com/video/home-card-click-new';
+  const acc = upsertAccount({
+    platform: 'douyin',
+    nickname: '抖音主页卡片账号',
+    homepage_url: 'https://www.douyin.com/user/douyin-home-card',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient({
+    postCandidates: [{
+      url: postUrl,
+      rect: { left: 240, top: 260, width: 180, height: 240 },
+      viewport: { width: 1280, height: 800 },
+      titleRaw: '抖音主页卡片视频',
+      publishRaw: '2小时前',
+    }],
+    clickLandingUrls: [postUrl],
+    titleByUrl: { [postUrl]: '抖音主页卡片视频 - 抖音' },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+      maxCandidatesPerAccount: 1,
+    });
+
+    assert.equal(result.success, 1);
+    assert.equal(result.newItems, 1);
+    assert.equal(result.details[0].item.url, postUrl);
+    assert.equal(client.gotos.includes(postUrl), false, 'first Douyin candidate should be opened by homepage card click');
+    assert.ok(client.clicks.some((click) => click.from === acc.homepage_url && click.kind === 'card'));
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
+test('runPatrol falls back to the Douyin detail URL when homepage card click opens the wrong video', async () => {
+  const postUrl = 'https://www.douyin.com/video/home-card-fallback-new';
+  const wrongUrl = 'https://www.douyin.com/video/home-card-fallback-wrong';
+  const acc = upsertAccount({
+    platform: 'douyin',
+    nickname: '抖音卡片兜底账号',
+    homepage_url: 'https://www.douyin.com/user/douyin-home-card-fallback',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient({
+    postCandidates: [{
+      url: postUrl,
+      rect: { left: 220, top: 240, width: 190, height: 250 },
+      viewport: { width: 1280, height: 800 },
+      titleRaw: '抖音卡片兜底视频',
+      publishRaw: '2小时前',
+    }],
+    clickLandingUrls: [wrongUrl],
+    titleByUrl: {
+      [postUrl]: '抖音卡片兜底视频 - 抖音',
+      [wrongUrl]: '抖音错误落点视频 - 抖音',
+    },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+      maxCandidatesPerAccount: 1,
+    });
+
+    assert.equal(result.success, 1);
+    assert.equal(result.newItems, 1);
+    assert.equal(result.details[0].item.url, postUrl);
+    assert.ok(client.clicks.some((click) => click.from === acc.homepage_url && click.kind === 'card'));
+    assert.ok(client.gotos.includes(postUrl), 'wrong card landing should fall back to direct detail URL');
   } finally {
     upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
   }

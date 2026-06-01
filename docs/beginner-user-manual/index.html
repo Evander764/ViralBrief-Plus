@@ -1,0 +1,1146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Viral Brief Plus 新手使用说明书</title>
+  <style>
+    :root {
+      --bg: #f7f5ef;
+      --paper: #fffdf8;
+      --paper-strong: #fff8ea;
+      --ink: #24211b;
+      --muted: #6f695e;
+      --line: #ded6c5;
+      --brand: #1d6f78;
+      --brand-strong: #0f4f57;
+      --brand-soft: #e3f3f2;
+      --accent: #a84d2f;
+      --accent-soft: #f7e5dc;
+      --good: #28784d;
+      --warn: #a36511;
+      --bad: #a33b33;
+      --shadow: 0 18px 44px rgba(58, 48, 33, 0.12);
+      --radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(180deg, rgba(29,111,120,0.08), rgba(247,245,239,0) 360px),
+        var(--bg);
+      line-height: 1.72;
+      overflow-x: hidden;
+    }
+
+    a {
+      color: var(--brand-strong);
+      text-decoration-thickness: 2px;
+      text-underline-offset: 3px;
+    }
+
+    .page {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 28px 20px 64px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+      gap: 28px;
+      align-items: stretch;
+      margin-bottom: 22px;
+    }
+
+    .hero-main {
+      padding: 36px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--brand-strong);
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(32px, 5vw, 58px);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .title-line {
+      display: block;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+    }
+
+    .subtitle {
+      max-width: 720px;
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .hero-side {
+      display: grid;
+      gap: 14px;
+    }
+
+    .status-card {
+      min-height: 0;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper-strong);
+    }
+
+    .status-card strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--brand-strong);
+      font-size: 17px;
+    }
+
+    .status-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 0 18px;
+      background: linear-gradient(180deg, var(--bg) 72%, rgba(247,245,239,0));
+    }
+
+    .nav a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 38px;
+      padding: 7px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255,253,248,0.94);
+      color: var(--ink);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    section {
+      margin-top: 22px;
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      box-shadow: 0 10px 28px rgba(58, 48, 33, 0.07);
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 28px;
+      line-height: 1.22;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 24px 0 8px;
+      font-size: 19px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 10px 0;
+    }
+
+    p,
+    li,
+    td,
+    summary,
+    .subtitle,
+    .lead,
+    .status-card p,
+    .tile p,
+    .step p,
+    .tab-card p {
+      overflow-wrap: anywhere;
+      word-break: break-all;
+    }
+
+    .lead {
+      margin-top: 0;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin: 18px 0 4px;
+    }
+
+    .tile {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fffaf0;
+    }
+
+    .tile strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--brand-strong);
+    }
+
+    .tile p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .steps {
+      display: grid;
+      gap: 12px;
+      counter-reset: step;
+      margin: 18px 0 0;
+    }
+
+    .step {
+      position: relative;
+      padding: 18px 18px 18px 62px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fffdf8;
+    }
+
+    .step::before {
+      counter-increment: step;
+      content: counter(step);
+      position: absolute;
+      left: 18px;
+      top: 18px;
+      display: grid;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--brand);
+      color: #fff;
+      font-weight: 800;
+      line-height: 1;
+    }
+
+    .step strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 17px;
+    }
+
+    .step p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .callout {
+      margin: 18px 0;
+      padding: 16px 18px;
+      border-left: 5px solid var(--brand);
+      border-radius: var(--radius);
+      background: var(--brand-soft);
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: #fff2d8;
+    }
+
+    .callout.danger {
+      border-left-color: var(--bad);
+      background: #f9e4e1;
+    }
+
+    .callout p {
+      margin: 0;
+    }
+
+    .tabs-demo {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .tab-card {
+      min-height: 136px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fffaf0;
+    }
+
+    .tab-card strong {
+      display: block;
+      margin-bottom: 7px;
+      color: var(--accent);
+    }
+
+    .tab-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.58;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 14px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fffdf8;
+    }
+
+    th,
+    td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f1eadb;
+      color: #453d31;
+      font-size: 14px;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    td {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    td strong {
+      color: var(--ink);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      margin: 4px 6px 4px 0;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #f1eadb;
+      color: #483f34;
+      font-size: 13px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .badge.good {
+      background: #e0f0e5;
+      color: var(--good);
+    }
+
+    .badge.warn {
+      background: #fff0cf;
+      color: var(--warn);
+    }
+
+    .badge.bad {
+      background: #f8dfdc;
+      color: var(--bad);
+    }
+
+    .checklist {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 18px;
+      margin: 16px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .checklist li {
+      position: relative;
+      padding: 12px 12px 12px 36px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fffdf8;
+    }
+
+    .checklist li::before {
+      content: "";
+      position: absolute;
+      left: 14px;
+      top: 18px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--brand);
+    }
+
+    details {
+      margin: 10px 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fffdf8;
+    }
+
+    summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      color: var(--ink);
+      font-weight: 750;
+    }
+
+    details div {
+      padding: 0 16px 16px;
+      color: var(--muted);
+    }
+
+    .mini {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    code {
+      padding: 2px 6px;
+      border: 1px solid #ddd2bd;
+      border-radius: 5px;
+      background: #fbf2df;
+      color: #463a2c;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.94em;
+      word-break: break-word;
+    }
+
+    .footer {
+      margin: 34px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      text-align: center;
+    }
+
+    @media (max-width: 900px) {
+      .hero {
+        grid-template-columns: 1fr;
+      }
+
+      .grid,
+      .tabs-demo {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .checklist {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .page {
+        padding: 18px 12px 42px;
+        max-width: 100vw;
+        overflow: hidden;
+      }
+
+      .hero-main,
+      section {
+        width: 100%;
+        min-width: 0;
+        padding: 20px;
+      }
+
+      h1 {
+        font-size: 30px;
+      }
+
+      .subtitle,
+      .status-card p,
+      .tile p,
+      .step p,
+      .tab-card p,
+      td,
+      li,
+      summary {
+        word-break: break-all;
+        overflow-wrap: anywhere;
+      }
+
+      .grid,
+      .tabs-demo {
+        grid-template-columns: 1fr;
+      }
+
+      .step {
+        padding-left: 18px;
+        padding-top: 60px;
+      }
+
+      table,
+      thead,
+      tbody,
+      tr,
+      th,
+      td {
+        display: block;
+      }
+
+      th {
+        display: none;
+      }
+
+      td {
+        border-bottom: 0;
+      }
+
+      tr {
+        border-bottom: 1px solid var(--line);
+      }
+    }
+
+    @media print {
+      body {
+        background: #fff;
+      }
+
+      .nav {
+        position: static;
+      }
+
+      section,
+      .hero-main,
+      .status-card {
+        box-shadow: none;
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div class="hero-main">
+        <p class="eyebrow">Viral Brief Plus 本地使用说明</p>
+        <h1><span class="title-line">给完全不懂代码的人</span><span class="title-line">看的使用说明书</span></h1>
+        <p class="subtitle">这份说明只讲“怎么用”。你可以把 Viral Brief Plus 理解成一个本地内容雷达：它会帮你巡检小红书和抖音账号，保存候选内容，筛出达标内容，再生成每日爆款选题日报。</p>
+      </div>
+      <aside class="hero-side" aria-label="说明书重点">
+        <div class="status-card">
+          <strong>打开就能看</strong>
+          <p>本说明书是单个 HTML 文件。双击本文件夹里的 <code>index.html</code> 即可阅读。</p>
+        </div>
+        <div class="status-card">
+          <strong>不改代码</strong>
+          <p>日常只需要点按钮、填账号、确认数字、导出日报。</p>
+        </div>
+        <div class="status-card">
+          <strong>数据在本机</strong>
+          <p>内容库、截图、导出文件和 API Key 都保存在你自己的电脑里。</p>
+        </div>
+      </aside>
+    </header>
+
+    <nav class="nav" aria-label="目录">
+      <a href="#what">这是什么</a>
+      <a href="#prepare">使用前准备</a>
+      <a href="#first-run">第一次打开</a>
+      <a href="#settings">设置 Key</a>
+      <a href="#accounts">账号池</a>
+      <a href="#daily">日常流程</a>
+      <a href="#review">确认候选</a>
+      <a href="#reports">日报与导出</a>
+      <a href="#privacy">数据安全</a>
+      <a href="#faq">常见问题</a>
+      <a href="#checklist">一页清单</a>
+    </nav>
+
+    <section id="what">
+      <h2>1. 这个应用是做什么的</h2>
+      <p class="lead">Viral Brief Plus 是一个“本地内容情报工作台”。它不是帮你刷平台，也不是直接替你决定选题，而是把内容采集、筛选、复核、日报整理这几步放在一个本地工具里。</p>
+      <div class="grid">
+        <div class="tile">
+          <strong>自动巡检账号</strong>
+          <p>按你的账号池，先巡检小红书，再巡检抖音，打开内容详情并保存截图和数据。</p>
+        </div>
+        <div class="tile">
+          <strong>只把靠谱内容入榜</strong>
+          <p>数字、时间、是否达标都由程序判断；看不清的内容会留给你确认。</p>
+        </div>
+        <div class="tile">
+          <strong>生成每日选题日报</strong>
+          <p>达标内容进入日报，AI 负责整理母题、原因、标题建议和承接建议。</p>
+        </div>
+      </div>
+      <div class="callout">
+        <p><strong>最重要的一句话：</strong>AI 不负责判断“有没有达标”。点赞、收藏、转发、发布时间和入选规则，都由本地程序按固定规则处理。AI 只负责把已经达标的内容整理成更好读的日报。</p>
+      </div>
+    </section>
+
+    <section id="prepare">
+      <h2>2. 使用前准备</h2>
+      <p class="lead">开始前先确认下面几件事。准备好以后，后续每天基本就是打开、巡检、确认、生成日报。</p>
+      <ul class="checklist">
+        <li>电脑上已经可以打开 Viral Brief Plus。</li>
+        <li>电脑上安装了 Chrome 浏览器。</li>
+        <li>Chrome 里已经登录小红书和抖音。</li>
+        <li>如果平台出现验证码、登录页或风控提示，先在 Chrome 里手动处理。</li>
+        <li>你有一批想长期观察的博主账号。</li>
+        <li>如果要生成 AI 日报，需要准备一个可用的 AI API Key。</li>
+      </ul>
+      <div class="callout warn">
+        <p>如果你只想先建账号池、采集内容、人工看内容，可以先不填 API Key。真正要生成带 AI 分析的日报时，再去“设置”里填 Key。</p>
+      </div>
+    </section>
+
+    <section id="first-run">
+      <h2>3. 第一次打开应用</h2>
+      <div class="steps">
+        <div class="step">
+          <strong>打开 Viral Brief Plus</strong>
+          <p>如果你拿到的是 Mac 应用，双击 <code>Viral Brief Plus.app</code>。如果你拿到的是项目文件夹版本，让安装的人先帮你启动应用。</p>
+        </div>
+        <div class="step">
+          <strong>看到本地工作台</strong>
+          <p>正常情况下会出现一个本地窗口，或浏览器打开 <code>http://127.0.0.1:8787</code>。这个地址只代表你的电脑本机，不是公开网站。</p>
+        </div>
+        <div class="step">
+          <strong>认识顶部五个页面</strong>
+          <p>顶部有“概览、内容库、账号池、每日结果、设置”。日常主要用“概览、账号池、每日结果”。</p>
+        </div>
+      </div>
+
+      <div class="tabs-demo" aria-label="页面说明">
+        <div class="tab-card">
+          <strong>概览</strong>
+          <p>看总数、启动自动巡检、粘贴链接抓取、处理今日候选。</p>
+        </div>
+        <div class="tab-card">
+          <strong>内容库</strong>
+          <p>查看历史采集内容，按状态和平台筛选。</p>
+        </div>
+        <div class="tab-card">
+          <strong>账号池</strong>
+          <p>添加、发现、编辑、打开和管理要巡检的博主账号。</p>
+        </div>
+        <div class="tab-card">
+          <strong>每日结果</strong>
+          <p>生成、查看、导出或删除日报。</p>
+        </div>
+        <div class="tab-card">
+          <strong>设置</strong>
+          <p>保存 API Key、设置自动运行时间、调整巡检标签数、清理缓存。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="settings">
+      <h2>4. 第一次设置 API Key</h2>
+      <p class="lead">API Key 可以理解成“调用 AI 的钥匙”。它用于生成日报里的总结、选题和标题建议。应用会把 Key 加密保存在你的电脑上。</p>
+      <div class="steps">
+        <div class="step">
+          <strong>进入“设置”页面</strong>
+          <p>找到“AI API Key（BYOK）”区域。BYOK 的意思是“使用你自己的 Key”。</p>
+        </div>
+        <div class="step">
+          <strong>选择供应商</strong>
+          <p>供应商可以选 OpenAI、DeepSeek、小米 MiMo、Kimi、智谱、通义千问、硅基流动、Anthropic Claude 或自定义。选好后，接口地址会自动填入。</p>
+        </div>
+        <div class="step">
+          <strong>填写模型名</strong>
+          <p>选择供应商后，模型输入框会给出示例。不会选时，先用系统提示的默认或示例模型。</p>
+        </div>
+        <div class="step">
+          <strong>粘贴主 Key 并保存</strong>
+          <p>把 Key 粘贴到“主 API Key”，点击“保存主 Key”。应用会保存并自动测试。保存后输入框会清空，这是正常的。</p>
+        </div>
+        <div class="step">
+          <strong>可选：保存备用 Key</strong>
+          <p>如果你有第二个 Key，可以放到“备用 API Key”。主 Key 出问题时，后续更容易切换。</p>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>你看到的提示</th>
+            <th>代表什么</th>
+            <th>该怎么做</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Key 可用</strong></td>
+            <td>供应商、模型和接口地址能正常调用。</td>
+            <td>可以继续设置账号池和生成日报。</td>
+          </tr>
+          <tr>
+            <td><strong>已保存，但测试失败</strong></td>
+            <td>Key 已经存进本机，但网络、模型名、额度或接口地址可能有问题。</td>
+            <td>先检查模型名和供应商，再确认 Key 是否有余额或权限。</td>
+          </tr>
+          <tr>
+            <td><strong>没有 API Key</strong></td>
+            <td>可以采集内容，但 AI 日报无法完整生成。</td>
+            <td>去对应平台申请 Key 后再填。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="accounts">
+      <h2>5. 建立账号池</h2>
+      <p class="lead">账号池就是你想长期盯的博主名单。正式日报只收账号池里的小红书和抖音内容，所以账号池越准确，日报越稳定。</p>
+      <h3>三种添加方式</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>方式</th>
+            <th>适合什么时候用</th>
+            <th>怎么操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>发现关注账号</strong></td>
+            <td>你已经在 Chrome 登录平台，并且关注了很多博主。</td>
+            <td>进入“账号池”，点击“发现关注账号”，等它同步到本地账号池。</td>
+          </tr>
+          <tr>
+            <td><strong>手动填写</strong></td>
+            <td>你已经知道博主昵称、平台和主页链接。</td>
+            <td>选择平台，填写昵称、分类、优先级、主页链接，点击“添加到账号池”。</td>
+          </tr>
+          <tr>
+            <td><strong>搜索填空</strong></td>
+            <td>你只知道名字，不确定主页链接。</td>
+            <td>输入昵称，点击“打开平台搜索”，在 Chrome 找到本人主页，复制主页链接回来保存。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>账号池里每一列怎么理解</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>字段</th>
+            <th>解释</th>
+            <th>建议</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>巡检</strong></td>
+            <td>勾上后，这个账号会参与自动巡检。</td>
+            <td>暂时不想看某个账号，就取消勾选。</td>
+          </tr>
+          <tr>
+            <td><strong>平台</strong></td>
+            <td>小红书、抖音或其他。</td>
+            <td>正式日报主要看小红书和抖音。</td>
+          </tr>
+          <tr>
+            <td><strong>优先级</strong></td>
+            <td>S、A、B 代表先后顺序。</td>
+            <td>最重要账号设 S，其次 A，普通观察设 B。</td>
+          </tr>
+          <tr>
+            <td><strong>主页链接</strong></td>
+            <td>应用巡检时会打开这个链接。</td>
+            <td>尽量填写真实主页链接，不要填单条内容链接。</td>
+          </tr>
+          <tr>
+            <td><strong>最近巡检</strong></td>
+            <td>这个账号上一次实际跑完巡检的日期。</td>
+            <td>当天已经跑过的账号默认不会重复跑。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <p>“打开全部小红书主页”适合人工检查账号是否正确。应用会把有效的小红书主页一次性打开到 Chrome 多个标签页。</p>
+      </div>
+    </section>
+
+    <section id="daily">
+      <h2>6. 每天怎么用</h2>
+      <p class="lead">下面是一套最稳的日常流程。第一次会稍慢，账号池建好以后会轻很多。</p>
+      <div class="steps">
+        <div class="step">
+          <strong>先确认 Chrome 登录正常</strong>
+          <p>打开 Chrome，确认小红书和抖音都能正常访问。如果出现登录、验证或空白页，先手动处理。</p>
+        </div>
+        <div class="step">
+          <strong>打开 Viral Brief Plus</strong>
+          <p>进入“概览”。如果顶部显示没有 Key，而你今天要生成 AI 日报，先去“设置”保存 Key。</p>
+        </div>
+        <div class="step">
+          <strong>点击“一键自动巡检”</strong>
+          <p>应用会先跑小红书阶段，再跑抖音阶段。默认每轮同时打开 6 个账号标签页，账号跑完会关闭自己的标签。</p>
+        </div>
+        <div class="step">
+          <strong>等待巡检完成</strong>
+          <p>巡检期间不要频繁手动操作正在被应用控制的 Chrome 标签页。需要中断时，点击“停止巡检”。</p>
+        </div>
+        <div class="step">
+          <strong>处理“今日候选池”</strong>
+          <p>检查标题、作者、发布时间、点赞、收藏、转发、评论、账号池关联。确认无误后点击“确认入库”。</p>
+        </div>
+        <div class="step">
+          <strong>生成日报</strong>
+          <p>去“每日结果”点击“生成日报”，或在“概览”选择生成。生成后可以查看日报和导出文件。</p>
+        </div>
+      </div>
+      <div class="callout warn">
+        <p>巡检阶段会尽量“先保存，再筛选”。所以你可能会看到未达标、缺时间、缺数字的内容出现在内容库里，这是正常的。它们只是被保存下来，不代表已经进入日报。</p>
+      </div>
+    </section>
+
+    <section id="review">
+      <h2>7. 怎么确认候选内容</h2>
+      <p class="lead">候选池是人工复核区。只要数据来源不够强，应用就会把内容留给你确认，避免把不靠谱数字写进正式日报。</p>
+
+      <h3>确认一条内容时看什么</h3>
+      <ul class="checklist">
+        <li>截图或封面是不是这条内容。</li>
+        <li>标题、作者是否正确。</li>
+        <li>发布时间是否填对。</li>
+        <li>小红书是否有点赞和收藏。</li>
+        <li>抖音是否有点赞、收藏和转发。</li>
+        <li>账号池是否关联到正确博主。</li>
+        <li>内容类型是视频还是图文/文章。</li>
+        <li>明显不需要的内容可以归档或删除。</li>
+      </ul>
+
+      <h3>状态标签是什么意思</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>状态</th>
+            <th>含义</th>
+            <th>会不会进日报</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="badge good">已确认</span></td>
+            <td>人工或稳定来源确认过，且会重新计算是否达标。</td>
+            <td>只有已确认且达标的内容才可能进入日报。</td>
+          </tr>
+          <tr>
+            <td><span class="badge warn">待复核</span></td>
+            <td>数据来自弱来源、截图识别或普通页面文本，需要你看一眼。</td>
+            <td>不会，确认后才有机会进入。</td>
+          </tr>
+          <tr>
+            <td><span class="badge warn">发酵中</span></td>
+            <td>还没确认，可能还在观察期。</td>
+            <td>不会，确认后再判断。</td>
+          </tr>
+          <tr>
+            <td><span class="badge warn">缺点赞/收藏/转发数</span></td>
+            <td>关键数字缺失。</td>
+            <td>不会，需要补齐并确认。</td>
+          </tr>
+          <tr>
+            <td><span class="badge bad">未达阈值</span></td>
+            <td>已知数字低于入选线。</td>
+            <td>不会，但仍会保存在内容库。</td>
+          </tr>
+          <tr>
+            <td><span class="badge bad">重复/已归档</span></td>
+            <td>重复内容或你主动归档的内容。</td>
+            <td>不会。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>入选规则，用人话说</h3>
+      <div class="grid">
+        <div class="tile">
+          <strong>小红书</strong>
+          <p>点赞超过 1000，并且收藏超过 1000，才算互动达标。</p>
+        </div>
+        <div class="tile">
+          <strong>抖音</strong>
+          <p>点赞超过 1000、收藏超过 1000、转发超过 1000，三项都要达标。</p>
+        </div>
+        <div class="tile">
+          <strong>账号池</strong>
+          <p>内容必须关联到账号池里的小红书或抖音账号。</p>
+        </div>
+      </div>
+      <div class="callout danger">
+        <p><strong>注意：</strong>空白数字不等于 0。空白代表“还不知道”，需要复核。平台显示 <code>1000+</code> 算超过 1000；如果正好是 <code>1000</code>，不算达标。</p>
+      </div>
+    </section>
+
+    <section id="reports">
+      <h2>8. 生成、查看和导出日报</h2>
+      <div class="steps">
+        <div class="step">
+          <strong>进入“每日结果”</strong>
+          <p>点击“生成日报”。如果今天还没有达标内容，日报可能显示达标 0 条，这是正常结果。</p>
+        </div>
+        <div class="step">
+          <strong>查看日报</strong>
+          <p>生成后点击“查看日报”，可以在应用里预览本地 HTML 日报。</p>
+        </div>
+        <div class="step">
+          <strong>导出文件</strong>
+          <p>点击“显示 Markdown”“显示 CSV”或“显示压缩包”，应用会在 Finder 里显示对应文件。</p>
+        </div>
+        <div class="step">
+          <strong>复用日报</strong>
+          <p>Markdown 适合复制到文档或飞书，HTML 适合直接浏览，CSV 适合表格整理，压缩包适合打包归档。</p>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>导出类型</th>
+            <th>适合用途</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>HTML</strong></td>
+            <td>打开后直接阅读，或用浏览器打印成 PDF。</td>
+          </tr>
+          <tr>
+            <td><strong>Markdown</strong></td>
+            <td>复制到文档、知识库、公众号草稿前的整理区。</td>
+          </tr>
+          <tr>
+            <td><strong>CSV</strong></td>
+            <td>用表格查看入选内容、指标和链接。</td>
+          </tr>
+          <tr>
+            <td><strong>ZIP 压缩包</strong></td>
+            <td>把日报相关文件一次性打包给别人或留档。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="automation">
+      <h2>9. 自动运行和安全瘦身</h2>
+      <h3>每日自动生成</h3>
+      <p>在“设置”里打开“开启每日自动生成”，选择每天运行时间和默认回溯天数。适合每天固定时间做内容雷达。</p>
+      <div class="callout warn">
+        <p>自动运行依赖本地应用服务和 Chrome 登录状态。电脑休眠、应用没开、平台要求重新登录时，自动巡检可能无法完成。</p>
+      </div>
+
+      <h3>浏览器巡检标签数</h3>
+      <p>默认每轮同时打开 6 个账号标签。电脑比较吃力时，可以在“设置”里把“每轮同时打开账号标签数”调低，例如 2 或 3。最多建议不要超过 10。</p>
+
+      <h3>本地数据安全瘦身</h3>
+      <p>“设置”里的“本地数据”区域可以查看数据库、截图和 RPA 浏览器缓存占用。点击“安全瘦身”会清理可安全删除的缓存，保留登录态、数据库、API Key 和近期截图。</p>
+    </section>
+
+    <section id="privacy">
+      <h2>10. 数据和隐私说明</h2>
+      <div class="grid">
+        <div class="tile">
+          <strong>本机服务</strong>
+          <p>应用默认只在你电脑自己的地址 <code>127.0.0.1</code> 上运行，不是公开网站。</p>
+        </div>
+        <div class="tile">
+          <strong>Key 加密保存</strong>
+          <p>API Key 保存在桌面端，本地加密；浏览器插件不保存 Key，也不调用模型。</p>
+        </div>
+        <div class="tile">
+          <strong>导出在本地</strong>
+          <p>日报、截图和数据库都在本地目录里。你可以自己决定是否分享导出文件。</p>
+        </div>
+      </div>
+      <h3>文件一般在哪里</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>你用的版本</th>
+            <th>数据位置</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Mac 应用版</strong></td>
+            <td><code>~/Library/Application Support/Viral Brief Plus</code></td>
+            <td>数据库、配置、截图和导出文件通常保存在这里。</td>
+          </tr>
+          <tr>
+            <td><strong>项目文件夹版</strong></td>
+            <td><code>data/</code></td>
+            <td>数据库在 <code>data/viral-brief-plus.db</code>，导出在 <code>data/exports/</code>，截图在 <code>data/screenshots/</code>。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="faq">
+      <h2>11. 常见问题</h2>
+      <details open>
+        <summary>生成日报是空的，为什么？</summary>
+        <div>
+          <p>日报只收“账号池内、已确认、平台正确、发布时间在窗口内、关键指标达标”的内容。最常见原因是还没确认、没有关联账号池、缺关键数字，或者数字没超过 1000。</p>
+        </div>
+      </details>
+      <details>
+        <summary>巡检时 Chrome 打开了很多标签页，正常吗？</summary>
+        <div>
+          <p>正常。应用默认每轮同时打开 6 个账号标签页，账号跑完会关闭自己的标签。如果电脑卡，可以去“设置”把标签数调低。</p>
+        </div>
+      </details>
+      <details>
+        <summary>巡检卡住、平台出现登录页或验证码怎么办？</summary>
+        <div>
+          <p>先点击“停止巡检”。然后到 Chrome 里手动登录、验证或刷新平台页面。确认平台可正常浏览后，再回到应用重新巡检。</p>
+        </div>
+      </details>
+      <details>
+        <summary>提示已经有巡检在运行，不能再启动怎么办？</summary>
+        <div>
+          <p>同一时间只允许一个巡检。等待当前巡检完成，或点击“停止巡检”。这是为了避免两个巡检同时控制 Chrome，导致数据混乱。</p>
+        </div>
+      </details>
+      <details>
+        <summary>粘贴链接抓取没有抓到数字，是不是坏了？</summary>
+        <div>
+          <p>不一定。平台经常只返回空壳页面、验证页或隐藏指标。应用会尽力抓标题和页面信息，抓不到的数字会留给你手动补录。</p>
+        </div>
+      </details>
+      <details>
+        <summary>为什么内容库里有未达标内容？</summary>
+        <div>
+          <p>应用的原则是“先保存，再筛选”。未达标内容保存在内容库，方便以后复查，但不会进入正式日报。</p>
+        </div>
+      </details>
+      <details>
+        <summary>为什么我确认了内容，还是没进日报？</summary>
+        <div>
+          <p>确认只是第一步。它还必须关联账号池，发布时间在回溯窗口内，并且小红书点赞和收藏都超过 1000，或抖音点赞、收藏、转发都超过 1000。</p>
+        </div>
+      </details>
+      <details>
+        <summary>API Key 测试失败怎么办？</summary>
+        <div>
+          <p>检查四件事：供应商选对了吗，模型名填对了吗，Key 有没有额度或权限，当前网络能不能访问该供应商。应用提示“已保存但测试失败”时，Key 仍然已经保存在本机。</p>
+        </div>
+      </details>
+      <details>
+        <summary>应用提示 Node.js 版本过低怎么办？</summary>
+        <div>
+          <p>把提示截图给安装的人处理。Viral Brief Plus 需要 Node.js 22.5 或更高版本。日常使用者不需要自己理解这是什么。</p>
+        </div>
+      </details>
+      <details>
+        <summary>插件配对 token 是什么？</summary>
+        <div>
+          <p>它相当于浏览器插件和本地应用之间的配对码。只有插件要把网页内容保存到桌面端时才需要。重置 token 后，需要同步更新插件设置。</p>
+        </div>
+      </details>
+    </section>
+
+    <section id="glossary">
+      <h2>12. 术语翻译</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>术语</th>
+            <th>普通说法</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>账号池</strong></td>
+            <td>你要长期观察的博主名单。</td>
+          </tr>
+          <tr>
+            <td><strong>巡检</strong></td>
+            <td>应用按名单去平台看最新内容，并把可采集内容保存下来。</td>
+          </tr>
+          <tr>
+            <td><strong>候选池</strong></td>
+            <td>今天新发现、需要你确认或补录的内容。</td>
+          </tr>
+          <tr>
+            <td><strong>确认入库</strong></td>
+            <td>你检查数字和信息无误后，允许它参与正式筛选。</td>
+          </tr>
+          <tr>
+            <td><strong>回溯天数</strong></td>
+            <td>日报要看最近几天的内容，比如最近 1 天、3 天或 7 天。</td>
+          </tr>
+          <tr>
+            <td><strong>BYOK</strong></td>
+            <td>使用你自己的 AI API Key。</td>
+          </tr>
+          <tr>
+            <td><strong>阈值</strong></td>
+            <td>入选门槛。这里主要指互动数要超过 1000。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="checklist">
+      <h2>13. 一页清单</h2>
+      <p class="lead">忘了步骤时，只看这一页也可以。</p>
+      <div class="steps">
+        <div class="step">
+          <strong>第一次使用</strong>
+          <p>打开应用，进入“设置”保存 API Key；进入“账号池”添加或发现账号；确认 Chrome 已登录小红书和抖音。</p>
+        </div>
+        <div class="step">
+          <strong>每天巡检</strong>
+          <p>进入“概览”，点击“一键自动巡检”，等小红书和抖音阶段跑完。</p>
+        </div>
+        <div class="step">
+          <strong>确认候选</strong>
+          <p>在“今日候选池”补齐数字、发布时间和账号池关联；准确的点“确认入库”，不需要的点“归档”。</p>
+        </div>
+        <div class="step">
+          <strong>生成日报</strong>
+          <p>进入“每日结果”，点击“生成日报”，然后查看日报或显示导出文件。</p>
+        </div>
+        <div class="step">
+          <strong>日报为空时</strong>
+          <p>回到候选池检查：是否已确认、是否关联账号池、是否超过 1000、是否在回溯日期内。</p>
+        </div>
+      </div>
+      <p class="mini">最后更新：2026-06-01。适用于 Viral Brief Plus 1.0.1 的本地工作台流程。</p>
+    </section>
+
+    <p class="footer">这份说明书可离线阅读。打印时建议选择“背景图形”，版式会更完整。</p>
+  </div>
+</body>
+</html>

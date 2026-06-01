@@ -1187,6 +1187,7 @@ test('runPatrol reads Xiaohongshu edited publish time from the detail layout', a
 test('runPatrol records detail publish time before handling duplicate detail pages', async () => {
   const cardUrl = 'https://www.xiaohongshu.com/explore/detail-duplicate-card';
   const detailUrl = 'https://www.xiaohongshu.com/explore/detail-duplicate-existing';
+  const nextUrl = 'https://www.xiaohongshu.com/explore/detail-duplicate-next';
   const acc = upsertAccount({
     platform: 'xiaohongshu',
     nickname: '详情重复账号',
@@ -1205,14 +1206,17 @@ test('runPatrol records detail publish time before handling duplicate detail pag
   });
   const client = new FakeClient({
     xhsPostCandidates: [
-      xhsCandidate(cardUrl, { titleRaw: '详情重复候选' }),
+      xhsCandidate(cardUrl, { titleRaw: '详情重复候选', rect: { left: 120, top: 180, width: 180, height: 160 } }),
+      xhsCandidate(nextUrl, { titleRaw: '详情重复后一条', rect: { left: 340, top: 180, width: 180, height: 160 } }),
     ],
-    clickLandingUrls: [detailUrl],
+    clickLandingUrls: [detailUrl, nextUrl],
     titleByUrl: {
       [detailUrl]: '详情重复候选 - 小红书',
+      [nextUrl]: '详情重复后一条 - 小红书',
     },
     pubTimeByUrl: {
       [detailUrl]: '2小时前',
+      [nextUrl]: '2小时前',
     },
   });
 
@@ -1225,9 +1229,11 @@ test('runPatrol records detail publish time before handling duplicate detail pag
 
     assert.equal(result.success, 1);
     assert.equal(result.duplicates, 1);
-    assert.equal(result.newItems, 0);
-    assert.equal(cardClicks(client).length, 1);
+    assert.equal(result.newItems, 1);
+    assert.equal(cardClicks(client).length, 2);
+    assert.equal(closeClicks(client).length, 2);
     assert.equal(result.details[0].items[0].duplicate, true);
+    assert.equal(result.details[0].items[1].url, nextUrl);
     assert.ok(result.details[0].items[0].publishTime, 'duplicate detail item should carry the normalized publish time');
     const savedAccount = get('SELECT last_seen_publish_time FROM accounts WHERE id = ?', [acc.id]);
     assert.equal(savedAccount.last_seen_publish_time, result.details[0].items[0].publishTime);
@@ -1236,20 +1242,20 @@ test('runPatrol records detail publish time before handling duplicate detail pag
   }
 });
 
-test('runPatrol stops Xiaohongshu account when it reaches already-seen content', async () => {
-  const oldUrl = 'https://www.xiaohongshu.com/explore/already-seen-stop';
-  const nextUrl = 'https://www.xiaohongshu.com/explore/should-not-open-after-seen';
+test('runPatrol continues after already-seen Xiaohongshu content when publish time is still in window', async () => {
+  const oldUrl = 'https://www.xiaohongshu.com/explore/already-seen-in-window';
+  const nextUrl = 'https://www.xiaohongshu.com/explore/should-open-after-seen';
   const acc = upsertAccount({
     platform: 'xiaohongshu',
-    nickname: '已采集停止账号',
-    homepage_url: 'https://www.xiaohongshu.com/user/profile/already-stop-account',
+    nickname: '已采集继续账号',
+    homepage_url: 'https://www.xiaohongshu.com/user/profile/already-continue-account',
     monitor_enabled: true,
   });
   upsertCapture({
     url: oldUrl,
     platform: 'xiaohongshu',
     content_type: 'article',
-    author_name: '已采集停止账号',
+    author_name: '已采集继续账号',
     title: '已采集内容',
     metrics_source: 'manual',
     metrics_raw: { like: '2000', favorite: '2000' },
@@ -1257,10 +1263,18 @@ test('runPatrol stops Xiaohongshu account when it reaches already-seen content',
   });
   const client = new FakeClient({
     xhsPostCandidates: [
-      xhsCandidate(oldUrl),
-      xhsCandidate(nextUrl),
+      xhsCandidate(oldUrl, { rect: { left: 120, top: 180, width: 180, height: 160 } }),
+      xhsCandidate(nextUrl, { rect: { left: 340, top: 180, width: 180, height: 160 } }),
     ],
-    clickLandingUrls: [nextUrl],
+    clickLandingUrls: [oldUrl, nextUrl],
+    titleByUrl: {
+      [oldUrl]: '已采集内容 - 小红书',
+      [nextUrl]: '已采集后一条 - 小红书',
+    },
+    pubTimeByUrl: {
+      [oldUrl]: '2小时前',
+      [nextUrl]: '2小时前',
+    },
   });
 
   try {
@@ -1272,9 +1286,69 @@ test('runPatrol stops Xiaohongshu account when it reaches already-seen content',
 
     assert.equal(result.success, 1);
     assert.equal(result.duplicates, 1);
-    assert.equal(cardClicks(client).length, 0);
+    assert.equal(result.newItems, 1);
+    assert.equal(cardClicks(client).length, 2);
+    assert.equal(closeClicks(client).length, 2);
     assert.equal(result.details[0].items[0].duplicate, true);
+    assert.equal(result.details[0].items[1].url, nextUrl);
     assert.ok(result.details[0].skipReasons.some((s) => s.reason === 'already_seen'));
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
+test('runPatrol stops already-seen Xiaohongshu content only after publish time is out of window', async () => {
+  const oldUrl = 'https://www.xiaohongshu.com/explore/already-seen-out-window';
+  const nextUrl = 'https://www.xiaohongshu.com/explore/should-not-open-after-out-window-seen';
+  const acc = upsertAccount({
+    platform: 'xiaohongshu',
+    nickname: '已采集超窗账号',
+    homepage_url: 'https://www.xiaohongshu.com/user/profile/already-out-window-account',
+    monitor_enabled: true,
+  });
+  upsertCapture({
+    url: oldUrl,
+    platform: 'xiaohongshu',
+    content_type: 'article',
+    author_name: '已采集超窗账号',
+    title: '已采集旧内容',
+    metrics_source: 'manual',
+    metrics_raw: { like: '2000', favorite: '2000' },
+    publish_time: '2026-05-20T00:00:00.000Z',
+  });
+  const client = new FakeClient({
+    xhsPostCandidates: [
+      xhsCandidate(oldUrl, { rect: { left: 120, top: 180, width: 180, height: 160 } }),
+      xhsCandidate(nextUrl, { rect: { left: 340, top: 180, width: 180, height: 160 } }),
+    ],
+    clickLandingUrls: [oldUrl, nextUrl],
+    titleByUrl: {
+      [oldUrl]: '已采集旧内容 - 小红书',
+      [nextUrl]: '已采集超窗后一条 - 小红书',
+    },
+    pubTimeByUrl: {
+      [oldUrl]: '2026-05-20',
+      [nextUrl]: '2小时前',
+    },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['xiaohongshu'],
+      windowStartISO: '2026-05-30T00:00:00.000Z',
+    });
+
+    assert.equal(result.success, 1);
+    assert.equal(result.duplicates, 1);
+    assert.equal(result.newItems, 0);
+    assert.deepEqual(result.details[0].items.map((item) => item.url), [oldUrl]);
+    assert.equal(cardClicks(client).length, 1);
+    assert.equal(closeClicks(client).length, 0);
+    assert.equal(client.gotos.includes(nextUrl), false);
+    const reasons = result.details[0].skipReasons.map((s) => s.reason);
+    assert.ok(reasons.includes('already_seen'));
+    assert.ok(reasons.includes('out_of_window'));
   } finally {
     upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
   }

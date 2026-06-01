@@ -894,7 +894,7 @@ async function collectXiaohongshuItems(client, acc, homepage, progress, { maxCan
         if (seenCandidates.size >= candidateLimit) break;
         seenCandidates.add(candidate.url);
 
-        const decision = assessXiaohongshuCandidate(candidate, windowStartISO);
+        const decision = assessXiaohongshuCandidate(candidate);
         if (decision.action === 'skip') {
           recordSkip(skipReasons, candidate, decision.reason, decision.detail);
           progress(`  跳过候选: ${decision.detail}`);
@@ -988,18 +988,9 @@ function groupXiaohongshuCandidateRows(candidates) {
   return rows.map(sortXiaohongshuCandidates);
 }
 
-function assessXiaohongshuCandidate(candidate, windowStartISO) {
+function assessXiaohongshuCandidate(candidate) {
   if (candidate.isPinned) {
     return { action: 'skip', reason: 'pinned', detail: '置顶内容不算真正最新内容' };
-  }
-
-  if (contentExistsByUrl(candidate.url)) {
-    return {
-      action: 'stop',
-      reason: 'already_seen',
-      detail: '遇到已采集内容，停止该账号后续检查',
-      item: duplicateItem(candidate.url),
-    };
   }
 
   return { action: 'capture', reason: 'inspect_detail', detail: '进入详情页读取发布时间和完整指标' };
@@ -1089,9 +1080,11 @@ async function captureXiaohongshuCandidate(client, acc, homepage, candidate, pro
 
   if (contentExistsByUrl(finalUrl)) {
     const item = duplicateItem(finalUrl, timeGate.publishTime);
-    recordSkip(skipReasons, candidate, 'already_seen', '详情页已采集，停止该账号后续检查');
-    progress(stopAfterThisDetail ? '  详情页已采集且发布时间超出窗口，停止该账号后续检查' : '  详情页已采集，停止该账号后续检查');
-    return { stop: true, item };
+    recordSkip(skipReasons, candidate, 'already_seen', stopAfterThisDetail
+      ? '详情页已采集且发布时间超出窗口，停止该账号后续检查'
+      : '详情页已采集，但发布时间仍在窗口内，继续检查下一条');
+    progress(stopAfterThisDetail ? '  详情页已采集且发布时间超出窗口，停止该账号后续检查' : '  详情页已采集，按发布时间继续检查下一条');
+    return { stop: stopAfterThisDetail, item };
   }
 
   if (isUnavailablePage(raw) || !hasCaptureSignal(data)) {
@@ -1105,9 +1098,11 @@ async function captureXiaohongshuCandidate(client, acc, homepage, candidate, pro
   const screenshotPath = await takeScreenshot(client, acc, 'xiaohongshu');
   const item = saveData(acc, finalUrl, data, screenshotPath);
   if (item.duplicate) {
-    recordSkip(skipReasons, candidate, 'already_seen', '内容重复，停止该账号后续检查');
-    progress(stopAfterThisDetail ? '  内容重复且发布时间超出窗口，停止该账号后续检查' : '  内容重复，停止该账号后续检查');
-    return { stop: true, item };
+    recordSkip(skipReasons, candidate, 'already_seen', stopAfterThisDetail
+      ? '内容重复且发布时间超出窗口，停止该账号后续检查'
+      : '内容重复，但发布时间仍在窗口内，继续检查下一条');
+    progress(stopAfterThisDetail ? '  内容重复且发布时间超出窗口，停止该账号后续检查' : '  内容重复，按发布时间继续检查下一条');
+    return { stop: stopAfterThisDetail, item };
   }
   if (stopAfterThisDetail) return { stop: true, item };
   return { item };

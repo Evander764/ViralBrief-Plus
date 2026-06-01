@@ -32,6 +32,7 @@ import {
   listReports, getReport, deleteReport, getUsageForDay, getAnalysis, getObservation, upsertObservation,
 } from './store.js';
 import { runDailyReport } from './pipeline.js';
+import { materializeReportExport } from './report/recovery.js';
 import { startScheduler, restartScheduler } from './scheduler.js';
 import { testConnection } from './ai/client.js';
 import { analyzeContent, suggestAccountsFromAI } from './ai/analyze.js';
@@ -50,6 +51,8 @@ const PORT = Number(process.env.VBP_PORT ?? process.env.VB_PORT ?? 8787);
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8', '.csv': 'text/csv; charset=utf-8',
+  '.zip': 'application/zip',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp',
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
 };
@@ -107,13 +110,6 @@ async function serveStatic(res, filePath, { inline = true, downloadName } = {}) 
   if (!inline) headers['content-disposition'] = `attachment; filename="${encodeURIComponent(downloadName || basename(filePath))}"`;
   res.writeHead(200, headers);
   createReadStream(filePath).pipe(res);
-}
-
-function reportExportPath(report, fmt = 'md') {
-  return fmt === 'html' ? report.export_html_path
-    : fmt === 'csv' ? report.export_csv_path
-      : fmt === 'zip' ? report.export_zip_path
-        : report.export_md_path;
 }
 
 function revealInFileManager(filePath) {
@@ -584,8 +580,8 @@ async function handleApi(req, res, url, segs) {
       const r = getReport(id);
       if (!r) return sendJson(res, 404, { error: '未找到' });
       const fmt = url.searchParams.get('format') || 'md';
-      const path = reportExportPath(r, fmt);
-      if (!path || !existsSync(path)) return sendJson(res, 404, { error: '导出文件不存在' });
+      const path = materializeReportExport(r, fmt);
+      if (!path) return sendJson(res, 404, { error: '导出文件不存在，且数据库中没有可恢复的日报正文' });
       try {
         await revealInFileManager(path);
         return sendJson(res, 200, { ok: true, format: fmt, file: basename(path) });
@@ -597,8 +593,8 @@ async function handleApi(req, res, url, segs) {
       const r = getReport(id);
       if (!r) return sendJson(res, 404, { error: '未找到' });
       const fmt = url.searchParams.get('format') || 'md';
-      const path = reportExportPath(r, fmt);
-      if (!path) return sendJson(res, 404, { error: '导出文件不存在' });
+      const path = materializeReportExport(r, fmt);
+      if (!path) return sendJson(res, 404, { error: '导出文件不存在，且数据库中没有可恢复的日报正文' });
       const inline = url.searchParams.get('inline') === '1';
       return serveStatic(res, path, { inline, downloadName: basename(path) });
     }

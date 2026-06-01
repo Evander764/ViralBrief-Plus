@@ -42,6 +42,7 @@ class FakeClient {
     this.titleByUrl = opts.titleByUrl || {};
     this.pubTimeByUrl = opts.pubTimeByUrl || {};
     this.layoutPubTimeByUrl = opts.layoutPubTimeByUrl || {};
+    this.fullscreenPubTimeByUrl = opts.fullscreenPubTimeByUrl || {};
     this.bodyByUrl = opts.bodyByUrl || {};
     this.hashtagsByUrl = opts.hashtagsByUrl || {};
     this.dataByUrl = opts.dataByUrl || {};
@@ -88,6 +89,13 @@ class FakeClient {
     if (expr.includes('vbp-douyin-pause-video')) {
       this.pauseCalls++;
       return { videoCount: 1, pausedCount: 1 };
+    }
+    if (
+      expr.includes('vbp-douyin-fullscreen-author-publish-time')
+      && expr.includes('vbp-douyin-layout-publish-time')
+    ) {
+      const value = this.fullscreenPubTimeByUrl[this.url];
+      if (value) return { time: value, score: 360, text: `@账号 · ${value}`, source: 'fullscreen_author' };
     }
     if (expr.includes('vbp-douyin-layout-publish-time')) {
       const value = this.layoutPubTimeByUrl[this.url];
@@ -589,6 +597,56 @@ test('runPatrol reads Douyin layout publish time before deciding account exit', 
     assert.deepEqual(result.details[0].items.map((item) => item.url), [oldUrl]);
     assert.ok(client.gotos.includes(oldUrl));
     assert.equal(client.gotos.includes(nextUrl), false);
+    const saved = getContent(result.details[0].item.id);
+    const savedTime = new Date(saved.publish_time);
+    assert.equal(savedTime.getFullYear(), 2026);
+    assert.equal(savedTime.getMonth(), 4);
+    assert.equal(savedTime.getDate(), 1);
+    assert.equal(savedTime.getHours(), 6);
+    assert.equal(savedTime.getMinutes(), 15);
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
+test('runPatrol reads Douyin fullscreen author-side publish time before deciding account exit', async () => {
+  const oldUrl = 'https://www.douyin.com/video/fullscreen-publish-old';
+  const nextUrl = 'https://www.douyin.com/video/fullscreen-publish-next';
+  const acc = upsertAccount({
+    platform: 'douyin',
+    nickname: '抖音全屏时间账号',
+    homepage_url: 'https://www.douyin.com/user/douyin-fullscreen-time',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient({
+    postCandidates: [
+      { url: oldUrl, publishRaw: '2小时前' },
+      { url: nextUrl, publishRaw: '2小时前' },
+    ],
+    pubTimeByUrl: {
+      [oldUrl]: '2小时前',
+    },
+    fullscreenPubTimeByUrl: {
+      [oldUrl]: '2026年5月1日 06:15',
+    },
+    titleByUrl: {
+      [oldUrl]: '抖音全屏旧视频',
+      [nextUrl]: '抖音全屏下一条',
+    },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+      maxCandidatesPerAccount: 2,
+      windowStartISO: '2026-05-30T00:00:00.000Z',
+    });
+
+    assert.equal(result.success, 1);
+    assert.deepEqual(result.details[0].items.map((item) => item.url), [oldUrl]);
+    assert.equal(client.gotos.includes(nextUrl), false);
+    assert.ok(result.details[0].skipReasons.some((s) => s.reason === 'out_of_window'));
     const saved = getContent(result.details[0].item.id);
     const savedTime = new Date(saved.publish_time);
     assert.equal(savedTime.getFullYear(), 2026);

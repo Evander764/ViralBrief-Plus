@@ -1721,12 +1721,75 @@ async function readDouyinDetailPublishTime(client, progress) {
           }
           return Math.max(0, best);
         };
+        const isMetricText = (text) => /点赞|喜欢|评论|收藏|转发|分享|获赞/.test(text);
+        const findFullscreenAuthorPublishTime = () => {
+          // vbp-douyin-fullscreen-author-publish-time: 全屏详情会把日期放在左下角名称旁边。
+          const nodes = Array.from(document.querySelectorAll('a, span, p, div, time, [datetime]')).slice(0, 2400);
+          const authorRects = [];
+          const pushAuthorRect = (el) => {
+            const rect = visibleRect(el);
+            if (!rect) return;
+            if (rect.left > innerWidth * 0.72 || rect.top < innerHeight * 0.35) return;
+            if (rect.width > innerWidth * 0.72 || rect.height > innerHeight * 0.22) return;
+            const text = textOf(el);
+            if (!text || text.length > 120 || isMetricText(text)) return;
+            authorRects.push(rect);
+          };
+          for (const selector of [
+            '[data-e2e*="author"]',
+            '[data-e2e*="user"]',
+            '[data-e2e*="nickname"]',
+            'a[href^="/user/"]',
+            'a[href*="/user/"]',
+            '[class*="author"]',
+            '[class*="user"]',
+            '[class*="name"]',
+            '[class*="nickname"]',
+          ]) {
+            for (const el of document.querySelectorAll(selector)) pushAuthorRect(el);
+          }
+          for (const node of nodes) {
+            const text = textOf(node);
+            if (/^@|\\s@|抖音号|作者|昵称|关注/.test(text)) pushAuthorRect(node);
+          }
+
+          const candidates = [];
+          const pushCandidate = (el, baseScore = 0) => {
+            const rect = visibleRect(el);
+            if (!rect) return;
+            if (rect.left > innerWidth * 0.72 || rect.top < innerHeight * 0.35) return;
+            if (rect.width > innerWidth * 0.76 || rect.height > innerHeight * 0.24) return;
+            const text = textOf(el);
+            if (!text || text.length > 260) return;
+            if (isMetricText(text) && !/发布|时间|日期/.test(text)) return;
+            const time = publishTimeTextFrom(text);
+            if (!time) return;
+            let score = baseScore + 80;
+            score += nearAny(rect, authorRects, 460, 96);
+            if (rect.left < innerWidth * 0.5) score += 45;
+            if (rect.top > innerHeight * 0.55) score += 40;
+            if (/^@|\\s@|抖音号|作者|昵称|关注/.test(text)) score += 35;
+            if (/发布|时间|日期/.test(text)) score += 35;
+            if (/·|•|[|｜-]/.test(text)) score += 15;
+            if (text.length <= 120) score += 15;
+            candidates.push({ time, score, text: text.slice(0, 180), source: 'fullscreen_author' });
+          };
+          for (const selector of ['time', '[datetime]', '[class*="time"]', '[class*="date"]', '[class*="publish"]']) {
+            for (const el of document.querySelectorAll(selector)) pushCandidate(el, 80);
+          }
+          for (const node of nodes) pushCandidate(node, 0);
+          candidates.sort((a, b) => b.score - a.score);
+          const best = candidates[0] || null;
+          return best && best.score >= 125 ? best : null;
+        };
         const narrowText = (text) => {
           const idx = String(text || '').search(/发布时间|发布于|发布日期|举报|投诉|report/i);
           if (idx < 0) return clean(text).slice(0, 260);
           return clean(text).slice(Math.max(0, idx - 80), idx + 220);
         };
         const candidates = [];
+        const fullscreenAuthorTime = findFullscreenAuthorPublishTime();
+        if (fullscreenAuthorTime) candidates.push(fullscreenAuthorTime);
         const pushCandidate = (el, baseScore = 0, allowLongText = false) => {
           const rect = visibleRect(el);
           if (!rect) return;
@@ -1774,7 +1837,8 @@ async function readDouyinDetailPublishTime(client, progress) {
     `);
     const raw = typeof state === 'string' ? state : state?.time;
     if (!raw || !normalizedPublishTime(raw)) return null;
-    progress(`  已先识别抖音发布时间: ${raw}`);
+    const label = state?.source === 'fullscreen_author' ? '抖音全屏左下角发布时间' : '抖音发布时间';
+    progress(`  已先识别${label}: ${raw}`);
     return raw;
   } catch (e) {
     progress(`  抖音发布时间预识别失败，改用详情提取兜底: ${e.message}`);
@@ -2461,6 +2525,85 @@ async function extractPageRaw(client, platform) {
       };
       const findDouyinVisiblePublishTime = () => {
         // vbp-douyin-visible-publish-time: 抖音详情页常把日期放在“举报”附近，优先读可见文本。
+        const textFor = (el) => cleanBlock([
+          el?.getAttribute?.('datetime'),
+          el?.getAttribute?.('aria-label'),
+          el?.getAttribute?.('title'),
+          el?.innerText || el?.textContent,
+        ].filter(Boolean).join(' '));
+        const findFullscreenAuthorPublishTime = () => {
+          // vbp-douyin-fullscreen-author-publish-time-fallback: 全屏左下角名称旁边的发布时间兜底。
+          const nodes = Array.from(document.querySelectorAll('a, span, p, div, time, [datetime]')).slice(0, 2400);
+          const isMetricText = (text) => /点赞|喜欢|评论|收藏|转发|分享|获赞/.test(text);
+          const authorRects = [];
+          const pushAuthorRect = (el) => {
+            const rect = visibleRect(el);
+            if (!rect) return;
+            if (rect.left > innerWidth * 0.72 || rect.top < innerHeight * 0.35) return;
+            if (rect.width > innerWidth * 0.72 || rect.height > innerHeight * 0.22) return;
+            const text = textFor(el);
+            if (!text || text.length > 120 || isMetricText(text)) return;
+            authorRects.push(rect);
+          };
+          for (const selector of [
+            '[data-e2e*="author"]',
+            '[data-e2e*="user"]',
+            '[data-e2e*="nickname"]',
+            'a[href^="/user/"]',
+            'a[href*="/user/"]',
+            '[class*="author"]',
+            '[class*="user"]',
+            '[class*="name"]',
+            '[class*="nickname"]',
+          ]) {
+            for (const el of document.querySelectorAll(selector)) pushAuthorRect(el);
+          }
+          for (const node of nodes) {
+            const text = textFor(node);
+            if (/^@|\\s@|抖音号|作者|昵称|关注/.test(text)) pushAuthorRect(node);
+          }
+          const nearAuthorScore = (rect) => {
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            let best = 0;
+            for (const other of authorRects) {
+              const ox = other.left + other.width / 2;
+              const oy = other.top + other.height / 2;
+              const dx = Math.abs(cx - ox);
+              const dy = Math.abs(cy - oy);
+              if (dx <= 460 && dy <= 96) best = Math.max(best, 100 - Math.round(dx / 6) - Math.round(dy / 3));
+            }
+            return Math.max(0, best);
+          };
+          const candidates = [];
+          const pushCandidate = (el, baseScore = 0) => {
+            const rect = visibleRect(el);
+            if (!rect) return;
+            if (rect.left > innerWidth * 0.72 || rect.top < innerHeight * 0.35) return;
+            if (rect.width > innerWidth * 0.76 || rect.height > innerHeight * 0.24) return;
+            const text = textFor(el);
+            if (!text || text.length > 260) return;
+            if (isMetricText(text) && !/发布|时间|日期/.test(text)) return;
+            const time = publishTimeTextFrom(text);
+            if (!time) return;
+            let score = baseScore + 80 + nearAuthorScore(rect);
+            if (rect.left < innerWidth * 0.5) score += 45;
+            if (rect.top > innerHeight * 0.55) score += 40;
+            if (/^@|\\s@|抖音号|作者|昵称|关注/.test(text)) score += 35;
+            if (/发布|时间|日期/.test(text)) score += 35;
+            if (/·|•|[|｜-]/.test(text)) score += 15;
+            if (text.length <= 120) score += 15;
+            candidates.push({ time, score });
+          };
+          for (const selector of ['time', '[datetime]', '[class*="time"]', '[class*="date"]', '[class*="publish"]']) {
+            for (const el of document.querySelectorAll(selector)) pushCandidate(el, 80);
+          }
+          for (const node of nodes) pushCandidate(node, 0);
+          candidates.sort((a, b) => b.score - a.score);
+          return candidates[0]?.score >= 125 ? candidates[0].time : null;
+        };
+        const fullscreenAuthorTime = findFullscreenAuthorPublishTime();
+        if (fullscreenAuthorTime) return fullscreenAuthorTime;
         const directText = getText([
           'span[data-e2e="video-author-publishtime"]',
           '[data-e2e*="publish"]',
@@ -2472,12 +2615,6 @@ async function extractPageRaw(client, platform) {
         const direct = publishTimeTextFrom(directText) || document.querySelector('time')?.dateTime || null;
         if (direct) return direct;
 
-        const textFor = (el) => cleanBlock([
-          el?.getAttribute?.('datetime'),
-          el?.getAttribute?.('aria-label'),
-          el?.getAttribute?.('title'),
-          el?.innerText || el?.textContent,
-        ].filter(Boolean).join(' '));
         const reportNodes = Array.from(document.querySelectorAll('button, a, div, span, p'))
           .filter((el) => {
             const rect = visibleRect(el);

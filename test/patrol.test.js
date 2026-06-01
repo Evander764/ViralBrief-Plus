@@ -89,6 +89,10 @@ class FakeClient {
       const value = this.layoutPubTimeByUrl[this.url];
       return value ? { time: value, score: 300, text: `发布时间：${value}` } : null;
     }
+    if (expr.includes('vbp-xhs-layout-publish-time')) {
+      const value = this.layoutPubTimeByUrl[this.url];
+      return value ? { time: value, score: 300, text: value } : null;
+    }
     if (expr.includes('vbp-xhs-close-button')) {
       return this.url.includes('xiaohongshu.com/explore/')
         ? { x: 44, y: 48, width: 1280, height: 800, score: 200 }
@@ -1135,6 +1139,51 @@ test('runPatrol saves detail pages with unknown publish time for later review', 
   }
 });
 
+test('runPatrol reads Xiaohongshu edited publish time from the detail layout', async () => {
+  const url = 'https://www.xiaohongshu.com/explore/edited-time-detail';
+  const acc = upsertAccount({
+    platform: 'xiaohongshu',
+    nickname: '编辑时间账号',
+    homepage_url: 'https://www.xiaohongshu.com/user/profile/edited-time-account',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient({
+    xhsPostCandidates: [
+      xhsCandidate(url, { publishRaw: null, publishTime: null, titleRaw: '编辑时间候选' }),
+    ],
+    clickLandingUrls: [url],
+    titleByUrl: {
+      [url]: '编辑时间候选 - 小红书',
+    },
+    pubTimeByUrl: {
+      [url]: '',
+    },
+    layoutPubTimeByUrl: {
+      [url]: '编辑于 2026-05-31 10:20',
+    },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['xiaohongshu'],
+      windowStartISO: '2026-05-30T00:00:00.000Z',
+    });
+
+    assert.equal(result.success, 1);
+    assert.equal(result.newItems, 1);
+    const saved = getContent(result.details[0].item.id);
+    const savedTime = new Date(saved.publish_time);
+    assert.equal(savedTime.getFullYear(), 2026);
+    assert.equal(savedTime.getMonth(), 4);
+    assert.equal(savedTime.getDate(), 31);
+    assert.equal(savedTime.getHours(), 10);
+    assert.equal(savedTime.getMinutes(), 20);
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
 test('runPatrol records detail publish time before handling duplicate detail pages', async () => {
   const cardUrl = 'https://www.xiaohongshu.com/explore/detail-duplicate-card';
   const detailUrl = 'https://www.xiaohongshu.com/explore/detail-duplicate-existing';
@@ -1231,7 +1280,7 @@ test('runPatrol stops Xiaohongshu account when it reaches already-seen content',
   }
 });
 
-test('runPatrol saves out-of-window Xiaohongshu detail and continues to the next candidate', async () => {
+test('runPatrol saves out-of-window Xiaohongshu detail and stops the current account', async () => {
   const oldUrl = 'https://www.xiaohongshu.com/explore/out-of-window-card';
   const nextUrl = 'https://www.xiaohongshu.com/explore/should-open-after-old-card';
   const acc = upsertAccount({
@@ -1263,17 +1312,18 @@ test('runPatrol saves out-of-window Xiaohongshu detail and continues to the next
     });
 
     assert.equal(result.success, 1);
-    assert.equal(result.newItems, 2);
-    assert.deepEqual(result.details[0].items.map((item) => item.url), [oldUrl, nextUrl]);
-    assert.equal(cardClicks(client).length, 2);
-    assert.equal(closeClicks(client).length, 2);
+    assert.equal(result.newItems, 1);
+    assert.deepEqual(result.details[0].items.map((item) => item.url), [oldUrl]);
+    assert.equal(cardClicks(client).length, 1);
+    assert.equal(closeClicks(client).length, 0);
+    assert.equal(client.gotos.includes(nextUrl), false);
     assert.ok(result.details[0].skipReasons.some((s) => s.reason === 'out_of_window'));
   } finally {
     upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
   }
 });
 
-test('runPatrol saves an old Xiaohongshu detail and continues when card time was unknown', async () => {
+test('runPatrol uses Xiaohongshu edited time to stop when card time was unknown', async () => {
   const oldUrl = 'https://www.xiaohongshu.com/explore/out-of-window-detail';
   const nextUrl = 'https://www.xiaohongshu.com/explore/should-open-after-old-detail';
   const acc = upsertAccount({
@@ -1289,8 +1339,11 @@ test('runPatrol saves an old Xiaohongshu detail and continues when card time was
     ],
     clickLandingUrls: [oldUrl, nextUrl],
     pubTimeByUrl: {
-      [oldUrl]: '2026-05-20',
+      [oldUrl]: '',
       [nextUrl]: '2小时前',
+    },
+    layoutPubTimeByUrl: {
+      [oldUrl]: '编辑于 2026-05-20',
     },
     titleByUrl: {
       [oldUrl]: '详情超窗旧笔记 - 小红书',
@@ -1306,11 +1359,14 @@ test('runPatrol saves an old Xiaohongshu detail and continues when card time was
     });
 
     assert.equal(result.success, 1);
-    assert.equal(result.newItems, 2);
-    assert.deepEqual(result.details[0].items.map((item) => item.url), [oldUrl, nextUrl]);
-    assert.equal(cardClicks(client).length, 2);
-    assert.equal(closeClicks(client).length, 2);
+    assert.equal(result.newItems, 1);
+    assert.deepEqual(result.details[0].items.map((item) => item.url), [oldUrl]);
+    assert.equal(cardClicks(client).length, 1);
+    assert.equal(closeClicks(client).length, 0);
+    assert.equal(client.gotos.includes(nextUrl), false);
     assert.ok(result.details[0].skipReasons.some((s) => s.reason === 'out_of_window'));
+    const saved = getContent(result.details[0].item.id);
+    assert.equal(saved.publish_time.slice(0, 10), '2026-05-20');
   } finally {
     upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
   }

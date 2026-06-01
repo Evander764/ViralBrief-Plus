@@ -1048,7 +1048,9 @@ async function captureXiaohongshuCandidate(client, acc, homepage, candidate, pro
     return null;
   }
 
+  const preferredPubTime = await readXiaohongshuDetailPublishTime(client, progress);
   const raw = await extractPageRaw(client, 'xiaohongshu');
+  if (preferredPubTime) raw.pubTime = preferredPubTime;
   const data = buildCaptureData(raw, 'xiaohongshu');
   const finalUrl = isDetailUrl('xiaohongshu', data.pageUrl) ? data.pageUrl : candidate.url;
   if (accountState?.openedDetailUrls?.has(finalUrl)) {
@@ -1064,29 +1066,38 @@ async function captureXiaohongshuCandidate(client, acc, homepage, candidate, pro
   }
 
   const timeGate = assessDetailPublishTime(data, windowStartISO);
+  const publishDecision = decideAfterDetailPublishTime('xiaohongshu', timeGate, {
+    isPinned: candidate?.isPinned || detailLooksLikeSkippedPinned(titleDecision),
+  });
   if (timeGate.reason === 'unknown_time') {
     recordSkip(skipReasons, candidate, timeGate.reason, timeGate.detail);
     progress('  详情页未识别到发布时间，先入库等待后续复核');
   }
   if (timeGate.reason === 'out_of_window') {
     recordSkip(skipReasons, candidate, timeGate.reason, timeGate.detail);
-    progress(`  详情页发布时间超出窗口，仍先入库，巡检结束后统一筛选: ${timeGate.displayTime}`);
+    if (publishDecision.exitAccount) {
+      progress(`  小红书详情页发布时间超出窗口，保存本条后停止该账号: ${timeGate.displayTime}`);
+    } else {
+      progress(`  详情页发布时间超出窗口，仍先入库，巡检结束后统一筛选: ${timeGate.displayTime}`);
+    }
   }
   if (timeGate.action === 'continue') {
     progress(`  详情页发布时间确认在窗口内: ${timeGate.displayTime}`);
   }
   data.publishTime = timeGate.publishTime;
+  const stopAfterThisDetail = publishDecision.exitAccount;
 
   if (contentExistsByUrl(finalUrl)) {
     const item = duplicateItem(finalUrl, timeGate.publishTime);
     recordSkip(skipReasons, candidate, 'already_seen', '详情页已采集，停止该账号后续检查');
-    progress('  详情页已采集，停止该账号后续检查');
+    progress(stopAfterThisDetail ? '  详情页已采集且发布时间超出窗口，停止该账号后续检查' : '  详情页已采集，停止该账号后续检查');
     return { stop: true, item };
   }
 
   if (isUnavailablePage(raw) || !hasCaptureSignal(data)) {
     recordSkip(skipReasons, candidate, 'unavailable', data.title || raw.pageUrl || candidate.url);
     progress(`  候选不可采，跳过: ${data.title || raw.pageUrl || candidate.url}`);
+    if (stopAfterThisDetail) return { stop: true };
     return null;
   }
 
@@ -1095,9 +1106,10 @@ async function captureXiaohongshuCandidate(client, acc, homepage, candidate, pro
   const item = saveData(acc, finalUrl, data, screenshotPath);
   if (item.duplicate) {
     recordSkip(skipReasons, candidate, 'already_seen', '内容重复，停止该账号后续检查');
-    progress('  内容重复，停止该账号后续检查');
+    progress(stopAfterThisDetail ? '  内容重复且发布时间超出窗口，停止该账号后续检查' : '  内容重复，停止该账号后续检查');
     return { stop: true, item };
   }
+  if (stopAfterThisDetail) return { stop: true, item };
   return { item };
 }
 
@@ -1258,11 +1270,17 @@ function assessDetailPublishTime(data, windowStartISO) {
   };
 }
 
-function decideAfterDetailPublishTime(platform, timeGate) {
-  const exitAccount = platform === 'douyin' && timeGate?.reason === 'out_of_window';
+function detailLooksLikeSkippedPinned(titleDecision) {
+  return titleDecision?.reason === 'title_mismatch'
+    && /已跳过置顶标题/.test(String(titleDecision.detail || ''));
+}
+
+function decideAfterDetailPublishTime(platform, timeGate, { isPinned = false } = {}) {
+  const exitAccount = timeGate?.reason === 'out_of_window'
+    && (platform === 'douyin' || (platform === 'xiaohongshu' && !isPinned));
   return {
     exitAccount,
-    reason: exitAccount ? 'douyin_publish_time_before_window' : 'continue_after_detail_publish_time',
+    reason: exitAccount ? `${platform}_publish_time_before_window` : 'continue_after_detail_publish_time',
   };
 }
 
@@ -1490,6 +1508,113 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
   if (duplicateItemResult) return [duplicateItemResult];
   if (duplicateUrl) return [duplicateItem(duplicateUrl)];
   return [];
+}
+
+async function readXiaohongshuDetailPublishTime(client, progress) {
+  try {
+    const state = await client.evaluate(`
+      (() => {
+        // vbp-xhs-layout-publish-time
+        const clean = (text) => String(text || '')
+          .replace(/\\s+/g, ' ')
+          .trim();
+        const normalizeText = (text) => clean(text)
+          .replace(/[０-９]/g, (c) => '0123456789'['０１２３４５６７８９'.indexOf(c)] || c)
+          .replace(/[．。]/g, '.');
+        const textOf = (el) => normalizeText([
+          el?.getAttribute?.('datetime'),
+          el?.getAttribute?.('aria-label'),
+          el?.getAttribute?.('title'),
+          el?.innerText || el?.textContent,
+        ].filter(Boolean).join(' '));
+        const visibleRect = (el) => {
+          if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          if (rect.width <= 3 || rect.height <= 3 || style.display === 'none' || style.visibility === 'hidden') return null;
+          if (rect.bottom < 0 || rect.top > innerHeight || rect.right < 0 || rect.left > innerWidth) return null;
+          return rect;
+        };
+        const publishTimeTextFrom = (text) => {
+          const s = normalizeText(text);
+          if (!s) return null;
+          const timePattern = '(刚刚|今天(?:\\\\s*\\\\d{1,2}:\\\\d{2})?|昨天(?:\\\\s*\\\\d{1,2}:\\\\d{2})?|\\\\d+\\\\s*(?:分钟前|小时前|天前)|(?:19|20)\\\\d{2}\\\\s*(?:年|[-/.])\\\\s*\\\\d{1,2}\\\\s*(?:月|[-/.])\\\\s*\\\\d{1,2}\\\\s*(?:日|号)?(?:\\\\s*\\\\d{1,2}:\\\\d{2})?|\\\\d{1,2}\\\\s*(?:月|[-/])\\\\s*\\\\d{1,2}\\\\s*(?:日|号)?(?:\\\\s*\\\\d{1,2}:\\\\d{2})?)';
+          const explicit = s.match(new RegExp('(?:编辑于|发布于|发表于|发布时间|发布日期|更新时间)\\\\s*[:：]?\\\\s*' + timePattern));
+          if (explicit) return explicit[1];
+          return s.match(new RegExp(timePattern))?.[0] || null;
+        };
+        const narrowText = (text) => {
+          const idx = String(text || '').search(/编辑于|发布于|发表于|发布时间|发布日期|更新时间/i);
+          if (idx < 0) return normalizeText(text).slice(0, 260);
+          return normalizeText(text).slice(Math.max(0, idx - 80), idx + 220);
+        };
+        const anchors = Array.from(document.querySelectorAll([
+          '#detail-title',
+          '.note-title',
+          'h1',
+          '#detail-desc',
+          '.note-content',
+          '[class*="note-content"]',
+          '[class*="desc"]',
+          'article',
+        ].join(',')))
+          .map(visibleRect)
+          .filter(Boolean);
+        const nearContentScore = (rect) => {
+          if (!rect || anchors.length === 0) return 0;
+          let best = 0;
+          for (const anchor of anchors) {
+            const verticalGap = rect.top - anchor.bottom;
+            const leftDelta = Math.abs(rect.left - anchor.left);
+            const overlap = Math.min(rect.right, anchor.right) - Math.max(rect.left, anchor.left);
+            if (verticalGap >= -24 && verticalGap <= 360 && (overlap > 0 || leftDelta <= 260)) {
+              best = Math.max(best, 130 - Math.max(0, Math.round(verticalGap / 4)) - Math.round(leftDelta / 12));
+            }
+          }
+          return Math.max(0, best);
+        };
+        const candidates = [];
+        const pushCandidate = (el, baseScore = 0, allowLongText = false) => {
+          const rect = visibleRect(el);
+          if (!rect) return;
+          const rawText = textOf(el);
+          if (!rawText || (!allowLongText && rawText.length > 220)) return;
+          const text = allowLongText ? narrowText(rawText) : rawText;
+          if (/点赞|收藏|评论|分享|转发/.test(text) && !/编辑于|发布于|发表于|发布时间|发布日期|更新时间/.test(text)) return;
+          const time = publishTimeTextFrom(text);
+          if (!time) return;
+          let score = baseScore + nearContentScore(rect);
+          if (/编辑于/.test(text)) score += 180;
+          if (/发布于|发表于|发布时间|发布日期|更新时间/.test(text)) score += 100;
+          if (/时间|日期|编辑|发布/.test(text)) score += 30;
+          if (rect.left < innerWidth * 0.78 && rect.top > 60) score += 15;
+          candidates.push({ time, score, text: text.slice(0, 180) });
+        };
+        const directNodes = Array.from(document.querySelectorAll('time, [datetime], [class*="time"], [class*="date"], [class*="publish"], [class*="update"], [class*="edit"]')).slice(0, 800);
+        for (const node of directNodes) {
+          const text = textOf(node);
+          const explicit = /编辑于|发布于|发表于|发布时间|发布日期|更新时间/.test(text);
+          pushCandidate(node, explicit ? 160 : 30, explicit);
+        }
+        const textNodes = Array.from(document.querySelectorAll('span, p, div')).slice(0, 2200);
+        for (const node of textNodes) {
+          const text = textOf(node);
+          if (!/编辑于|发布于|发表于|发布时间|发布日期|更新时间/.test(text)) continue;
+          pushCandidate(node, 150, true);
+        }
+        candidates.sort((a, b) => b.score - a.score);
+        const best = candidates[0] || null;
+        return best && best.score >= 80 ? best : null;
+      })()
+    `);
+    const raw = typeof state === 'string' ? state : state?.time;
+    if (!raw || !normalizedPublishTime(raw)) return null;
+    progress(`  已先识别小红书编辑时间: ${raw}`);
+    return raw;
+  } catch (e) {
+    progress(`  小红书发布时间预识别失败，改用详情提取兜底: ${e.message}`);
+    return null;
+  }
 }
 
 async function readDouyinDetailPublishTime(client, progress) {

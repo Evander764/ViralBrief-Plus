@@ -40,13 +40,17 @@
 ### 抖音阶段
 - 小红书阶段结束后再发起新的抖音巡检 API。
 - 账号有主页 URL 则打开；无 URL 时通过搜索找博主主页。
-- 内容从最新到更旧检查；每条详情必须读取封面/首帧、标题、正文、发布时间、点赞、收藏、转发、评论。
+- 内容从最新到更旧检查；每条详情必须读取封面/首帧、标题、正文、发布时间、点赞、收藏、转发、评论。发布日期优先读取详情页“举报”附近的可见文本。
 - 详情页先暂停视频，再提取数据；可采内容一律截图并入库。
-- 发布时间缺失、超窗口、标题不匹配或互动未达标都不阻断保存；是否入选留到巡检后判断。
+- 发布时间缺失、超窗口、标题不匹配或互动未达标都不阻断保存；抖音详情发布日期早于窗口时，保存本条后结束该博主巡检；是否入选留到巡检后判断。
 - 全部账号完成或剩余账号正在跑时不再额外开新标签；单个账号跑完立即关闭自己的标签。
 
 ## 数据流
-- 采集：插件 `popup.js` 注入页面提取 → `POST /api/capture`（带 `x-vb-token`）→ `store.upsertCapture()`：标准化指标、算 url_key/fingerprint、去重合并、`computeDataStatus`、落库。截图存 `data/screenshots/`，DB 存路径。
+- 采集（三条入口，殊途同归到 `store.upsertCapture()`）：
+  - 插件 `popup.js` 注入页面提取 → `POST /api/capture`（`metrics_source='manual'`/`page_text'`）。
+  - 桌面视觉 Agent（CDP/截图）→ `POST /api/agent/ingest`（`metrics_source='desktop_agent'` → needs_review）。
+  - **粘贴链接服务端抓取** `POST /api/ingest`：`ingest/scrape.js` 用 `fetch` 拉 HTML → `extractFromHtml`（复用 `extension/extract-core.js`，从 `__INITIAL_STATE__`/`RENDER_DATA`/og 解析）→ `metrics_source='scraped'` → needs_review。纯 HTTP 抓取「尽力而为」：常只拿到 JS 外壳/验证页，抓不到数字属正常，缺的进待补录。**不做反爬绕过/验证码/签名伪造**。
+  - 共同：`upsertCapture()` 标准化指标、算 url_key/fingerprint、去重合并、账号池自动关联、`computeDataStatus`、落库；截图存 `data/screenshots/`。
 - 确认：仪表盘候选池 → `POST /api/contents/:id/confirm` → `store.confirmContent()`：重算指标、强制 `metrics_source='manual'` + `user_confirmed=1`、重算状态。
 - 账号池打开：`POST /api/accounts/open-platform` 从当前 DB 筛选有效平台主页（小红书 `/user/profile/<id>`），一次性交给 Chrome 打开为多个标签页；`POST /api/browser/open` 保留单 URL 兼容并支持 `{ urls: [...] }`。
 - 出报：`pipeline.runDailyReport({windowType})`：可选先跑小红书、抖音 RPA 阶段 → `recomputeAll(窗口)` → `getEligible(窗口起点)`（小红书/抖音 + 账号池 + confirmed + 平台必需指标都达标）→ 逐条 `analyzeContent`（按 content_id 缓存）→ `generateReportData`（校验编号）→ `render*` → 落 `daily_reports` + 写 `data/exports/`（MD/HTML/CSV/ZIP）。0 达标则用 `fallbackReportData` 跳过 AI。
@@ -69,7 +73,8 @@
 - ESM（`"type":"module"`），CommonJS 勿混。
 - 业务/UI 文案中文；代码注释解释「为什么」。
 - 平台代码：`douyin` / `xiaohongshu` / `wechat_channels` / `wechat_article` / `other`。
-- 窗口：`last_3_days`（72h）/ `last_7_days`（7×24h）。
+- 窗口：程序接受 `last_N_day(s)` 并统一规范化成 `last_N_days`；常用 `last_1_day` / `last_3_days` / `last_7_days`。
+- 每次完成修改后，直接提交并推送到 `main` 分支；除非用户明确要求走其它分支或只做本地验证。
 
 ## 已知边界 / 待办
 - 插件页面指标识别是「尽力而为」，平台改版会失效；**人工修正是主路径**（设计如此）。视频号网页端指标基本靠手填。

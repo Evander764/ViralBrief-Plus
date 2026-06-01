@@ -519,7 +519,7 @@ export function upsertAnalysis(contentId, data, model) {
     why_viral: data.why_viral || '',
     target_audience: data.target_audience || '',
     rewrite_titles_json: JSON.stringify(data.rewrite_titles || []),
-    business_value: Number.isFinite(data.business_value_score) ? data.business_value_score : 0,
+    business_value: 0,
     monetization_json: JSON.stringify(data.monetization_paths || []),
     model: model || '',
     created_at: nowISO(),

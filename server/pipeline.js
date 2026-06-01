@@ -6,7 +6,7 @@
  *   2. [状态刷新] recomputeAll（零 token，确定性）
  *   3. [硬筛选]   getEligible（零 token，确定性）
  *   4. [逐条分析] analyzeContent（命中缓存不花钱）
- *   5. [趋势聚类] generateReportData
+ *   5. [内容归类] generateReportData
  *   6. [渲染输出] Markdown / HTML / CSV → 落库 + 导出文件
  *
  * 关键原则：日报中的所有数字都来自数据库（由 RPA 或插件采集 + 人工确认），
@@ -152,7 +152,7 @@ export async function runDailyReport({
   progress('filter', `达标内容: ${items.length} 条`);
 
   // ====================================================================
-  // 第 4-5 步：AI 分析与聚类
+  // 第 4-5 步：AI 摘录与内容归类
   // ====================================================================
   let reportData;
   let model = null;
@@ -185,7 +185,7 @@ export async function runDailyReport({
     }
 
     const analyses = getAnalysesForContents(items.map((i) => i.id));
-    progress('ai', '正在生成趋势报告...');
+    progress('ai', '正在生成内容归类报告...');
     const r = await generateReportData({ windowType, items, analyses });
     reportData = r.data;
     model = r.model;

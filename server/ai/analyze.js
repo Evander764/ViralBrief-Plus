@@ -80,4 +80,3 @@ export async function suggestAccountsFromAI(q) {
   json.suggestions = (json.suggestions || []).map(withUsableLink);
   return json;
 }
-

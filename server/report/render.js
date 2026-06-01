@@ -59,7 +59,7 @@ export function fallbackReportData(windowType, counts) {
     daily_summary: `过去${windowLabel(windowType)}内，暂无满足「小红书点赞和收藏都达标；抖音点赞、收藏和转发都达标」且证据可信的内容，样本不足。${ex ? `当前库内：${ex}。建议在「今日候选」里补录/确认指标后再生成。` : ''}`,
     top_topic_clusters: [],
     recommended_actions: [],
-    data_warnings: ['样本不足：达标内容为 0 条，本期不做趋势结论。'],
+    data_warnings: ['样本不足：达标内容为 0 条，本期不做方向结论。'],
   };
 }
 
@@ -142,7 +142,7 @@ export function renderMarkdown(reportData, items, analyses, meta) {
   if (ex) out.push(`- **本期未入选统计**：${ex}（这些内容因缺数据或未达标，未计入正式榜单）。`);
   out.push(`- **样本量**：达标 ${items.length} 条。`);
   if (items.length <= 2) {
-    out.push('- ⚠️ **少样本提示**：本期达标内容仅 ' + items.length + ' 条，AI 分析结论参考价值有限，请结合更长窗口数据综合判断。');
+    out.push('- ⚠️ **少样本提示**：本期达标内容仅 ' + items.length + ' 条，AI 摘录和归类仅供参考，请结合更长窗口数据综合判断。');
   }
   for (const w of reportData.data_warnings || []) out.push(`- ${w}`);
   out.push('');
@@ -236,7 +236,7 @@ export function renderHtml(reportData, items, analyses, meta) {
     <li><b>数据口径：</b>点赞/转发/收藏等数字来自稳定页面数据、插件采集或人工确认；截图/OCR 等弱证据只进待复核，不直接入榜。</li>
     ${ex ? `<li><b>本期未入选统计：</b>${esc(ex)}（缺数据或未达标，不计入榜单）。</li>` : ''}
     <li><b>样本量：</b>达标 ${items.length} 条。</li>
-    ${items.length <= 2 ? `<li>⚠️ <b>少样本提示：</b>本期达标内容仅 ${items.length} 条，AI 分析结论参考价值有限，请结合更长窗口数据综合判断。</li>` : ''}
+    ${items.length <= 2 ? `<li>⚠️ <b>少样本提示：</b>本期达标内容仅 ${items.length} 条，AI 摘录和归类仅供参考，请结合更长窗口数据综合判断。</li>` : ''}
     ${(reportData.data_warnings || []).map((w) => `<li>${esc(w)}</li>`).join('')}
   </ul>
 

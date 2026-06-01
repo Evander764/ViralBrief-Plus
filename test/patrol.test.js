@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 process.env.VBP_DATA_DIR = mkdtempSync(join(tmpdir(), 'vbp-patrol-'));
 
-const { upsertAccount, upsertCapture, getContent } = await import('../server/store.js');
+const { upsertAccount, upsertCapture, getContent, beijingDayStartISO } = await import('../server/store.js');
 const { get } = await import('../server/db.js');
 const { runPatrol } = await import('../server/rpa/patrol.js');
 
@@ -41,6 +41,7 @@ class FakeClient {
     this.searchHitText = opts.searchHitText || '主页搜索账号 小红书号';
     this.titleByUrl = opts.titleByUrl || {};
     this.pubTimeByUrl = opts.pubTimeByUrl || {};
+    this.layoutPubTimeByUrl = opts.layoutPubTimeByUrl || {};
     this.bodyByUrl = opts.bodyByUrl || {};
     this.hashtagsByUrl = opts.hashtagsByUrl || {};
     this.dataByUrl = opts.dataByUrl || {};
@@ -83,6 +84,10 @@ class FakeClient {
     if (expr.includes('vbp-douyin-pause-video')) {
       this.pauseCalls++;
       return { videoCount: 1, pausedCount: 1 };
+    }
+    if (expr.includes('vbp-douyin-layout-publish-time')) {
+      const value = this.layoutPubTimeByUrl[this.url];
+      return value ? { time: value, score: 300, text: `发布时间：${value}` } : null;
     }
     if (expr.includes('vbp-xhs-close-button')) {
       return this.url.includes('xiaohongshu.com/explore/')
@@ -279,6 +284,40 @@ test('runPatrol stops before account work without marking the account as patroll
   }
 });
 
+test('runPatrol defaults to skipping accounts already patrolled today unless explicitly included', async () => {
+  const homepage = 'https://www.douyin.com/user/repatrol-today';
+  const acc = upsertAccount({
+    platform: 'douyin',
+    nickname: '当天复巡账号',
+    homepage_url: homepage,
+    monitor_enabled: true,
+    last_patrolled_at: new Date(Date.parse(beijingDayStartISO()) + 60_000).toISOString(),
+  });
+
+  try {
+    const skippedClient = new FakeClient({ douyinPostUrls: ['https://www.douyin.com/video/repatrol-skip'] });
+    const skipped = await runPatrol(skippedClient, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+    });
+    assert.equal(skipped.total, 0);
+    assert.equal(skipped.skippedToday, 1);
+    assert.deepEqual(skippedClient.gotos, []);
+
+    const includedClient = new FakeClient({ douyinPostUrls: ['https://www.douyin.com/video/repatrol-include'] });
+    const included = await runPatrol(includedClient, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+      includePatrolledToday: true,
+    });
+    assert.equal(included.total, 1);
+    assert.equal(included.skippedToday, 0);
+    assert.equal(includedClient.gotos[0], homepage);
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
 test('runPatrol skips already-seen URLs and saves the next new candidate', async () => {
   const acc = upsertAccount({
     platform: 'douyin',
@@ -382,7 +421,7 @@ test('runPatrol skips Douyin pinned candidates before opening video detail', asy
   }
 });
 
-test('runPatrol saves out-of-window Douyin detail and continues to the next candidate', async () => {
+test('runPatrol saves out-of-window Douyin detail and stops the account', async () => {
   const acc = upsertAccount({
     platform: 'douyin',
     nickname: '抖音超窗账号',
@@ -395,7 +434,7 @@ test('runPatrol saves out-of-window Douyin detail and continues to the next cand
       { url: 'https://www.douyin.com/video/out-window-next', publishRaw: '2小时前' },
     ],
     pubTimeByUrl: {
-      'https://www.douyin.com/video/out-window-old': '2026-05-20',
+      'https://www.douyin.com/video/out-window-old': '举报 2026年5月20日',
     },
     titleByUrl: {
       'https://www.douyin.com/video/out-window-old': '抖音超窗旧视频',
@@ -412,14 +451,65 @@ test('runPatrol saves out-of-window Douyin detail and continues to the next cand
     });
 
     assert.equal(result.success, 1);
-    assert.equal(result.newItems, 2);
+    assert.equal(result.newItems, 1);
     assert.deepEqual(result.details[0].items.map((item) => item.url), [
       'https://www.douyin.com/video/out-window-old',
-      'https://www.douyin.com/video/out-window-next',
     ]);
     assert.ok(client.gotos.includes('https://www.douyin.com/video/out-window-old'));
-    assert.ok(client.gotos.includes('https://www.douyin.com/video/out-window-next'));
+    assert.equal(client.gotos.includes('https://www.douyin.com/video/out-window-next'), false);
     assert.ok(result.details[0].skipReasons.some((s) => s.reason === 'out_of_window'));
+    const saved = getContent(result.details[0].item.id);
+    assert.equal(saved.publish_time.slice(0, 10), '2026-05-20');
+  } finally {
+    upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
+  }
+});
+
+test('runPatrol reads Douyin layout publish time before deciding account exit', async () => {
+  const oldUrl = 'https://www.douyin.com/video/layout-publish-old';
+  const nextUrl = 'https://www.douyin.com/video/layout-publish-next';
+  const acc = upsertAccount({
+    platform: 'douyin',
+    nickname: '抖音布局时间账号',
+    homepage_url: 'https://www.douyin.com/user/douyin-layout-time',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient({
+    postCandidates: [
+      { url: oldUrl, publishRaw: '2小时前' },
+      { url: nextUrl, publishRaw: '2小时前' },
+    ],
+    pubTimeByUrl: {
+      [oldUrl]: '2小时前',
+    },
+    layoutPubTimeByUrl: {
+      [oldUrl]: '发布时间：2026-05-01 06:15',
+    },
+    titleByUrl: {
+      [oldUrl]: '抖音布局时间旧视频',
+      [nextUrl]: '抖音布局时间下一条',
+    },
+  });
+
+  try {
+    const result = await runPatrol(client, {
+      discoverFollows: false,
+      platforms: ['douyin'],
+      maxCandidatesPerAccount: 2,
+      windowStartISO: '2026-05-30T00:00:00.000Z',
+    });
+
+    assert.equal(result.success, 1);
+    assert.deepEqual(result.details[0].items.map((item) => item.url), [oldUrl]);
+    assert.ok(client.gotos.includes(oldUrl));
+    assert.equal(client.gotos.includes(nextUrl), false);
+    const saved = getContent(result.details[0].item.id);
+    const savedTime = new Date(saved.publish_time);
+    assert.equal(savedTime.getFullYear(), 2026);
+    assert.equal(savedTime.getMonth(), 4);
+    assert.equal(savedTime.getDate(), 1);
+    assert.equal(savedTime.getHours(), 6);
+    assert.equal(savedTime.getMinutes(), 15);
   } finally {
     upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
   }
@@ -535,6 +625,7 @@ test('runPatrol scans Xiaohongshu cards left-to-right before moving down', async
     assert.ok(clicks[1].x >= 390 && clicks[1].x <= 610);
     assert.ok(clicks[2].y >= 430 && clicks[2].y <= 590);
     assert.ok(client.wheels.length >= 1, 'should scroll after finishing the first visible row');
+    assert.equal(client.wheels[0].deltaY, 180, 'Xiaohongshu row scroll should be half of the old 360px distance');
   } finally {
     upsertAccount({ id: acc.id, platform: acc.platform, nickname: acc.nickname, homepage_url: acc.homepage_url, monitor_enabled: false });
   }

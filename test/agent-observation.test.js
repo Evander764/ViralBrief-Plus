@@ -9,7 +9,7 @@ process.env.VBP_DATA_DIR = mkdtempSync(join(tmpdir(), 'vbp-observation-test-'));
 
 const { saveConfig, setApiKey } = await import('../server/config.js');
 const { getObservation, upsertObservation } = await import('../server/store.js');
-const { recognizePageState, observeVideo, readMetricsFromScreenshot } = await import('../server/ai/observe.js');
+const { recognizePageState, observeVideo } = await import('../server/ai/observe.js');
 
 const originalFetch = globalThis.fetch;
 
@@ -147,24 +147,4 @@ test('observe 模块: observeVideo 观察详情页及缓存策略', async () => 
   assert.equal(res2.cached, true, '第二次应命中缓存');
   assert.equal(res2.observation.observed_activity, '博主在展示Antigravity agent');
   assert.equal(apiCalled, 1, 'API 调用次数不应增加');
-});
-
-test('observe 模块: readMetricsFromScreenshot 指标提取', async () => {
-  saveConfig({ baseUrl: '', model: 'gpt-4o-mini' });
-  setApiKey('sk-saved-key-observation');
-
-  const metricsMock = {
-    like_raw: '1.2万',
-    share_raw: '2500',
-    comment_raw: '800',
-    favorite_raw: '400',
-  };
-
-  globalThis.fetch = async () => {
-    return response({ body: openAIMockResponse(metricsMock) });
-  };
-
-  const { json } = await readMetricsFromScreenshot('dummy-b64-string');
-  assert.equal(json.like_raw, '1.2万');
-  assert.equal(json.share_raw, '2500');
 });

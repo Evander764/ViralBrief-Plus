@@ -51,6 +51,13 @@ function usesMoonshotFixedParams(provider, baseUrl, model) {
     && /^kimi-k2\.(5|6)\b/.test(m);
 }
 
+function usesMiMoParams(provider, baseUrl, model) {
+  const base = String(baseUrl || '').toLowerCase();
+  const m = String(model || '').toLowerCase();
+  return provider === 'openai-compatible'
+    && (/xiaomimimo/.test(base) || /^mimo-v2(?:\.5)?-/i.test(m));
+}
+
 /**
  * 把用户填写的 Base URL 解析成真正请求的 endpoint。
  * 用户可能填根地址、/v1，也可能直接填完整接口路径；这里统一兜住。
@@ -149,6 +156,7 @@ async function callRaw({ system, user, model, temperature, maxTokens, key, cfg, 
     ];
   }
   const fixedParams = usesMoonshotFixedParams(provider, base, model);
+  const mimoParams = usesMiMoParams(provider, base, model);
   const body = {
     model,
     messages: [
@@ -163,9 +171,17 @@ async function callRaw({ system, user, model, temperature, maxTokens, key, cfg, 
   } else {
     body.temperature = temperature;
   }
+  if (mimoParams) {
+    // MiMo V2.5 系列官方示例使用 thinking 控制与 max_completion_tokens；
+    // 保持该形状，避免被兼容端点的参数差异绊住。
+    body.thinking = { type: 'disabled' };
+  }
   // 仅官方 OpenAI 强制 JSON 模式；兼容端点未必支持，靠提示词 + 兜底解析。
   if (provider === 'openai' && jsonMode) body.response_format = { type: 'json_object' };
-  if (maxTokens) body.max_tokens = maxTokens;
+  if (maxTokens) {
+    if (mimoParams) body.max_completion_tokens = maxTokens;
+    else body.max_tokens = maxTokens;
+  }
 
   const res = await fetchWithTimeout(url, {
     method: 'POST',

@@ -2,7 +2,7 @@
  * 本地服务入口。
  *  - 监听 127.0.0.1（绝不对外暴露）。
  *  - 托管浏览器仪表盘（桌面端 UI）。
- *  - 提供 /api/capture 给浏览器插件。
+ *  - 提供 /api/capture、/api/ingest、/api/agent/* 三类本地内容入口。
  *  - 启动自动调度器：接入 API Key + 开启调度后，每天自动产出日报。
  *
  * 安全：所有 /api/*（除 /api/health）都需要配对 token；仪表盘从本地服务
@@ -35,7 +35,7 @@ import { runDailyReport } from './pipeline.js';
 import { startScheduler, restartScheduler } from './scheduler.js';
 import { testConnection } from './ai/client.js';
 import { analyzeContent, suggestAccountsFromAI } from './ai/analyze.js';
-import { recognizePageState, observeVideo, readMetricsFromScreenshot } from './ai/observe.js';
+import { recognizePageState, observeVideo } from './ai/observe.js';
 import { fetchAndExtract } from './ingest/scrape.js';
 import { openExternalBrowser, openExternalBrowserUrls } from './lib/browser-open.js';
 import { accountOpenUrlsForPlatform } from './lib/account-open.js';
@@ -236,6 +236,7 @@ async function handleApi(req, res, url, segs) {
       const cfg = loadConfig();
       const windowType = body.window || cfg.schedule?.window || 'last_1_days';
       const maxTabsPerBatch = body.maxTabsPerBatch ?? cfg.rpa?.maxTabsPerBatch;
+      const includePatrolledToday = body.includePatrolledToday === true;
       const platforms = body.platform ? [body.platform] : (Array.isArray(body.platforms) && body.platforms.length ? body.platforms : ['xiaohongshu', 'douyin']);
       runCtrl = beginPatrolRun({ source: 'api', platforms });
       log.info(`正在执行 Node.js CDP 自动巡检（${platforms.join(', ')}）...`);
@@ -249,6 +250,7 @@ async function handleApi(req, res, url, segs) {
           windowType,
           platforms,
           maxTabsPerBatch,
+          includePatrolledToday,
           shouldStop: runCtrl.shouldStop,
           clientFactory: async () => {
             const c = new CDPClient();

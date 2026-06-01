@@ -190,6 +190,31 @@ test('testConnection：Kimi K2.6 兼容固定采样参数', async () => {
   assert.deepEqual(body.thinking, { type: 'disabled' });
 });
 
+test('testConnection：小米 MiMo V2.5 使用官方兼容参数', async () => {
+  saveConfig({ baseUrl: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2.5-pro' });
+  setApiKey('mimo-test-252525');
+  let seen;
+  globalThis.fetch = async (url, options) => {
+    seen = { url, headers: options.headers, body: JSON.parse(options.body) };
+    return response({ body: openAIJson('OK') });
+  };
+
+  const r = await testConnection({
+    provider: 'openai-compatible',
+    baseUrl: 'https://api.xiaomimimo.com/v1',
+    model: 'mimo-v2.5-pro',
+  });
+
+  assert.equal(r.ok, true);
+  assert.equal(r.endpoint, 'https://api.xiaomimimo.com/v1/chat/completions');
+  assert.equal(seen.url, r.endpoint);
+  assert.equal(seen.headers.authorization, 'Bearer mimo-test-252525');
+  assert.equal(seen.body.model, 'mimo-v2.5-pro');
+  assert.equal(seen.body.max_completion_tokens, 50);
+  assert.equal(seen.body.max_tokens, undefined);
+  assert.deepEqual(seen.body.thinking, { type: 'disabled' });
+});
+
 test('testConnection：模型不存在、限流、响应结构异常分别给出阶段', async () => {
   setApiKey('sk-status-444444');
   globalThis.fetch = async () => response({ status: 404, body: { error: 'model not found' } });

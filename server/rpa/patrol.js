@@ -36,6 +36,7 @@ const MAX_XHS_SCAN_CANDIDATES = 120;
 const MAX_XHS_SCROLLS = 20;
 const MAX_XHS_EMPTY_SCROLLS = 3;
 const XHS_ROW_TOLERANCE_PX = 72;
+const XHS_ROW_SCROLL_DELTA_Y = 180;
 
 export async function discoverFollowedCreators(client, opts = {}) {
   const platforms = opts.platforms || DEFAULT_PLATFORMS;
@@ -881,6 +882,7 @@ async function collectXiaohongshuItems(client, acc, homepage, progress, { maxCan
       emptyScrolls++;
       if (emptyScrolls >= MAX_XHS_EMPTY_SCROLLS) break;
       await scrollPage(client, 1);
+      resetClickPosition(accountState);
       scrolls++;
       continue;
     }
@@ -914,7 +916,8 @@ async function collectXiaohongshuItems(client, acc, homepage, progress, { maxCan
         }
         if (item?.item) items.push(item.item);
 
-        await restoreXiaohongshuHomepage(client, homepage, progress);
+        const keptHomepageState = await restoreXiaohongshuHomepage(client, homepage, progress);
+        if (!keptHomepageState) resetClickPosition(accountState);
         await client.sleep(900 + Math.random() * 700);
         await assertNotBlocked(client, 'xiaohongshu');
       }
@@ -922,6 +925,7 @@ async function collectXiaohongshuItems(client, acc, homepage, progress, { maxCan
       if (!stop && rowIndex < rows.length - 1) {
         progress('  当前行检查完成，向下滑动查看下一行');
         await scrollXiaohongshuRow(client);
+        resetClickPosition(accountState);
         scrolls++;
       }
       if (stop || seenCandidates.size >= candidateLimit) break;
@@ -929,6 +933,7 @@ async function collectXiaohongshuItems(client, acc, homepage, progress, { maxCan
 
     if (!stop && seenCandidates.size < candidateLimit) {
       await scrollPage(client, 1);
+      resetClickPosition(accountState);
       scrolls++;
     }
   }
@@ -1212,6 +1217,12 @@ function rememberClickPosition(state, candidate) {
   state.lastClickRowTop = point.rowTop;
 }
 
+function resetClickPosition(state) {
+  if (!state) return;
+  state.lastClickX = null;
+  state.lastClickRowTop = null;
+}
+
 function normalizedPublishTime(value) {
   if (!value) return null;
   return parseHumanTime(value);
@@ -1244,6 +1255,14 @@ function assessDetailPublishTime(data, windowStartISO) {
     detail: `详情页发布时间在窗口内: ${displayTime}`,
     publishTime,
     displayTime,
+  };
+}
+
+function decideAfterDetailPublishTime(platform, timeGate) {
+  const exitAccount = platform === 'douyin' && timeGate?.reason === 'out_of_window';
+  return {
+    exitAccount,
+    reason: exitAccount ? 'douyin_publish_time_before_window' : 'continue_after_detail_publish_time',
   };
 }
 
@@ -1400,7 +1419,11 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
       }
     }
 
+    const preferredPubTime = platform === 'douyin'
+      ? await readDouyinDetailPublishTime(client, progress)
+      : null;
     const raw = await extractPageRaw(client, platform);
+    if (preferredPubTime) raw.pubTime = preferredPubTime;
     const data = buildCaptureData(raw, platform);
     const finalUrl = isDetailUrl(platform, data.pageUrl) ? data.pageUrl : postUrl;
     if (openedThisAccount.has(finalUrl) && finalUrl !== postUrl) {
@@ -1416,27 +1439,35 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
     }
 
     const timeGate = assessDetailPublishTime(data, windowStartISO);
+    const publishDecision = decideAfterDetailPublishTime(platform, timeGate);
     if (timeGate.reason === 'unknown_time') {
       recordSkip(skipReasons, candidate, timeGate.reason, timeGate.detail);
       progress('  详情页未识别到发布时间，先入库等待后续复核');
     }
     if (timeGate.reason === 'out_of_window') {
       recordSkip(skipReasons, candidate, timeGate.reason, timeGate.detail);
-      progress(`  详情页发布时间超出窗口，仍先入库，巡检结束后统一筛选: ${timeGate.displayTime}`);
+      if (publishDecision.exitAccount) {
+        progress(`  抖音详情页发布时间超出窗口，保存本条后停止该账号: ${timeGate.displayTime}`);
+      } else {
+        progress(`  详情页发布时间超出窗口，仍先入库，巡检结束后统一筛选: ${timeGate.displayTime}`);
+      }
     }
     if (timeGate.action === 'continue') {
       progress(`  详情页发布时间确认在窗口内: ${timeGate.displayTime}`);
     }
     data.publishTime = timeGate.publishTime;
+    const stopAfterThisDetail = publishDecision.exitAccount;
 
     if (contentExistsByUrl(finalUrl)) {
-      progress('  详情页已采集，跳过');
+      progress(stopAfterThisDetail ? '  详情页已采集且发布时间超出窗口，停止该账号后续检查' : '  详情页已采集，跳过');
       duplicateUrl ||= finalUrl;
       duplicateItemResult ||= duplicateItem(finalUrl, timeGate.publishTime);
+      if (stopAfterThisDetail) break;
       continue;
     }
     if (isUnavailablePage(raw) || !hasCaptureSignal(data)) {
       progress(`  候选不可采，跳过: ${data.title || raw.pageUrl || postUrl}`);
+      if (stopAfterThisDetail) break;
       continue;
     }
 
@@ -1444,11 +1475,14 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
     const screenshotPath = await takeScreenshot(client, acc, platform);
     const item = saveData(acc, finalUrl, data, screenshotPath);
     if (item.duplicate) {
-      progress('  内容重复，继续检查下一条');
+      progress(stopAfterThisDetail ? '  内容重复且发布时间超出窗口，停止该账号后续检查' : '  内容重复，继续检查下一条');
       duplicateUrl ||= item.url;
+      duplicateItemResult ||= item;
+      if (stopAfterThisDetail) break;
       continue;
     }
     items.push(item);
+    if (stopAfterThisDetail) break;
   }
 
   if (items.length) return items;
@@ -1456,6 +1490,161 @@ async function patrolCandidateUrls(client, acc, platform, postCandidates, progre
   if (duplicateItemResult) return [duplicateItemResult];
   if (duplicateUrl) return [duplicateItem(duplicateUrl)];
   return [];
+}
+
+async function readDouyinDetailPublishTime(client, progress) {
+  try {
+    const state = await client.evaluate(`
+      (() => {
+        // vbp-douyin-layout-publish-time
+        const clean = (text) => String(text || '')
+          .replace(/\\s+/g, ' ')
+          .trim();
+        const textOf = (el) => clean([
+          el?.getAttribute?.('datetime'),
+          el?.getAttribute?.('aria-label'),
+          el?.getAttribute?.('title'),
+          el?.innerText || el?.textContent,
+        ].filter(Boolean).join(' '));
+        const visibleRect = (el) => {
+          if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          if (rect.width <= 3 || rect.height <= 3 || style.display === 'none' || style.visibility === 'hidden') return null;
+          if (rect.bottom < 0 || rect.top > innerHeight || rect.right < 0 || rect.left > innerWidth) return null;
+          return rect;
+        };
+        const publishTimeTextFrom = (text) => {
+          const s = clean(text)
+            .replace(/[０-９]/g, (c) => '0123456789'['０１２３４５６７８９'.indexOf(c)] || c)
+            .replace(/[．。]/g, '.');
+          if (!s) return null;
+          return s.match(/刚刚|今天(?:\\s*\\d{1,2}:\\d{2})?|昨天(?:\\s*\\d{1,2}:\\d{2})?|\\d+\\s*(?:分钟前|小时前|天前)|(?:19|20)\\d{2}\\s*(?:年|[-/.])\\s*\\d{1,2}\\s*(?:月|[-/.])\\s*\\d{1,2}\\s*(?:日|号)?(?:\\s*\\d{1,2}:\\d{2})?|\\d{1,2}\\s*(?:月|[-/])\\s*\\d{1,2}\\s*(?:日|号)?(?:\\s*\\d{1,2}:\\d{2})?/)?.[0] || null;
+        };
+        const rectsForSelectors = (selectors) => {
+          const out = [];
+          for (const selector of selectors) {
+            for (const el of document.querySelectorAll(selector)) {
+              const rect = visibleRect(el);
+              if (rect) out.push(rect);
+            }
+          }
+          return out;
+        };
+        const metricRects = rectsForSelectors([
+          '[data-e2e="video-player-digg"]',
+          '[data-e2e="video-player-comment"]',
+          '[data-e2e="video-player-collect"]',
+          '[data-e2e="video-player-share"]',
+          '[data-e2e*="digg"]',
+          '[data-e2e*="comment"]',
+          '[data-e2e*="collect"]',
+          '[data-e2e*="favorite"]',
+          '[data-e2e*="share"]',
+          '[aria-label*="点赞"]',
+          '[aria-label*="评论"]',
+          '[aria-label*="收藏"]',
+          '[aria-label*="分享"]',
+          '[aria-label*="转发"]',
+        ]);
+        const textNodes = Array.from(document.querySelectorAll('button, a, span, p, div')).slice(0, 2200);
+        for (const el of textNodes) {
+          const text = textOf(el);
+          if (!/点赞|喜欢|评论|收藏|转发|分享/.test(text) || text.length > 80) continue;
+          const rect = visibleRect(el);
+          if (rect) metricRects.push(rect);
+        }
+        const reportNodes = textNodes
+          .filter((el) => {
+            const text = textOf(el);
+            const rect = visibleRect(el);
+            return rect && /举报|投诉|report/i.test(text) && text.length <= 120;
+          })
+          .slice(0, 30);
+        const reportRects = reportNodes.map(visibleRect).filter(Boolean);
+        const videoRect = Array.from(document.querySelectorAll('video'))
+          .map(visibleRect)
+          .filter(Boolean)
+          .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0] || null;
+        const metricBand = metricRects.length ? {
+          left: Math.min(...metricRects.map((r) => r.left)),
+          right: Math.max(...metricRects.map((r) => r.right)),
+          top: Math.min(...metricRects.map((r) => r.top)),
+          bottom: Math.max(...metricRects.map((r) => r.bottom)),
+          centerY: metricRects.reduce((sum, r) => sum + r.top + r.height / 2, 0) / metricRects.length,
+        } : null;
+        const nearAny = (rect, rects, maxDx, maxDy) => {
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          let best = 0;
+          for (const other of rects) {
+            const ox = other.left + other.width / 2;
+            const oy = other.top + other.height / 2;
+            const dx = Math.abs(cx - ox);
+            const dy = Math.abs(cy - oy);
+            if (dx <= maxDx && dy <= maxDy) best = Math.max(best, 100 - Math.round(dx / 6) - Math.round(dy / 3));
+          }
+          return Math.max(0, best);
+        };
+        const narrowText = (text) => {
+          const idx = String(text || '').search(/发布时间|发布于|发布日期|举报|投诉|report/i);
+          if (idx < 0) return clean(text).slice(0, 260);
+          return clean(text).slice(Math.max(0, idx - 80), idx + 220);
+        };
+        const candidates = [];
+        const pushCandidate = (el, baseScore = 0, allowLongText = false) => {
+          const rect = visibleRect(el);
+          if (!rect) return;
+          const rawText = textOf(el);
+          if (!rawText || (!allowLongText && rawText.length > 220)) return;
+          const text = allowLongText ? narrowText(rawText) : rawText;
+          const time = publishTimeTextFrom(text);
+          if (!time) return;
+          let score = baseScore;
+          if (/发布时间|发布于|发布日期/.test(text)) score += 130;
+          if (/发布|时间|日期/.test(text)) score += 45;
+          if (/举报|投诉|report/i.test(text)) score += 45;
+          score += nearAny(rect, reportRects, 520, 110);
+          if (metricBand) {
+            const cy = rect.top + rect.height / 2;
+            if (Math.abs(cy - metricBand.centerY) <= 120) score += 40;
+            if (rect.left >= metricBand.right - 40) score += 45;
+            if (rect.top >= metricBand.top - 80 && rect.top <= metricBand.bottom + 160) score += 25;
+          }
+          if (videoRect) {
+            if (rect.top >= videoRect.bottom - 100 && rect.top <= videoRect.bottom + 280) score += 35;
+            if (rect.left >= videoRect.left + videoRect.width * 0.45 && rect.left <= videoRect.right + 260) score += 25;
+          }
+          if (rect.left > innerWidth * 0.35 && rect.top > innerHeight * 0.4) score += 12;
+          candidates.push({ time, score, text: text.slice(0, 180) });
+        };
+        const publishNodes = Array.from(document.querySelectorAll('time, [datetime], [class*="time"], [class*="date"], [class*="publish"], span, p, div')).slice(0, 2200);
+        for (const report of reportNodes) {
+          for (let el = report, depth = 0; el && el !== document.body && depth < 5; el = el.parentElement, depth++) {
+            pushCandidate(el, 120 - depth * 14, true);
+          }
+          for (const sibling of [report.previousElementSibling, report.nextElementSibling].filter(Boolean)) {
+            pushCandidate(sibling, 110, true);
+          }
+        }
+        for (const node of publishNodes) {
+          const text = textOf(node);
+          const explicit = /发布时间|发布于|发布日期/.test(text);
+          pushCandidate(node, explicit ? 150 : 10, explicit);
+        }
+        candidates.sort((a, b) => b.score - a.score);
+        const best = candidates[0] || null;
+        return best && best.score >= 40 ? best : null;
+      })()
+    `);
+    const raw = typeof state === 'string' ? state : state?.time;
+    if (!raw || !normalizedPublishTime(raw)) return null;
+    progress(`  已先识别抖音发布时间: ${raw}`);
+    return raw;
+  } catch (e) {
+    progress(`  抖音发布时间预识别失败，改用详情提取兜底: ${e.message}`);
+    return null;
+  }
 }
 
 async function pauseDouyinVideo(client, progress) {
@@ -1615,22 +1804,42 @@ function postLinksScript(platform, targetUrl = null) {
         return Math.round(num * unit);
       };
       const parseHumanTime = (raw) => {
-        const str = clean(raw);
+        const str = clean(raw).replace(/[０-９]/g, (c) => '0123456789'['０１２３４５６７８９'.indexOf(c)] || c).replace(/[．。]/g, '.');
         if (!str) return null;
         const now = new Date();
+        const dateToISO = (year, month, day, hour = 0, minute = 0) => {
+          const y = Number(year);
+          const m = Number(month);
+          const d = Number(day);
+          const h = Number(hour);
+          const min = Number(minute);
+          if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+          if (m < 1 || m > 12 || d < 1 || d > 31 || h < 0 || h > 23 || min < 0 || min > 59) return null;
+          return new Date(y, m - 1, d, h, min).toISOString();
+        };
         if (str.includes('刚刚')) return now.toISOString();
+        if (str.includes('今天')) {
+          const hm = str.match(/(\\d{1,2}):(\\d{2})/);
+          return new Date(now.getFullYear(), now.getMonth(), now.getDate(), Number(hm?.[1] || 0), Number(hm?.[2] || 0)).toISOString();
+        }
         const min = str.match(/(\\d+)\\s*分钟前/);
         if (min) return new Date(now.getTime() - Number(min[1]) * 60000).toISOString();
         const hour = str.match(/(\\d+)\\s*小时前/);
         if (hour) return new Date(now.getTime() - Number(hour[1]) * 3600000).toISOString();
         const day = str.match(/(\\d+)\\s*天前/);
         if (day) return new Date(now.getTime() - Number(day[1]) * 86400000).toISOString();
-        if (str.includes('昨天')) return new Date(now.getTime() - 86400000).toISOString();
-        if (/^\\d{1,2}-\\d{1,2}$/.test(str)) return new Date(\`\${now.getFullYear()}-\${str}\`).toISOString();
+        if (str.includes('昨天')) {
+          const hm = str.match(/(\\d{1,2}):(\\d{2})/);
+          return new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, Number(hm?.[1] || 0), Number(hm?.[2] || 0)).toISOString();
+        }
+        let m = str.match(/((?:19|20)\\d{2})\\s*(?:年|[-/.])\\s*(\\d{1,2})\\s*(?:月|[-/.])\\s*(\\d{1,2})\\s*(?:日|号)?(?:\\s+(\\d{1,2}):(\\d{2}))?/);
+        if (m) return dateToISO(m[1], m[2], m[3], m[4] || 0, m[5] || 0);
+        m = str.match(/(?:^|[^\\d])(\\d{1,2})\\s*(?:月|[-/])\\s*(\\d{1,2})\\s*(?:日|号)?(?:\\s+(\\d{1,2}):(\\d{2}))?(?:$|[^\\d])/);
+        if (m) return dateToISO(now.getFullYear(), m[1], m[2], m[3] || 0, m[4] || 0);
         const d = new Date(str);
         return Number.isNaN(d.getTime()) ? null : d.toISOString();
       };
-      const firstTimeText = (text) => clean(text).match(/刚刚|\\d+\\s*(?:分钟前|小时前|天前)|昨天|\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}|\\d{1,2}[-/]\\d{1,2}/)?.[0] || null;
+      const firstTimeText = (text) => clean(text).match(/刚刚|今天(?:\\s*\\d{1,2}:\\d{2})?|昨天(?:\\s*\\d{1,2}:\\d{2})?|\\d+\\s*(?:分钟前|小时前|天前)|(?:19|20)\\d{2}\\s*(?:年|[-/.])\\s*\\d{1,2}\\s*(?:月|[-/.])\\s*\\d{1,2}\\s*(?:日|号)?|\\d{1,2}\\s*(?:月|[-/])\\s*\\d{1,2}\\s*(?:日|号)?/)?.[0] || null;
       const detailKey = (href) => {
         try {
           const u = new URL(href, location.href);
@@ -1683,6 +1892,14 @@ function postLinksScript(platform, targetUrl = null) {
         link.closest('article, li, section, [class*="note"], [class*="feed"], [class*="card"], [class*="item"], [class*="cover"], [class*="video"], [class*="post"], [class*="aweme"], [data-e2e*="video"]')
         || link
       );
+      const xhsCardElements = () => {
+        const selectors = [
+          'section.note-item',
+          '[class~="note-item"]',
+          '[class*="note-item"]',
+        ];
+        return [...new Set(selectors.flatMap((selector) => [...document.querySelectorAll(selector)]))];
+      };
       const parseColor = (value) => {
         const s = String(value || '').trim();
         let m = s.match(/rgba?\\(\\s*(\\d+(?:\\.\\d+)?)\\s*,\\s*(\\d+(?:\\.\\d+)?)\\s*,\\s*(\\d+(?:\\.\\d+)?)/i);
@@ -1749,28 +1966,6 @@ function postLinksScript(platform, targetUrl = null) {
         }
         return false;
       };
-      const findLikeRaw = (card) => {
-        if (!card) return null;
-        const selectors = [
-          '[aria-label*="点赞"]',
-          '[aria-label*="赞"]',
-          '[title*="点赞"]',
-          '[title*="赞"]',
-          '[class*="like"] [class*="count"]',
-          '[class*="like"]',
-          '[class*="liked"]',
-          '[class*="赞"]',
-        ];
-        for (const selector of selectors) {
-          for (const el of card.querySelectorAll(selector)) {
-            const text = clean([el.getAttribute('aria-label'), el.getAttribute('title'), el.innerText || el.textContent].filter(Boolean).join(' '));
-            const m = text.match(/(?:点赞|赞|like)?\\s*[:：]?\\s*([\\d.,]+\\s*[万千wkWK]?\\+?)/i)
-              || text.match(/([\\d.,]+\\s*[万千wkWK]?\\+?)\\s*(?:点赞|赞|like)/i);
-            if (m) return m[1];
-          }
-        }
-        return null;
-      };
       const findPublishRaw = (card) => {
         if (!card) return null;
         for (const el of card.querySelectorAll('time, [datetime], [class*="time"], [class*="date"]')) {
@@ -1800,13 +1995,42 @@ function postLinksScript(platform, targetUrl = null) {
       };
       const out = [];
       const seen = new Set();
+      const pushXhsCard = (card) => {
+        const rect = visibleRect(card);
+        if (!rect) return;
+        if (rect.width > innerWidth * 0.92 || rect.height > innerHeight * 0.95) return;
+        const link = [...card.querySelectorAll('a[href]')]
+          .find((item) => isDetail(toAbs(item.getAttribute('href') || item.href)));
+        if (!link) return;
+        const href = toAbs(link.getAttribute('href') || link.href);
+        const key = detailKey(href);
+        if (!key || seen.has(key)) return;
+        if (targetKey && key !== targetKey) return;
+        const cardText = clean(card.innerText || card.textContent || link.innerText || link.textContent || '').slice(0, 800);
+        const isPinned = isPinnedContent(card, rect);
+        const titleRaw = findTitleRaw(card, link, cardText);
+        seen.add(key);
+        out.push({
+          url: href,
+          rect,
+          viewport: { width: innerWidth, height: innerHeight },
+          isPinned,
+          pinRaw: isPinned ? '置顶' : null,
+          titleRaw,
+          title: titleRaw,
+          publishRaw: findPublishRaw(card),
+          publishTime: parseHumanTime(findPublishRaw(card)),
+          cardText,
+        });
+      };
       const push = (link, allowWithoutRect = false) => {
         const href = toAbs(link.getAttribute('href') || link.href);
         if (!isDetail(href)) return;
         const key = detailKey(href);
         if (!key || seen.has(key)) return;
         if (targetKey && key !== targetKey) return;
-        const rect = findCardRect(link);
+        const linkRect = visibleRect(link);
+        const rect = linkRect ? findCardRect(link) : null;
         const card = findCardElement(link);
         const cardText = clean(card?.innerText || card?.textContent || link.innerText || link.textContent || '').slice(0, 800);
         const isPinned = isPinnedContent(card, rect || visibleRect(card) || visibleRect(link));
@@ -1814,7 +2038,6 @@ function postLinksScript(platform, targetUrl = null) {
         const pinRaw = isPinned ? '置顶' : null;
         if (platform === 'xiaohongshu') {
           if (!rect && !allowWithoutRect) return;
-          const likeRaw = findLikeRaw(card);
           const publishRaw = findPublishRaw(card);
           seen.add(key);
           out.push({
@@ -1825,8 +2048,6 @@ function postLinksScript(platform, targetUrl = null) {
             pinRaw,
             titleRaw,
             title: titleRaw,
-            likeRaw,
-            likeCount: parseCount(likeRaw),
             publishRaw,
             publishTime: parseHumanTime(publishRaw),
             cardText,
@@ -1847,6 +2068,12 @@ function postLinksScript(platform, targetUrl = null) {
           cardText,
         });
       };
+      if (platform === 'xiaohongshu') {
+        for (const card of xhsCardElements()) {
+          pushXhsCard(card);
+        }
+        if (out.length > 0 || targetKey) return out;
+      }
       const links = [...document.querySelectorAll('a[href]')];
       for (const a of links) {
         if (visibleRect(a)) push(a, false);
@@ -2020,6 +2247,95 @@ async function extractPageRaw(client, platform) {
         }
         return found.slice(0, 24);
       };
+      const visibleRect = (el) => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        if (rect.width <= 4 || rect.height <= 4 || style.display === 'none' || style.visibility === 'hidden') return null;
+        if (rect.bottom < 0 || rect.top > innerHeight || rect.right < 0 || rect.left > innerWidth) return null;
+        return rect;
+      };
+      const publishTimeTextFrom = (text) => {
+        const s = cleanBlock(text).replace(/[０-９]/g, (c) => '0123456789'['０１２３４５６７８９'.indexOf(c)] || c).replace(/[．。]/g, '.');
+        if (!s) return null;
+        return s.match(/刚刚|今天(?:\\s*\\d{1,2}:\\d{2})?|昨天(?:\\s*\\d{1,2}:\\d{2})?|\\d+\\s*(?:分钟前|小时前|天前)|(?:19|20)\\d{2}\\s*(?:年|[-/.])\\s*\\d{1,2}\\s*(?:月|[-/.])\\s*\\d{1,2}\\s*(?:日|号)?(?:\\s*\\d{1,2}:\\d{2})?|\\d{1,2}\\s*(?:月|[-/])\\s*\\d{1,2}\\s*(?:日|号)?(?:\\s*\\d{1,2}:\\d{2})?/)?.[0] || null;
+      };
+      const findDouyinVisiblePublishTime = () => {
+        // vbp-douyin-visible-publish-time: 抖音详情页常把日期放在“举报”附近，优先读可见文本。
+        const directText = getText([
+          'span[data-e2e="video-author-publishtime"]',
+          '[data-e2e*="publish"]',
+          '.video-publish-time',
+          '[class*="publish"]',
+          '[class*="time"]',
+          'time',
+        ]);
+        const direct = publishTimeTextFrom(directText) || document.querySelector('time')?.dateTime || null;
+        if (direct) return direct;
+
+        const textFor = (el) => cleanBlock([
+          el?.getAttribute?.('datetime'),
+          el?.getAttribute?.('aria-label'),
+          el?.getAttribute?.('title'),
+          el?.innerText || el?.textContent,
+        ].filter(Boolean).join(' '));
+        const reportNodes = Array.from(document.querySelectorAll('button, a, div, span, p'))
+          .filter((el) => {
+            const rect = visibleRect(el);
+            const text = textFor(el);
+            if (!rect || !/举报|投诉|report/i.test(text)) return false;
+            if (text.length > 120) return false;
+            if (rect.width > innerWidth * 0.65 && rect.height > innerHeight * 0.35) return false;
+            return true;
+          })
+          .slice(0, 20);
+        const reportRects = reportNodes.map(visibleRect).filter(Boolean);
+        const nearReportScore = (rect) => {
+          if (!rect || reportRects.length === 0) return 0;
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          let best = 0;
+          for (const rr of reportRects) {
+            const rx = rr.left + rr.width / 2;
+            const ry = rr.top + rr.height / 2;
+            const dx = Math.abs(cx - rx);
+            const dy = Math.abs(cy - ry);
+            if (dx <= 420 && dy <= 96) best = Math.max(best, 140 - Math.round(dx / 5) - Math.round(dy / 3));
+          }
+          return Math.max(0, best);
+        };
+        const candidates = [];
+        const pushCandidate = (el, baseScore = 0, allowLongText = false) => {
+          const rect = visibleRect(el);
+          if (!rect) return;
+          const text = textFor(el);
+          if (!text || (!allowLongText && text.length > 180)) return;
+          const time = publishTimeTextFrom(text);
+          if (!time) return;
+          let score = baseScore + nearReportScore(rect);
+          if (rect.left > innerWidth * 0.35 && rect.top > innerHeight * 0.35) score += 18;
+          if (/发布|时间|日期/.test(text)) score += 25;
+          if (/举报|投诉|report/i.test(text)) score += 35;
+          candidates.push({ time, score });
+        };
+
+        for (const report of reportNodes) {
+          for (let el = report, depth = 0; el && el !== document.body && depth < 4; el = el.parentElement, depth++) {
+            pushCandidate(el, 100 - depth * 12, true);
+          }
+          for (const sibling of [report.previousElementSibling, report.nextElementSibling].filter(Boolean)) {
+            pushCandidate(sibling, 95, true);
+          }
+        }
+        const nodes = Array.from(document.querySelectorAll('time, [datetime], [class*="time"], [class*="date"], [class*="publish"], span, p, div')).slice(0, 1600);
+        for (const node of nodes) {
+          const name = String(node.tagName || '').toLowerCase();
+          const base = name === 'time' || node.hasAttribute?.('datetime') ? 90 : 20;
+          pushCandidate(node, base, false);
+        }
+        candidates.sort((a, b) => b.score - a.score);
+        return candidates[0]?.time || null;
+      };
       const scripts = [...document.querySelectorAll('script:not([src]), script[type="application/json"]')]
         .map((s) => s.textContent || '')
         .filter((s) => /(digg|share|comment|collect|liked|interact|aweme|note|favorite)/i.test(s))
@@ -2065,7 +2381,7 @@ async function extractPageRaw(client, platform) {
           title,
           bodyText,
           hashtags: extractHashtags([bodyText, title, fullPageText].filter(Boolean).join('\\n')),
-          pubTime: getText(['span[data-e2e="video-author-publishtime"]', '.video-publish-time', 'time']) || document.querySelector('time')?.dateTime || null,
+          pubTime: findDouyinVisiblePublishTime(),
           contentType: 'video',
           coverUrl,
           durationText: getText(['[class*="duration"]', '[data-e2e*="duration"]']) || readableVideoDuration(),
@@ -2256,17 +2572,48 @@ function saveData(acc, url, data, screenshotPath) {
 
 function parseHumanTime(str) {
   if (!str) return null;
+  const text = String(str)
+    .replace(/[０-９]/g, (c) => '0123456789'['０１２３４５６７８９'.indexOf(c)] || c)
+    .replace(/[．。]/g, '.')
+    .replace(/\s+/g, ' ')
+    .trim();
   const now = new Date();
-  if (str.includes('刚刚')) return now.toISOString();
-  const minMatch = str.match(/(\d+)\s*分钟前/);
+  const dateToISO = (year, month, day, hour = 0, minute = 0) => {
+    const y = Number(year);
+    const m = Number(month);
+    const d = Number(day);
+    const h = Number(hour);
+    const min = Number(minute);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+    if (m < 1 || m > 12 || d < 1 || d > 31 || h < 0 || h > 23 || min < 0 || min > 59) return null;
+    return new Date(y, m - 1, d, h, min).toISOString();
+  };
+  if (text.includes('刚刚')) return now.toISOString();
+  if (text.includes('今天')) {
+    const hm = text.match(/(\d{1,2}):(\d{2})/);
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate(), Number(hm?.[1] || 0), Number(hm?.[2] || 0)).toISOString();
+  }
+  const minMatch = text.match(/(\d+)\s*分钟前/);
   if (minMatch) return new Date(now.getTime() - Number(minMatch[1]) * 60000).toISOString();
-  const hrMatch = str.match(/(\d+)\s*小时前/);
+  const hrMatch = text.match(/(\d+)\s*小时前/);
   if (hrMatch) return new Date(now.getTime() - Number(hrMatch[1]) * 3600000).toISOString();
-  const dayMatch = str.match(/(\d+)\s*天前/);
+  const dayMatch = text.match(/(\d+)\s*天前/);
   if (dayMatch) return new Date(now.getTime() - Number(dayMatch[1]) * 86400000).toISOString();
-  if (str.includes('昨天')) return new Date(now.getTime() - 86400000).toISOString();
-  if (/^\d{2}-\d{2}$/.test(str)) return new Date(`${now.getFullYear()}-${str}`).toISOString();
-  const d = new Date(str);
+  if (text.includes('昨天')) {
+    const hm = text.match(/(\d{1,2}):(\d{2})/);
+    return new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - 1,
+      Number(hm?.[1] || 0),
+      Number(hm?.[2] || 0),
+    ).toISOString();
+  }
+  let m = text.match(/((?:19|20)\d{2})\s*(?:年|[-/.])\s*(\d{1,2})\s*(?:月|[-/.])\s*(\d{1,2})\s*(?:日|号)?(?:\s*(\d{1,2}):(\d{2}))?/);
+  if (m) return dateToISO(m[1], m[2], m[3], m[4] || 0, m[5] || 0);
+  m = text.match(/(?:^|[^\d])(\d{1,2})\s*(?:月|[-/])\s*(\d{1,2})\s*(?:日|号)?(?:\s*(\d{1,2}):(\d{2}))?(?:$|[^\d])/);
+  if (m) return dateToISO(now.getFullYear(), m[1], m[2], m[3] || 0, m[4] || 0);
+  const d = new Date(text);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
@@ -2307,7 +2654,7 @@ async function scrollPage(client, times) {
 
 async function scrollXiaohongshuRow(client) {
   await executeHumanActions(client, [
-    { type: 'scroll', delta_y: 360, x: 640, y: 620 },
+    { type: 'scroll', delta_y: XHS_ROW_SCROLL_DELTA_Y, x: 640, y: 620 },
     { type: 'wait', milliseconds: 360 },
   ], { width: 1600, height: 1200 });
 }

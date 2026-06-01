@@ -160,7 +160,8 @@ function mergePatrolSummary(summary, res) {
   return summary;
 }
 
-async function runPatrolStages(progressText = null) {
+async function runPatrolStages(progressText = null, options = {}) {
+  const includePatrolledToday = options.includePatrolledToday === true;
   const summary = { total: 0, success: 0, failed: 0, newItems: 0, duplicates: 0, discovered: 0, skippedToday: 0, stopped: false, maxTabsPerBatch: 0 };
   for (const stage of [
     { platform: 'xiaohongshu', label: '小红书' },
@@ -169,7 +170,7 @@ async function runPatrolStages(progressText = null) {
     if (progressText) progressText.textContent = `正在巡检${stage.label}账号...`;
     const res = await api('/patrol/run', {
       method: 'POST',
-      body: JSON.stringify({ platform: stage.platform }),
+      body: JSON.stringify({ platform: stage.platform, includePatrolledToday }),
     });
     if (res.error) throw new Error(res.error);
     mergePatrolSummary(summary, res);
@@ -197,7 +198,7 @@ async function generateReport(win, msgEl, skipRpa = false, options = {}) {
     let patrolSummary = null;
     if (!skipRpa) {
       setPatrolRunning(true, btn);
-      patrolSummary = await runPatrolStages(progressText);
+      patrolSummary = await runPatrolStages(progressText, { includePatrolledToday: true });
       setPatrolRunning(false, btn);
       if (patrolSummary.stopped) {
         msgEl.textContent = '已停止巡检，未生成日报。';
@@ -438,7 +439,7 @@ $('#candRunRpa').addEventListener('click', async (e) => {
   try {
     setPatrolRunning(true, btn);
     toast('正在启动已登录 Chrome，先发起小红书巡检 API，再发起抖音巡检 API...', 'ok');
-    const res = await runPatrolStages();
+    const res = await runPatrolStages(null, { includePatrolledToday: true });
     const tabInfo = res.maxTabsPerBatch ? `，每轮 ${res.maxTabsPerBatch} 个账号标签` : '';
     toast(`${res.stopped ? '自动巡检已停止' : '自动巡检完成'}：巡检账号 ${res.total || 0} 个，新增 ${res.newItems || 0} 条，今日跳过 ${res.skippedToday || 0} 个${tabInfo}`, res.stopped ? '' : 'ok');
     loadCandidates();
@@ -914,7 +915,7 @@ $('#rpGenerate').addEventListener('click', async () => {
 const VENDORS = {
   openai:      { name: 'OpenAI（官方）',        baseUrl: '',                                              models: ['gpt-4o-mini', 'gpt-4o'],                apply: 'https://platform.openai.com/api-keys' },
   deepseek:    { name: 'DeepSeek 深度求索',     baseUrl: 'https://api.deepseek.com',                      models: ['deepseek-chat', 'deepseek-reasoner'],   apply: 'https://platform.deepseek.com/api_keys' },
-  xiaomi:      { name: '小米 MiMo',             baseUrl: 'https://api.xiaomimimo.com/v1',                 models: ['mimo-v2-flash', 'mimo-v2-pro'],          apply: 'https://platform.xiaomimimo.com' },
+  xiaomi:      { name: '小米 MiMo',             baseUrl: 'https://api.xiaomimimo.com/v1',                 models: ['mimo-v2.5-pro', 'mimo-v2.5', 'mimo-v2-flash'], apply: 'https://platform.xiaomimimo.com' },
   moonshot:    { name: '月之暗面 Kimi',         baseUrl: 'https://api.moonshot.cn/v1',                    models: ['kimi-k2.6', 'kimi-k2.5', 'kimi-k2-0905-preview', 'moonshot-v1-8k'], apply: 'https://platform.moonshot.cn/console/api-keys' },
   zhipu:       { name: '智谱 GLM',              baseUrl: 'https://open.bigmodel.cn/api/paas/v4',          models: ['glm-4-flash', 'glm-4-plus'],            apply: 'https://open.bigmodel.cn/usercenter/apikeys' },
   qwen:        { name: '通义千问（阿里百炼）',   baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-plus', 'qwen-turbo', 'qwen-max'], apply: 'https://bailian.console.aliyun.com/?apiKey=1' },

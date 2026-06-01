@@ -3,7 +3,7 @@ name: rpa-report
 description: |
   RPA 驱动的全链路爆款选题日报生成。
   通过 Chrome DevTools Protocol 控制真实浏览器，逐账号跳转主页提取最新内容数据并截图，
-  然后自动调用 AI 进行分析聚类，最终输出包含母题/标题/建议的完整日报。
+  然后自动调用 AI 做定性摘录和内容归类，最终输出包含母题/标题/建议的完整日报。
 ---
 
 # RPA 驱动的全链路日报生成 Skill
@@ -17,8 +17,8 @@ description: |
 3. **截图存档** → 对每个详情页自动截图，存入 `data/screenshots/`
 4. **数据入库** → 采集的数据通过去重机制写入本地 SQLite 数据库
 5. **确定性筛选** → 巡检全部结束后按窗口、账号池、确认状态和平台必需指标筛出达标内容
-6. **AI 分析** → 对达标内容逐条调用 AI 进行深度分析（结果按 content_id 永久缓存）
-7. **生成日报** → AI 聚类出母题、可复用标题、商业建议，渲染为 Markdown/HTML/CSV
+6. **AI 摘录** → 对达标内容逐条调用 AI 做结构化摘录（结果按 content_id 永久缓存）
+7. **生成日报** → AI 归类出母题、可复用标题、商业建议，渲染为 Markdown/HTML/CSV
 
 ## 前置条件
 
@@ -31,13 +31,13 @@ description: |
 
 ### 方式一：网页 UI（推荐）
 
-1. 启动应用：`npm start` 或双击 `Viral Brief.app`
+1. 启动应用：`npm start` 或双击 `Viral Brief Plus.app`
 2. 打开 `http://127.0.0.1:8787`
 3. 在「概览」页面：
    - 回溯天数使用「设置」里的默认回溯天数
    - 勾选 ✅「先自动采集（RPA）」
    - 点击「立即生成日报」
-4. 系统会自动完成 小红书巡检 API → 抖音巡检 API → 候选/内容库刷新 → AI 分析 → 日报输出 的全流程
+4. 系统会自动完成 小红书巡检 API → 抖音巡检 API → 候选/内容库刷新 → AI 摘录/归类 → 日报输出 的全流程
 
 ### 方式二：API 调用
 
@@ -65,6 +65,8 @@ curl -X POST http://127.0.0.1:8787/api/patrol/stop \
   -H "x-vb-token: YOUR_PAIRING_TOKEN"
 ```
 
+说明：网页 UI 的主路径是先分两次调用 `/api/patrol/run`（小红书 → 抖音），再用 `skipRpa:true` 调 `/api/reports/generate` 出报；`/api/reports/generate` 不带 `skipRpa` 仍保留为脚本/兼容调用，会在服务端 pipeline 内按小红书、抖音两个阶段自跑 RPA。
+
 ### 方式三：命令行
 
 ```bash
@@ -84,7 +86,7 @@ npm run patrol
 | CDP 客户端 | `server/rpa/cdp.js` | 零依赖 WebSocket 封装，提供 `goto / evaluate / screenshot / waitForSelector` |
 | Chrome 启动器 | `server/rpa/chrome-launcher.js` | 管理 Chrome 进程生命周期：启动、端口就绪检测、关闭 |
 | 巡检模块 | `server/rpa/patrol.js` | 平台级采集逻辑（抖音/小红书），返回结构化结果 |
-| Pipeline | `server/pipeline.js` | 编排全流程：RPA → 筛选 → AI 分析 → 渲染 → 导出 |
+| Pipeline | `server/pipeline.js` | 编排全流程：RPA → 筛选 → AI 摘录/归类 → 渲染 → 导出 |
 
 ### 数据流向
 
@@ -99,15 +101,15 @@ pipeline.getEligible() → 确定性筛选（平台必需指标）
   ↓
 analyzeContent() → AI API → ai_analysis 表（缓存）
   ↓
-generateReportData() → AI 趋势聚类
+generateReportData() → AI 内容归类
   ↓
 renderMarkdown/Html/Csv → data/exports/
 ```
 
 ### 关键不变量
 
-1. **所有数字来自数据库，不来自 AI** — 日报中的点赞/转发数由 RPA 采集或人工确认，AI 只提供定性内容
-2. **RPA 失败不阻断日报** — 如果浏览器连接失败，pipeline 会降级使用已有数据继续
+1. **所有互动数字来自数据库，不来自 AI** — 日报中的点赞/转发/收藏/评论由 RPA 采集或人工确认，AI 只提供定性内容
+2. **RPA 失败不阻断日报管线** — 通过 `/api/reports/generate` 或 `runDailyReport()` 自跑 RPA 时，如果浏览器连接失败，pipeline 会降级使用已有数据继续；单独调用 `/api/patrol/run` 仍会把巡检错误返回给调用方
 3. **截图作为证据链** — 每次采集自动截图，存入 `data/screenshots/`，与内容记录关联
 4. **采集结果按证据强度入库** — 稳定 RPA 证据可直接 `confirmed`，弱证据/缺数仍进「今日候选」等待人工确认
 5. **置顶内容绝不进入详情页** — 小红书左上角红色“置顶”、抖音左上角黄色“置顶”必须由 DOM 位置和颜色规则先过滤；不要让 AI/API 模型判断，也不要点进详情页后再补救
@@ -168,7 +170,7 @@ renderMarkdown/Html/Csv → data/exports/
 | "无法连接到浏览器" | Chrome 未启动或端口被占用 | 确保 9222 端口未被其他进程占用 |
 | 页面加载超时 | 网络慢或页面结构变化 | 增大 `cdp.goto()` 的超时时间 |
 | 指标提取为 null | 平台改版导致 CSS 选择器失效 | 更新 `patrol.js` 中的选择器 |
-| Chrome 启动后无页面 | user-data-dir 损坏 | 删除 `data/chrome-profile` 目录重试 |
+| Chrome 启动后无页面 | user-data-dir 损坏 | 删除当前数据目录下的 `chrome-profile` 目录重试；打包 App 默认在 `~/Library/Application Support/Viral Brief Plus/chrome-profile`，开发启动默认在 `data/chrome-profile` |
 | 登录态失效 | Cookie 过期 | 手动在 RPA Chrome 中重新登录 |
 
 ## 扩展指南

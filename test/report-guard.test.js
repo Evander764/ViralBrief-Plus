@@ -75,6 +75,30 @@ test('validateReportData 拒绝：引用不存在的编号', () => {
   assert.match(String(validateReportData(json, { items, isFewShot: true })), /C9/);
 });
 
+test('validateReportData 拒绝：少样本输出结论性措辞', () => {
+  const json = {
+    daily_summary: '基于 2 条达标内容的观察：这些内容呈现出共同方向。',
+    top_topic_clusters: [
+      { cluster_name: '逆袭', why_it_spread: '可能原因：标题制造反差', representative_content_ids: ['C1'], rewrite_titles: [] },
+    ],
+    recommended_actions: ['建议方向：承接成长类课程'],
+    data_warnings: ['样本量极少，仅作参考'],
+  };
+  assert.match(String(validateReportData(json, { items, isFewShot: true })), /呈现出/);
+});
+
+test('validateReportData 允许少样本 data_warnings 只提示方向判断不足', () => {
+  const json = {
+    daily_summary: '基于 2 条达标内容的观察：两条都靠强钩子标题。',
+    top_topic_clusters: [
+      { cluster_name: '逆袭叙事', why_it_spread: '可能原因：制造反差', representative_content_ids: ['C1'], rewrite_titles: [] },
+    ],
+    recommended_actions: ['建议方向：承接成长类课程'],
+    data_warnings: ['样本量极少（仅 2 条），不做方向结论。'],
+  };
+  assert.equal(validateReportData(json, { items, isFewShot: true }), null);
+});
+
 test('normalizeReportData 确定性补认知前缀，且幂等', () => {
   const json = {
     top_topic_clusters: [

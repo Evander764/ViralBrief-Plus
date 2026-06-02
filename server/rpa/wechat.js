@@ -132,6 +132,7 @@ function ingestWechatDetail(acc, platform, detail, screenshotPath) {
  * @returns {Promise<boolean>} 是否点击成功
  */
 async function tap(session, description, progress, { afterMs = 600, minConfidence = 0.45 } = {}) {
+  try { await activateWeChat(); } catch { /* runWechatPatrol 的前置检查会报告微信缺失 */ }
   const shot = await session.screenshot();
   let hit;
   try {
@@ -153,6 +154,7 @@ async function tap(session, description, progress, { afterMs = 600, minConfidenc
 
 /** 截当前详情 → 视觉读数 → 入库。返回 { result, detail, score } 或 null。 */
 async function captureCurrentDetail(session, acc, platform, progress) {
+  try { await activateWeChat(); } catch { /* runWechatPatrol 的前置检查会报告微信缺失 */ }
   const shot = await session.screenshot();
   let detail;
   try {
@@ -345,12 +347,30 @@ export async function runWechatPatrol(opts = {}) {
     // 关键：视频号入口是「蝴蝶 / 横向 W 翅膀」形状的图标（视频号官方 logo），
     // 位于左侧竖排里「朋友圈」(相机光圈状圆形图标) 的正下方。
     // 千万别点成上方的光圈图标(那是看一看/朋友圈，会打开很像的推荐信息流)。
-    await tap(session, '微信主窗口最左侧竖排图标里的「视频号」入口：一个像蝴蝶、横向 W 翅膀形状的图标（视频号官方 logo），就在相机光圈状的「朋友圈」图标正下方。不要点光圈图标。', progress, { afterMs: 2500 });
+    const openedChannels = await tap(session, '微信主窗口最左侧竖排图标里的「视频号」入口：一个像蝴蝶、横向 W 翅膀形状的图标（视频号官方 logo），就在相机光圈状的「朋友圈」图标正下方。不要点光圈图标。', progress, { afterMs: 2500 });
+    if (!openedChannels) {
+      result.failed = pending.length;
+      result.details = pending.map((a) => ({ account: a.nickname, error: '未能打开视频号入口' }));
+      progress('未能打开视频号入口，停止视频号巡检');
+      return result;
+    }
     // 首进关掉自动播放的第一个视频
     await session.pressEscape();
     await session.sleep(500);
-    await tap(session, '视频号窗口右上角那个小人一样的按钮', progress, { afterMs: 1500 });
-    await tap(session, '左侧一列里的「关注」入口', progress, { afterMs: 1500 });
+    const openedProfile = await tap(session, '视频号窗口右上角那个小人一样的按钮', progress, { afterMs: 1500 });
+    if (!openedProfile) {
+      result.failed = pending.length;
+      result.details = pending.map((a) => ({ account: a.nickname, error: '未能进入视频号个人入口' }));
+      progress('未能进入视频号个人入口，停止视频号巡检');
+      return result;
+    }
+    const openedFollow = await tap(session, '左侧一列里的「关注」入口', progress, { afterMs: 1500 });
+    if (!openedFollow) {
+      result.failed = pending.length;
+      result.details = pending.map((a) => ({ account: a.nickname, error: '未能打开视频号关注列表' }));
+      progress('未能打开视频号关注列表，停止视频号巡检');
+      return result;
+    }
   }
 
   const windowStartISO = new Date(Date.now() - windowDays(windowType) * 86400_000).toISOString();

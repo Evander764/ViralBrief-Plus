@@ -307,8 +307,11 @@ export async function runWechatPatrol(opts = {}) {
 
   // 进入视频号关注总览（公众号走主窗口搜索，无需此步）。
   if (platform === 'wechat_channels') {
-    progress('进入视频号关注总览：朋友圈下方视频号入口 → 右上小人 → 赞和收藏 → 关注');
-    await tap(session, '微信左侧朋友圈图标下面的「视频号」入口按钮', progress, { afterMs: 2500 });
+    progress('进入视频号关注总览：视频号(蝴蝶/W 图标)入口 → 右上小人 → 赞和收藏 → 关注');
+    // 关键：视频号入口是「蝴蝶 / 横向 W 翅膀」形状的图标（视频号官方 logo），
+    // 位于左侧竖排里「朋友圈」(相机光圈状圆形图标) 的正下方。
+    // 千万别点成上方的光圈图标(那是看一看/朋友圈，会打开很像的推荐信息流)。
+    await tap(session, '微信主窗口最左侧竖排图标里的「视频号」入口：一个像蝴蝶、横向 W 翅膀形状的图标（视频号官方 logo），就在相机光圈状的「朋友圈」图标正下方。不要点光圈图标。', progress, { afterMs: 2500 });
     // 首进关掉自动播放的第一个视频
     await session.pressEscape();
     await session.sleep(500);

@@ -101,12 +101,13 @@ export function buildClickScript(x, y, { holdMs = 60, button = 'left' } = {}) {
   const down = isRight ? '$.kCGEventRightMouseDown' : '$.kCGEventLeftMouseDown';
   const up = isRight ? '$.kCGEventRightMouseUp' : '$.kCGEventLeftMouseUp';
   const btn = isRight ? '$.kCGMouseButtonRight' : '$.kCGMouseButtonLeft';
+  // 实测：用 CGEvent MouseMoved 定位会落点不准（目标 300,300 实际落到 ~253,179）；
+  // CGWarpMouseCursorPosition 则像素级精准（200,200→200,200）。所以先 Warp 再点。
   return `ObjC.import('CoreGraphics');
 ObjC.import('Foundation');
 var p = $.CGPointMake(${Number(x)}, ${Number(y)});
-var mv = $.CGEventCreateMouseEvent($(), $.kCGEventMouseMoved, p, ${btn});
-$.CGEventPost($.kCGHIDEventTap, mv);
-$.NSThread.sleepForTimeInterval(0.03);
+$.CGWarpMouseCursorPosition(p);
+$.NSThread.sleepForTimeInterval(0.05);
 var d = $.CGEventCreateMouseEvent($(), ${down}, p, ${btn});
 $.CGEventPost($.kCGHIDEventTap, d);
 $.NSThread.sleepForTimeInterval(${Math.max(0, Number(holdMs)) / 1000});

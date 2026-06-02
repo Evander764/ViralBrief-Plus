@@ -16,8 +16,11 @@ const ROOT = resolve(dirname(__filename), '..');
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
-const appName = 'Viral Brief Plus';
-const productSlug = 'viral-brief-plus';
+const appName = (process.env.VBP_MAC_APP_NAME || 'Viral Brief Plus').trim();
+const productSlug = (process.env.VBP_MAC_PRODUCT_SLUG || slugify(appName)).trim();
+const bundleIdentifier = (process.env.VBP_MAC_BUNDLE_ID || 'local.viralbrief.app.v3').trim();
+const appSupportName = (process.env.VBP_MAC_APP_SUPPORT_NAME || 'Viral Brief Plus').trim();
+const defaultPort = (process.env.VBP_MAC_DEFAULT_PORT || '8787').trim();
 const versionTag = `${pkg.version}-${stamp}`;
 const distDir = join(ROOT, 'dist');
 const macDir = join(distDir, 'mac');
@@ -52,6 +55,14 @@ function shouldCopy(src) {
 
 function parseEnvFlag(value) {
   return /^(1|true|yes|on)$/i.test(String(value || '').trim());
+}
+
+function slugify(value) {
+  const slug = String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'viral-brief-plus';
 }
 
 function run(command, args, options = {}) {
@@ -101,7 +112,7 @@ function writeInfoPlist() {
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
-  <string>local.viralbrief.app.v3</string>
+  <string>${bundleIdentifier}</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
@@ -127,13 +138,14 @@ function writeLauncher() {
 set -euo pipefail
 
 APP_ROOT="$(cd "$(dirname "$0")/../Resources/app" && pwd)"
-APP_SUPPORT_DIR="$HOME/Library/Application Support/Viral Brief Plus"
-LOG_DIR="$HOME/Library/Logs/Viral Brief Plus"
-PORT="\${VBP_PORT:-\${VB_PORT:-8787}}"
+APP_SUPPORT_DIR="$HOME/Library/Application Support/${appSupportName}"
+LOG_DIR="$HOME/Library/Logs/${appSupportName}"
+PORT="\${VBP_PORT:-\${VB_PORT:-${defaultPort}}}"
 URL="http://127.0.0.1:\${PORT}"
 
 mkdir -p "$APP_SUPPORT_DIR" "$LOG_DIR"
 export VBP_DATA_DIR="\${VBP_DATA_DIR:-\${VB_DATA_DIR:-$APP_SUPPORT_DIR}}"
+export VBP_PORT="$PORT"
 export VBP_OPEN_BROWSER="false" # 阻止 Node 端在默认浏览器中弹窗，完全使用原生 WebKit 窗口
 
 # 如果服务已经在运行，直接启动原生窗口并退出

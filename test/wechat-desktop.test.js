@@ -17,15 +17,25 @@ beforeEach(() => {
 
 const pngDataUrl = `data:image/png;base64,${Buffer.from('fakepng').toString('base64')}`;
 
-function sampleCollectedVideos() {
-  return [
-    { title: '最新视频一', like: '101', redHeart: '201', favorite: '301', comment: '401', screenshotData: pngDataUrl },
-    { title: '最新视频二', like: '102', redHeart: '202', favorite: '302', comment: '402', screenshotData: pngDataUrl },
-    { title: '最新视频三', like: '103', redHeart: '203', favorite: '303', comment: '403', screenshotData: pngDataUrl },
-  ];
+function sampleCollectedVideos(n = 3) {
+  return Array.from({ length: n }, (_, i) => ({
+    title: `最新视频${i + 1}`,
+    bodyExcerpt: `完整文案 ${i + 1}\n展开后的全部内容`,
+    like: String(101 + i),
+    share: String(201 + i),
+    favorite: String(301 + i),
+    comment: String(401 + i),
+    screenshotData: pngDataUrl,
+    metricPositions: {
+      like: 'right-bottom-like',
+      share: 'right-bottom-share',
+      favorite: 'right-bottom-favorite',
+      comment: 'right-bottom-comment',
+    },
+  }));
 }
 
-function fakeRunner({ failStep = '', profileMethod = 'ax', channelsMethod = 'ax', collectItems = sampleCollectedVideos() } = {}) {
+function fakeRunner({ failStep = '', collectItems = sampleCollectedVideos(), methods = {} } = {}) {
   const calls = [];
   const runner = async (step, payload = {}) => {
     calls.push({ step, payload });
@@ -33,16 +43,15 @@ function fakeRunner({ failStep = '', profileMethod = 'ax', channelsMethod = 'ax'
       return { ok: false, code: step === 'assert_accessibility' ? 'accessibility' : step, message: `${step} failed` };
     }
     if (step === 'collect_latest_videos') {
-      return { ok: true, method: 'ax', detail: 'collected latest videos', items: collectItems };
+      return { ok: true, code: step, method: 'video_detail_sequence', detail: 'collected latest videos', items: collectItems };
     }
-    const method = step === 'open_profile_entry' ? profileMethod : step === 'open_channels_home' ? channelsMethod : 'ax';
-    return { ok: true, method, detail: `${step} ok` };
+    return { ok: true, code: step, method: methods[step] || 'ax', detail: `${step} ok` };
   };
   runner.calls = calls;
   return runner;
 }
 
-test('desktop WeChat patrol opens nickname and saves latest three videos', async () => {
+test('desktop WeChat patrol enters following overview once, opens nickname, and saves latest three videos', async () => {
   const acc = upsertAccount({ platform: 'wechat_channels', nickname: '目标视频号', monitor_enabled: true });
   const runner = fakeRunner();
 
@@ -54,17 +63,23 @@ test('desktop WeChat patrol opens nickname and saves latest three videos', async
 
   assert.equal(result.success, 1);
   assert.equal(result.newItems, 3);
+  assert.equal(result.maxVideosPerAccount, 3);
   assert.deepEqual(runner.calls.map((c) => c.step), [
     'assert_accessibility',
     'activate_wechat',
     'open_channels_home',
     'open_profile_entry',
     'open_overview',
+    'open_following_overview',
+    'cleanup_autoplay_tabs',
     'open_creator',
     'collect_latest_videos',
+    'close_creator_tabs',
+    'close_channels_tabs',
   ]);
-  assert.equal(runner.calls.at(-2).payload.nickname, '目标视频号');
-  assert.equal(runner.calls.at(-1).payload.count, 3);
+  assert.equal(runner.calls.find((c) => c.step === 'cleanup_autoplay_tabs').payload.keepTabTitle, '关注');
+  assert.equal(runner.calls.find((c) => c.step === 'open_creator').payload.nickname, '目标视频号');
+  assert.equal(runner.calls.find((c) => c.step === 'collect_latest_videos').payload.count, 3);
 
   const rows = await import('../server/db.js').then(({ all }) => all('SELECT * FROM contents WHERE account_id = ? AND platform = ? ORDER BY title', [acc.id, 'wechat_channels']));
   assert.equal(rows.length, 3);
@@ -72,19 +87,46 @@ test('desktop WeChat patrol opens nickname and saves latest three videos', async
   assert.match(item.url, /^wechat-desktop:\/\/content\//);
   assert.equal(item.content_type, 'video');
   assert.equal(item.metrics_source, 'desktop_agent');
+  assert.equal(item.user_confirmed, 0);
   assert.equal(item.like_count, 101);
   assert.equal(item.share_count, 201);
   assert.equal(item.favorite_count, 301);
   assert.equal(item.comment_count, 401);
+  assert.match(item.body_excerpt, /展开后的全部内容/);
   assert.match(item.screenshot_path, /^screenshots\/rpa_wechat_channels_/);
   assert.equal(item.data_status, 'needs_review');
   const evidence = JSON.parse(item.metrics_evidence_json);
-  assert.equal(evidence.metrics.share.label, '红心');
+  assert.equal(evidence.share.label, '转发');
+  assert.equal(evidence.favorite.label, '收藏/红心');
+  assert.equal(evidence.favorite.position, 'right-bottom-favorite');
+  assert.match(evidence.navigation.method, /open_channels_home|ax/);
 });
 
-test('desktop WeChat patrol records coordinate fallback evidence', async () => {
-  const acc = upsertAccount({ platform: 'wechat_channels', nickname: '坐标兜底号', monitor_enabled: true });
-  const runner = fakeRunner({ profileMethod: 'coordinate', channelsMethod: 'coordinate' });
+test('desktop WeChat patrol respects custom maxVideosPerAccount clamp', async () => {
+  upsertAccount({ platform: 'wechat_channels', nickname: '只读两条', monitor_enabled: true });
+  const runner = fakeRunner({ collectItems: sampleCollectedVideos(5) });
+
+  const result = await runWechatDesktopPatrol({
+    scriptRunner: runner,
+    includePatrolledToday: true,
+    maxVideosPerAccount: 2,
+  });
+
+  assert.equal(result.success, 1);
+  assert.equal(result.newItems, 2);
+  assert.equal(result.maxVideosPerAccount, 2);
+  assert.equal(runner.calls.find((c) => c.step === 'collect_latest_videos').payload.count, 2);
+});
+
+test('desktop WeChat patrol records fixed-coordinate and protected-tab evidence', async () => {
+  const acc = upsertAccount({ platform: 'wechat_channels', nickname: '坐标号', monitor_enabled: true });
+  const runner = fakeRunner({
+    methods: {
+      open_channels_home: 'fixed_coordinate',
+      cleanup_autoplay_tabs: 'protect_following_tab',
+      open_following_overview: 'left_sidebar_only',
+    },
+  });
 
   const result = await runWechatDesktopPatrol({
     scriptRunner: runner,
@@ -95,10 +137,12 @@ test('desktop WeChat patrol records coordinate fallback evidence', async () => {
   assert.equal(result.success, 1);
   const item = get('SELECT * FROM contents WHERE account_id = ? AND platform = ?', [acc.id, 'wechat_channels']);
   const evidence = JSON.parse(item.metrics_evidence_json);
-  assert.match(evidence.navigation.method, /coordinate/);
+  assert.match(evidence.navigation.method, /fixed_coordinate/);
+  assert.match(evidence.navigation.method, /protect_following_tab/);
+  assert.match(evidence.navigation.method, /left_sidebar_only/);
 });
 
-test('desktop WeChat patrol reports missing Accessibility permission', async () => {
+test('desktop WeChat patrol reports missing Accessibility permission during setup', async () => {
   upsertAccount({ platform: 'wechat_channels', nickname: '权限测试号', monitor_enabled: true });
   const result = await runWechatDesktopPatrol({
     scriptRunner: fakeRunner({ failStep: 'assert_accessibility' }),
@@ -109,15 +153,18 @@ test('desktop WeChat patrol reports missing Accessibility permission', async () 
   assert.match(result.details[0].error, /辅助功能/);
 });
 
-test('desktop WeChat patrol reports creator lookup failure', async () => {
+test('desktop WeChat patrol reports creator lookup failure and keeps cleanup stop-safe', async () => {
   upsertAccount({ platform: 'wechat_channels', nickname: '不存在博主', monitor_enabled: true });
+  const runner = fakeRunner({ failStep: 'open_creator' });
   const result = await runWechatDesktopPatrol({
-    scriptRunner: fakeRunner({ failStep: 'open_creator' }),
+    scriptRunner: runner,
     includePatrolledToday: true,
   });
 
   assert.equal(result.failed, 1);
   assert.match(result.details[0].error, /open_creator failed/);
+  assert.equal(runner.calls.at(-2).step, 'close_creator_tabs');
+  assert.equal(runner.calls.at(-1).step, 'close_channels_tabs');
 });
 
 test('desktop WeChat patrol fails when latest videos cannot be collected', async () => {
@@ -131,41 +178,85 @@ test('desktop WeChat patrol fails when latest videos cannot be collected', async
   assert.match(result.details[0].error, /未采集到微信视频号最新视频数据/);
 });
 
-test('desktop WeChat AppleScript prefers main WeChat process and has channels coordinate fallback', () => {
-  const script = __wechatDesktopInternals.appleScriptForStep('open_channels_home');
-  assert.match(script, /if stepName is "assert_accessibility" or stepName is "activate_wechat" or stepName is "open_channels_home"/);
-  assert.match(script, /set preferredBids to \{"com\.tencent\.xinWeChat", "com\.tencent\.flue\.WeChatAppEx"\}/);
-  assert.match(script, /vbp_restore_wechat_window/);
-  assert.match(script, /wechat_window_empty/);
-  assert.match(script, /vbp_click_channels_sidebar/);
-  assert.match(script, /已使用左侧栏坐标兜底/);
-  assert.doesNotMatch(script, /\bcontainer\b/);
+test('desktop WeChat patrol does not mark account patrolled when stopped after opening creator', async () => {
+  const acc = upsertAccount({ platform: 'wechat_channels', nickname: '停止号', monitor_enabled: true });
+  const runner = fakeRunner();
+  let stop = false;
+  const wrappedRunner = async (step, payload) => {
+    const r = await runner(step, payload);
+    if (step === 'open_creator') stop = true;
+    return r;
+  };
+  wrappedRunner.calls = runner.calls;
+
+  const result = await runWechatDesktopPatrol({
+    scriptRunner: wrappedRunner,
+    includePatrolledToday: true,
+    shouldStop: () => stop,
+  });
+
+  assert.equal(result.stopped, true);
+  assert.equal(result.success, 0);
+  assert.equal(result.newItems, 0);
+  const saved = get('SELECT last_patrolled_at FROM accounts WHERE id = ?', [acc.id]);
+  assert.equal(saved.last_patrolled_at, null);
 });
 
-test('desktop WeChat AppleScript prefers AppEx after entering channels', () => {
-  const script = __wechatDesktopInternals.appleScriptForStep('open_profile_entry');
-  assert.match(script, /set preferredBids to \{"com\.tencent\.flue\.WeChatAppEx", "com\.tencent\.xinWeChat"\}/);
-});
-
-test('desktop WeChat friendly error keeps non-permission System Events failures specific', () => {
-  const msg = __wechatDesktopInternals.friendlyWechatDesktopError(
-    new Error('System Events got an error: 未找到桌面微信视频号入口'),
+test('desktop WeChat parser accepts structured JSON result with long text delimiters', () => {
+  const parsed = __wechatDesktopInternals.parseScriptResult(
+    JSON.stringify({
+      ok: true,
+      code: 'collect_latest_videos',
+      method: 'video_detail_sequence',
+      detail: '文案里有 | 也能保留',
+      items: [{ title: '标题|带分隔符', like: '1.2万' }],
+    }),
+    '',
   );
-  assert.match(msg, /台前调度/);
-  assert.doesNotMatch(msg, /辅助功能/);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.items[0].title, '标题|带分隔符');
+  assert.equal(parsed.detail, '文案里有 | 也能保留');
 });
 
-test('desktop WeChat friendly error reports blank WeChat window specifically', () => {
+test('desktop WeChat AppleScript uses fixed channels icon, profile-first following, and protected tabs', () => {
+  const channelsScript = __wechatDesktopInternals.appleScriptForStep('open_channels_home');
+  assert.match(channelsScript, /vbp_click_channels_sidebar_fixed/);
+  assert.match(channelsScript, /已精准点击左侧视频号小图标中心/);
+  assert.doesNotMatch(channelsScript, /repeat with offsetY/);
+  assert.doesNotMatch(channelsScript, /Feishu|飞书/);
+
+  const profileScript = __wechatDesktopInternals.appleScriptForStep('open_profile_entry');
+  assert.match(profileScript, /vbp_click_profile_entry/);
+  assert.match(profileScript, /右上角小人入口/);
+
+  const followingScript = __wechatDesktopInternals.appleScriptForStep('open_following_overview');
+  assert.match(followingScript, /vbp_click_left_following/);
+  assert.match(followingScript, /避免误点顶部关注/);
+  assert.match(followingScript, /0\.28/);
+
+  const cleanupScript = __wechatDesktopInternals.appleScriptForStep('cleanup_autoplay_tabs', { keepTabTitle: '关注' });
+  assert.match(cleanupScript, /vbp_cleanup_autoplay_tabs/);
+  assert.match(cleanupScript, /protect_following_tab/);
+  assert.match(cleanupScript, /keepTitle/);
+  assert.match(cleanupScript, /label is not "关闭"/);
+});
+
+test('desktop WeChat AppleScript collection skips pinned, expands text, maps metrics, and uses next arrow', () => {
+  const script = __wechatDesktopInternals.appleScriptForStep('collect_latest_videos', { count: 3 });
+  assert.match(script, /vbp_open_first_non_pinned_video/);
+  assert.match(script, /label does not contain "置顶"/);
+  assert.match(script, /vbp_click_expand_if_present/);
+  assert.match(script, /vbp_click_next_video_arrow/);
+  assert.match(script, /\\"like\\"/);
+  assert.match(script, /\\"share\\"/);
+  assert.match(script, /\\"favorite\\"/);
+  assert.match(script, /\\"comment\\"/);
+});
+
+test('desktop WeChat friendly errors distinguish left-sidebar following from top following', () => {
   const msg = __wechatDesktopInternals.friendlyWechatDesktopError(
-    Object.assign(new Error('桌面微信主窗口是空白窗口，没有暴露可操作控件'), { code: 'wechat_window_empty' }),
+    Object.assign(new Error('未找到左侧关注，避免误点顶部关注'), { code: 'open_following_overview' }),
   );
-  assert.match(msg, /空白窗口/);
-  assert.match(msg, /重启微信/);
-});
-
-test('desktop WeChat parser surfaces osascript failure message', () => {
-  const parsed = __wechatDesktopInternals.parseScriptResult('', 'ERROR|open_channels_home||未找到桌面微信视频号入口');
-  assert.equal(parsed.ok, false);
-  assert.equal(parsed.code, 'open_channels_home');
-  assert.equal(parsed.message, '未找到桌面微信视频号入口');
+  assert.match(msg, /左侧“关注”/);
+  assert.match(msg, /不是顶部视频流/);
 });

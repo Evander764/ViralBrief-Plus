@@ -214,13 +214,6 @@ export async function runDailyReport({
           },
         }));
       }
-      if (!shouldStop()) {
-        progress('rpa', '开始桌面微信视频号阶段巡检...');
-        stageResults.push(await runWechatDesktopPatrol({
-          onProgress: (msg) => progress('rpa', msg),
-          shouldStop,
-        }));
-      }
       patrolResult = combinePatrolResults(stageResults);
 
       progress('rpa', `采集完成: 新增 ${patrolResult.newItems} 条，去重 ${patrolResult.duplicates} 条`);
@@ -268,6 +261,7 @@ export async function runWechatReport({
   skipRpa = true,
   onProgress,
   shouldStop = () => false,
+  maxVideosPerAccount,
 } = {}) {
   const progress = (phase, detail) => {
     log.info(`[Pipeline:wechat:${phase}] ${detail}`);
@@ -286,6 +280,7 @@ export async function runWechatReport({
       patrolResult = await runWechatDesktopPatrol({
         onProgress: (msg) => progress('rpa', msg),
         shouldStop,
+        maxVideosPerAccount,
       });
     } catch (rpaErr) {
       rpaError = rpaErr.message || String(rpaErr);

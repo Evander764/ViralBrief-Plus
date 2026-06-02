@@ -273,6 +273,7 @@ async function handleApi(req, res, url, segs) {
       const cfg = loadConfig();
       const windowType = body.window || cfg.schedule?.window || 'last_1_days';
       const maxTabsPerBatch = body.maxTabsPerBatch ?? cfg.rpa?.maxTabsPerBatch;
+      const wechatVideosPerAccount = body.wechatVideosPerAccount ?? cfg.rpa?.wechatVideosPerAccount;
       const includePatrolledToday = body.includePatrolledToday === true;
       const platforms = body.platform ? [body.platform] : (Array.isArray(body.platforms) && body.platforms.length ? body.platforms : ['xiaohongshu', 'douyin']);
       runCtrl = beginPatrolRun({ source: 'api', platforms });
@@ -307,6 +308,7 @@ async function handleApi(req, res, url, segs) {
           onProgress: (msg) => log.info(`[RPA] ${msg}`),
           includePatrolledToday,
           shouldStop: runCtrl.shouldStop,
+          maxVideosPerAccount: wechatVideosPerAccount,
         }));
       }
       const result = combinePatrolResults(stageResults);
@@ -566,6 +568,7 @@ async function handleApi(req, res, url, segs) {
           force: !!body.force,
           skipRpa: body.skipRpa === true,
           shouldStop: runCtrl?.shouldStop || (() => false),
+          maxVideosPerAccount: body.wechatVideosPerAccount,
         });
         return sendJson(res, 200, {
           id: r.report.id,

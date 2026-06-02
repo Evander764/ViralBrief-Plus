@@ -18,7 +18,7 @@ const DEFAULTS = {
   retries: 2,
   budgetDailyTokens: 0,        // 0 = 不限制，仅记录用量
   schedule: { enabled: false, time: '09:00', window: 'last_1_day', catchUp: true },
-  rpa: { maxTabsPerBatch: 6 },
+  rpa: { maxTabsPerBatch: 6, wechatVideosPerAccount: 3 },
   pairingToken: '',
   apiKeyEnc: null,
   apiKeyEnc2: null,
@@ -52,12 +52,16 @@ function writeRaw(obj) {
 
 function normalizeRpaConfig(input = {}) {
   const maxTabs = Number(input.maxTabsPerBatch);
+  const wechatVideos = Number(input.wechatVideosPerAccount);
   return {
     ...DEFAULTS.rpa,
     ...input,
     maxTabsPerBatch: Number.isFinite(maxTabs)
       ? Math.max(1, Math.min(10, Math.floor(maxTabs)))
       : DEFAULTS.rpa.maxTabsPerBatch,
+    wechatVideosPerAccount: Number.isFinite(wechatVideos)
+      ? Math.max(1, Math.min(10, Math.floor(wechatVideos)))
+      : DEFAULTS.rpa.wechatVideosPerAccount,
   };
 }
 

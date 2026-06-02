@@ -26,3 +26,17 @@ test('runDailyReport 生成 Markdown/HTML/CSV 与压缩包，且 deleteReport �
   assert.equal(deleted.id, report.id);
   assert.equal(getReport(report.id), undefined);
 });
+
+test('pipeline keeps web report RPA isolated from desktop WeChat patrol', () => {
+  const pipeline = readFileSync(join(process.cwd(), 'server', 'pipeline.js'), 'utf8');
+  const daily = pipeline.slice(
+    pipeline.indexOf('export async function runDailyReport'),
+    pipeline.indexOf('export async function runWechatReport'),
+  );
+  const wechat = pipeline.slice(pipeline.indexOf('export async function runWechatReport'));
+
+  assert.doesNotMatch(daily, /runWechatDesktopPatrol\(/);
+  assert.match(daily, /platform of \['xiaohongshu', 'douyin'\]/);
+  assert.match(wechat, /runWechatDesktopPatrol\(/);
+  assert.match(wechat, /maxVideosPerAccount/);
+});

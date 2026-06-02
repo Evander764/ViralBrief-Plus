@@ -12,8 +12,8 @@ description: |
 
 本 Skill 封装了「爆款选题雷达 Local」的核心工作流：
 
-1. **启动 RPA** → 自动拉起带有调试端口的独立 Chrome 实例，并在视频号阶段激活桌面微信
-2. **逐账号采集** → 小红书/抖音跳转主页并采集详情；视频号在桌面微信里按昵称打开博主并生成待复核记录
+1. **启动 RPA** → 自动拉起带有调试端口的独立 Chrome 实例；微信视频号由独立入口激活桌面微信
+2. **逐账号采集** → 小红书/抖音跳转主页并采集详情；视频号在桌面微信里进入关注总览，按昵称打开博主并采集最新若干条视频
 3. **截图存档** → 对每个详情页自动截图，存入 `data/screenshots/`
 4. **数据入库** → 采集的数据通过去重机制写入本地 SQLite 数据库
 5. **确定性筛选** → 巡检全部结束后按窗口、账号池、确认状态和平台必需指标筛出达标内容
@@ -88,7 +88,7 @@ npm run patrol
 | CDP 客户端 | `server/rpa/cdp.js` | 零依赖 WebSocket 封装，提供 `goto / evaluate / screenshot / waitForSelector` |
 | Chrome 启动器 | `server/rpa/chrome-launcher.js` | 管理 Chrome 进程生命周期：启动、端口就绪检测、关闭 |
 | 巡检模块 | `server/rpa/patrol.js` | Chrome 平台级采集逻辑（抖音/小红书），返回结构化结果 |
-| 桌面微信视频号 | `server/rpa/wechat-desktop.js` | 通过 macOS System Events 操作桌面微信视频号，生成待复核记录 |
+| 桌面微信视频号 | `server/rpa/wechat-desktop.js` | 通过 macOS System Events 操作桌面微信视频号，采集待复核的视频文案、截图和互动指标 |
 | Pipeline | `server/pipeline.js` | 编排全流程：RPA → 筛选 → AI 摘录/归类 → 渲染 → 导出 |
 
 ### 数据流向
@@ -99,7 +99,7 @@ Chrome (小红书/抖音)
 CDPClient.evaluate() → 注入 JS 提取 DOM 数据
 桌面微信 (视频号)
   ↓ osascript / System Events
-按昵称打开博主 → 生成待复核记录
+进入关注总览 → 按昵称打开博主 → 采集最新视频文案/指标/截图
   ↓
 patrol.saveData() → upsertCapture() → SQLite contents 表
   ↓
@@ -167,9 +167,11 @@ renderMarkdown/Html/Csv → data/exports/
 ### 视频号
 
 1. 视频号只指 macOS 微信客户端内的视频号，不打开或识别任何网页视频号链接。
-2. 系统激活桌面微信，点击“视频号”入口和右上角人物头像，进入关注/博主区域后按账号池昵称打开对应博主。
-3. 默认不使用 Python、不使用 AI 视觉识别；优先点击 Accessibility 元素，找不到头像时用窗口右上角坐标兜底。
-4. 成功打开博主后写入 `wechat-desktop://content/<account-id>/<date>` 待复核记录，互动指标保持未知，等待人工确认或后续桌面视觉补录。
+2. 系统激活桌面微信主窗口，点击左侧视频号小图标中心，再点击右上角小人入口，进入赞和收藏/个人总览。
+3. “关注”只允许在右上角小人入口后的左侧栏点击；禁止把顶部视频流“关注”当成目标入口。进入关注总览后保护标题含“关注”的标签，关闭其他默认播放标签。
+4. 按账号池昵称打开博主主页；每个博主默认读取 `rpa.wechatVideosPerAccount = 3` 条，可在 1-10 间调整。
+5. 跳过置顶、直播和预约内容；打开第一条非置顶视频，暂停/展开文案，采集点赞、转发、收藏/红心、评论和截图，再用右侧向下箭头切到下一条。
+6. 采集结果写入 `wechat-desktop://content/<account-id>/<date>/<index>`，指标证据写入 `metrics_evidence_json`；默认待复核，不自动确认，人工确认后才进入微信日报。
 
 ### 巡检后
 

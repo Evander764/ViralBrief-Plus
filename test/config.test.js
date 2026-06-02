@@ -16,17 +16,21 @@ test('默认配置：openai + 自动生成配对 token', () => {
   const c = loadConfig();
   assert.ok(c.pairingToken && c.pairingToken.length >= 24);
   assert.equal(c.rpa.maxTabsPerBatch, 6);
+  assert.equal(c.rpa.wechatVideosPerAccount, 3);
   assert.equal(getPublicConfig().hasApiKey, false);
 });
 
-test('巡检每轮标签数会保存并限制在 1-10 范围', () => {
-  let pub = saveConfig({ rpa: { maxTabsPerBatch: 7.8 } });
+test('巡检标签数和视频号读取数会保存并限制在 1-10 范围', () => {
+  let pub = saveConfig({ rpa: { maxTabsPerBatch: 7.8, wechatVideosPerAccount: 4.9 } });
   assert.equal(pub.rpa.maxTabsPerBatch, 7);
-  pub = saveConfig({ rpa: { maxTabsPerBatch: 999 } });
+  assert.equal(pub.rpa.wechatVideosPerAccount, 4);
+  pub = saveConfig({ rpa: { maxTabsPerBatch: 999, wechatVideosPerAccount: 999 } });
   assert.equal(pub.rpa.maxTabsPerBatch, 10);
-  pub = saveConfig({ rpa: { maxTabsPerBatch: -5 } });
+  assert.equal(pub.rpa.wechatVideosPerAccount, 10);
+  pub = saveConfig({ rpa: { maxTabsPerBatch: -5, wechatVideosPerAccount: -5 } });
   assert.equal(pub.rpa.maxTabsPerBatch, 1);
-  saveConfig({ rpa: { maxTabsPerBatch: 6 } });
+  assert.equal(pub.rpa.wechatVideosPerAccount, 1);
+  saveConfig({ rpa: { maxTabsPerBatch: 6, wechatVideosPerAccount: 3 } });
 });
 
 test('默认回溯天数与每日自动运行设置会持久保存', () => {

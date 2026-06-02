@@ -269,11 +269,13 @@ async function runPatrolStages(progressText = null, options = {}) {
   const includePatrolledToday = options.includePatrolledToday === true;
   const stages = Array.isArray(options.stages) && options.stages.length ? options.stages : WEB_PATROL_STAGES;
   const summary = { total: 0, success: 0, failed: 0, newItems: 0, duplicates: 0, discovered: 0, skippedToday: 0, stopped: false, maxTabsPerBatch: 0 };
+  const cfg = await api('/settings');
+  const wechatVideosPerAccount = cfg.rpa?.wechatVideosPerAccount || 3;
   for (const stage of stages) {
     if (progressText) progressText.textContent = `正在巡检${stage.label}账号...`;
     const res = await api('/patrol/run', {
       method: 'POST',
-      body: JSON.stringify({ platform: stage.platform, includePatrolledToday }),
+      body: JSON.stringify({ platform: stage.platform, includePatrolledToday, wechatVideosPerAccount }),
     });
     if (res.error) throw new Error(res.error);
     mergePatrolSummary(summary, res);
@@ -1149,6 +1151,7 @@ async function loadSettings() {
   $('#stSchedDays').value = wm ? Number(wm[1]) : 1;
   $('#stBudget').value = c.budgetDailyTokens || 0;
   $('#stRpaMaxTabs').value = c.rpa?.maxTabsPerBatch || 6;
+  $('#stWechatVideosPerAccount').value = c.rpa?.wechatVideosPerAccount || 3;
   $('#stToken').textContent = c.pairingToken;
   $('#stEndpoint').textContent = `http://127.0.0.1:${PORT}`;
   renderSettingsKeyState(c);
@@ -1301,11 +1304,13 @@ $('#stSaveSettings').addEventListener('click', async () => {
     },
     rpa: {
       maxTabsPerBatch: Number($('#stRpaMaxTabs').value) || 6,
+      wechatVideosPerAccount: Number($('#stWechatVideosPerAccount').value) || 3,
     },
   };
   const pub = await api('/settings', { method: 'PUT', body: JSON.stringify(body) });
   $('#stRpaMaxTabs').value = pub.rpa?.maxTabsPerBatch || 6;
-  $('#stSaveMsg').textContent = `已保存：每轮 ${pub.rpa?.maxTabsPerBatch || 6} 个账号标签`;
+  $('#stWechatVideosPerAccount').value = pub.rpa?.wechatVideosPerAccount || 3;
+  $('#stSaveMsg').textContent = `已保存：每轮 ${pub.rpa?.maxTabsPerBatch || 6} 个账号标签，每个视频号 ${pub.rpa?.wechatVideosPerAccount || 3} 条`;
   toast('设置已保存', 'ok'); loadOverview();
 });
 

@@ -4,13 +4,14 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { all } from '../db.js';
 import { upsertCapture, markAccountPatrolled, beijingDayStartISO } from '../store.js';
+import { loadConfig } from '../config.js';
 import { log } from '../lib/log.js';
 import { SCREENSHOTS_DIR } from '../lib/paths.js';
 import { sortPatrolAccounts } from './patrol.js';
 
 const execFileAsync = promisify(execFile);
 const PLATFORM = 'wechat_channels';
-const DEFAULT_LATEST_VIDEO_COUNT = 3;
+export const DEFAULT_WECHAT_VIDEOS_PER_ACCOUNT = 3;
 
 export class WechatDesktopPatrolError extends Error {
   constructor(code, message) {
@@ -25,7 +26,10 @@ export async function runWechatDesktopPatrol({
   includePatrolledToday = false,
   shouldStop = () => false,
   now = new Date(),
+  maxVideosPerAccount,
 } = {}) {
+  const cfg = loadConfig();
+  const videoCount = normalizeWechatVideoCount(maxVideosPerAccount ?? cfg.rpa?.wechatVideosPerAccount);
   const progress = (msg) => {
     log.info(`[RPA] ${msg}`);
     if (onProgress) onProgress(msg);
@@ -44,34 +48,53 @@ export async function runWechatDesktopPatrol({
     maxTabsPerBatch: 1,
     maxTabsPerPlatform: 1,
     requestedMaxTabsPerBatch: 1,
+    maxVideosPerAccount: videoCount,
     windowType: 'desktop_wechat',
-    windowStartISO: beijingDayStartISO(),
+    windowStartISO: beijingDayStartISO(now),
     stopped: false,
   };
 
   const rawAccounts = all('SELECT * FROM accounts WHERE monitor_enabled = 1 AND platform = ?', [PLATFORM]);
   const sortedAccounts = sortPatrolAccounts(rawAccounts);
-  const todayStart = beijingDayStartISO();
+  const todayStart = beijingDayStartISO(now);
   const accounts = includePatrolledToday ? sortedAccounts : sortedAccounts.filter((acc) => !isPatrolledSince(acc, todayStart));
   result.skippedToday = sortedAccounts.length - accounts.length;
   result.total = accounts.length;
   result.platformResults[PLATFORM].total = accounts.length;
 
-  progress(`开始桌面微信视频号巡检: ${accounts.length} 个账号`);
-  for (const [index, acc] of accounts.entries()) {
-    if (shouldStop()) {
-      result.stopped = true;
-      break;
+  progress(`开始桌面微信视频号巡检: ${accounts.length} 个账号，每个账号最多读取 ${videoCount} 条视频`);
+  if (!accounts.length) return result;
+
+  let prepared = null;
+  try {
+    prepared = await prepareWechatChannelsFollowing({ scriptRunner, progress });
+  } catch (e) {
+    const message = friendlyWechatDesktopError(e);
+    log.warn(`[RPA] 桌面微信视频号初始化失败: ${message}`);
+    for (const acc of accounts) applyOutcome(result, errorOutcome(acc, message));
+    return result;
+  }
+
+  try {
+    for (const [index, acc] of accounts.entries()) {
+      if (shouldStop()) {
+        result.stopped = true;
+        break;
+      }
+      const outcome = await patrolWechatDesktopAccount(acc, {
+        index,
+        total: accounts.length,
+        progress,
+        scriptRunner,
+        now,
+        shouldStop,
+        opened: prepared,
+        count: videoCount,
+      });
+      applyOutcome(result, outcome);
     }
-    const outcome = await patrolWechatDesktopAccount(acc, {
-      index,
-      total: accounts.length,
-      progress,
-      scriptRunner,
-      now,
-      shouldStop,
-    });
-    applyOutcome(result, outcome);
+  } finally {
+    await cleanupWechatChannelsSession({ scriptRunner, progress });
   }
 
   result.stopped ||= !!shouldStop();
@@ -79,17 +102,17 @@ export async function runWechatDesktopPatrol({
   return result;
 }
 
-async function patrolWechatDesktopAccount(acc, { index, total, progress, scriptRunner, now, shouldStop }) {
+async function patrolWechatDesktopAccount(acc, { index, total, progress, scriptRunner, now, shouldStop, opened, count }) {
   const label = `${PLATFORM}/${acc.nickname || acc.id}`;
   try {
     if (!acc.nickname) return errorOutcome(acc, '缺少视频号博主昵称，无法在桌面微信内匹配');
     progress(`(${index + 1}/${total}) 打开桌面微信视频号博主 ${acc.nickname}`);
 
-    const opened = await openWechatDesktopCreator(acc, { scriptRunner, progress });
+    const openCreator = await runStep(scriptRunner, 'open_creator', { nickname: acc.nickname }, progress);
     if (shouldStop()) return stoppedOutcome(acc);
 
     const videos = await collectWechatDesktopLatestVideos(acc, {
-      count: DEFAULT_LATEST_VIDEO_COUNT,
+      count,
       progress,
       scriptRunner,
     });
@@ -98,51 +121,78 @@ async function patrolWechatDesktopAccount(acc, { index, total, progress, scriptR
       throw new WechatDesktopPatrolError('collect_latest_videos', '未采集到微信视频号最新视频数据');
     }
 
-    const items = videos.map((video, i) => saveWechatDesktopVideoItem(acc, video, { opened, now, index: i }));
+    const navigation = mergeNavigationEvidence(opened, openCreator);
+    const items = videos.map((video, i) => saveWechatDesktopVideoItem(acc, video, { opened: navigation, now, index: i }));
     markAccountPatrolled(acc.id);
+    await runStep(scriptRunner, 'close_creator_tabs', { keepTabTitle: '关注' }, progress, { optional: true });
     return okOutcome(acc, items, [{ reason: 'desktop_wechat_latest_videos', detail: `已采集微信视频号最新 ${items.length} 条视频` }]);
   } catch (e) {
+    await runStep(scriptRunner, 'close_creator_tabs', { keepTabTitle: '关注' }, progress, { optional: true });
     const message = friendlyWechatDesktopError(e);
     log.warn(`[RPA] 桌面微信视频号巡检失败 ${label}: ${message}`);
     return errorOutcome(acc, message);
   }
 }
 
-export async function openWechatDesktopCreator(acc, { scriptRunner = defaultWechatScriptRunner, progress = () => {} } = {}) {
-  await runStep(scriptRunner, 'assert_accessibility', {}, progress);
-  await runStep(scriptRunner, 'activate_wechat', {}, progress);
-  const openChannels = await runStep(scriptRunner, 'open_channels_home', {}, progress);
-  const openProfile = await runStep(scriptRunner, 'open_profile_entry', {}, progress);
-  const openOverview = await runStep(scriptRunner, 'open_overview', {}, progress);
-  const openCreator = await runStep(scriptRunner, 'open_creator', { nickname: acc.nickname }, progress);
+export async function prepareWechatChannelsFollowing({ scriptRunner = defaultWechatScriptRunner, progress = () => {} } = {}) {
+  const steps = [
+    ['assert_accessibility', {}],
+    ['activate_wechat', {}],
+    ['open_channels_home', {}],
+    ['open_profile_entry', {}],
+    ['open_overview', {}],
+    ['open_following_overview', {}],
+    ['cleanup_autoplay_tabs', { keepTabTitle: '关注' }],
+  ];
+  const evidence = [];
+  for (const [step, payload] of steps) {
+    evidence.push(await runStep(scriptRunner, step, payload, progress));
+  }
   return {
-    method: [openChannels.method, openProfile.method, openOverview.method, openCreator.method].filter(Boolean).join('+') || 'unknown',
-    detail: openCreator.detail || openOverview.detail || openProfile.detail || openChannels.detail || '',
+    method: evidence.map((r) => r.method).filter(Boolean).join('+') || 'unknown',
+    detail: evidence.map((r) => r.detail).filter(Boolean).join('；'),
+    steps: evidence.map((r) => r.code || r.step).filter(Boolean),
   };
+}
+
+export async function openWechatDesktopCreator(acc, { scriptRunner = defaultWechatScriptRunner, progress = () => {} } = {}) {
+  const opened = await prepareWechatChannelsFollowing({ scriptRunner, progress });
+  const creator = await runStep(scriptRunner, 'open_creator', { nickname: acc.nickname }, progress);
+  return mergeNavigationEvidence(opened, creator);
+}
+
+async function cleanupWechatChannelsSession({ scriptRunner, progress }) {
+  await runStep(scriptRunner, 'close_channels_tabs', { returnHome: true, keepTabTitle: '关注' }, progress, { optional: true });
 }
 
 async function collectWechatDesktopLatestVideos(acc, { scriptRunner, progress, count }) {
   const r = await runStep(scriptRunner, 'collect_latest_videos', { nickname: acc.nickname, count }, progress);
   const items = Array.isArray(r.items) ? r.items : parseCollectedVideos(r.detail);
   return items
-    .filter((item) => item && String(item.title || '').trim())
+    .filter((item) => item && String(item.title || item.bodyExcerpt || item.body_excerpt || '').trim())
     .slice(0, count)
     .map((item, index) => normalizeWechatVideoItem(item, index));
 }
 
-async function runStep(scriptRunner, step, payload, progress) {
+async function runStep(scriptRunner, step, payload, progress, { optional = false } = {}) {
   const r = await scriptRunner(step, payload);
   if (!r || r.ok !== true) {
+    if (optional) {
+      const message = r?.message || `桌面微信步骤失败: ${step}`;
+      progress(`  ${message}`);
+      return { ok: false, code: r?.code || step, method: r?.method || 'optional', detail: message };
+    }
     throw new WechatDesktopPatrolError(r?.code || step, r?.message || `桌面微信步骤失败: ${step}`);
   }
   if (r.detail && step !== 'collect_latest_videos') progress(`  ${r.detail}`);
-  return r;
+  return { ...r, step, code: r.code || step };
 }
 
 function saveWechatDesktopVideoItem(acc, video, { opened, now, index }) {
   const dayKey = beijingDateKey(now);
   const url = video.url || `wechat-desktop://content/${encodeURIComponent(acc.id)}/${dayKey}/${index + 1}`;
-  const title = video.title || `桌面微信视频号最新视频 ${index + 1} - ${acc.nickname} - ${dayKey}`;
+  const title = video.title || firstTitleLine(video.bodyExcerpt) || `桌面微信视频号最新视频 ${index + 1} - ${acc.nickname} - ${dayKey}`;
+  const metricsEvidence = buildWechatMetricsEvidence(video, opened);
   const res = upsertCapture({
     url,
     platform: PLATFORM,
@@ -150,28 +200,16 @@ function saveWechatDesktopVideoItem(acc, video, { opened, now, index }) {
     account_id: acc.id,
     author_name: acc.nickname,
     title,
-    body_excerpt: video.bodyExcerpt || `桌面微信视频号「${acc.nickname}」最新视频第 ${index + 1} 条。`,
+    body_excerpt: video.bodyExcerpt || title,
     metrics_raw: {
       like: video.like,
-      share: video.redHeart,
+      share: video.share,
       comment: video.comment,
       favorite: video.favorite,
     },
     metrics_source: 'desktop_agent',
     metrics_confidence: video.metricsConfidence || 'desktop_wechat',
-    metrics_evidence: {
-      navigation: {
-        source: 'macos_accessibility',
-        method: opened.method,
-        detail: opened.detail,
-      },
-      metrics: {
-        like: { label: '点赞', raw: video.likeRaw ?? video.like },
-        share: { label: '红心', raw: video.redHeartRaw ?? video.redHeart },
-        favorite: { label: '收藏', raw: video.favoriteRaw ?? video.favorite },
-        comment: { label: '评论', raw: video.commentRaw ?? video.comment },
-      },
-    },
+    metrics_evidence: metricsEvidence,
     publish_time: video.publishTime || null,
     screenshot_path: video.screenshotPath || null,
     cover_url: video.coverUrl || null,
@@ -188,24 +226,63 @@ function saveWechatDesktopVideoItem(acc, video, { opened, now, index }) {
 }
 
 function normalizeWechatVideoItem(item, index) {
+  const bodyExcerpt = String(firstPresent(item.bodyExcerpt, item.body_excerpt, item.expandedText, item.expanded_text, item.textDump, item.rawText, '') || '').trim();
+  const title = String(firstPresent(item.title, firstTitleLine(bodyExcerpt), '') || '').trim();
+  const metricPositions = item.metricPositions || item.metric_positions || {};
   return {
-    title: String(item.title || '').trim(),
-    bodyExcerpt: item.bodyExcerpt || item.body_excerpt || null,
-    like: firstPresent(item.like, item.likeCount, item.like_count, item.thumbsUp),
-    likeRaw: firstPresent(item.likeRaw, item.like_raw),
-    redHeart: firstPresent(item.redHeart, item.redHeartCount, item.red_heart, item.red_heart_count, item.share, item.share_count),
-    redHeartRaw: firstPresent(item.redHeartRaw, item.red_heart_raw, item.shareRaw, item.share_raw),
-    favorite: firstPresent(item.favorite, item.favoriteCount, item.favorite_count),
-    favoriteRaw: firstPresent(item.favoriteRaw, item.favorite_raw),
+    title,
+    bodyExcerpt,
+    like: firstPresent(item.like, item.likeCount, item.like_count, item.thumbsUp, item.thumbs_up),
+    likeRaw: firstPresent(item.likeRaw, item.like_raw, item.like),
+    share: firstPresent(item.share, item.shareCount, item.share_count),
+    shareRaw: firstPresent(item.shareRaw, item.share_raw, item.share),
+    favorite: firstPresent(item.favorite, item.favoriteCount, item.favorite_count, item.redHeart, item.redHeartCount, item.red_heart_count),
+    favoriteRaw: firstPresent(item.favoriteRaw, item.favorite_raw, item.redHeartRaw, item.red_heart_raw, item.favorite),
     comment: firstPresent(item.comment, item.commentCount, item.comment_count),
-    commentRaw: firstPresent(item.commentRaw, item.comment_raw),
+    commentRaw: firstPresent(item.commentRaw, item.comment_raw, item.comment),
     publishTime: item.publishTime || item.publish_time || null,
     screenshotPath: saveWechatScreenshot(item.screenshotData, item.screenshotPath || item.screenshot_path, index),
     coverUrl: item.coverUrl || item.cover_url || null,
     durationText: item.durationText || item.duration_text || null,
     metricsConfidence: item.metricsConfidence || item.metrics_confidence || 'desktop_wechat',
     url: item.url || null,
+    rawText: item.rawText || item.raw_text || item.textDump || item.text_dump || null,
+    frames: Array.isArray(item.frames) ? item.frames : [],
+    metricPositions,
   };
+}
+
+function buildWechatMetricsEvidence(video, opened) {
+  const position = (metric) => video.metricPositions?.[metric] || null;
+  return {
+    navigation: {
+      source: 'macos_accessibility',
+      method: opened.method,
+      detail: opened.detail,
+    },
+    like: { label: '点赞', raw: video.likeRaw ?? video.like, source: 'desktop_wechat', position: position('like') },
+    share: { label: '转发', raw: video.shareRaw ?? video.share, source: 'desktop_wechat', position: position('share') },
+    favorite: { label: '收藏/红心', raw: video.favoriteRaw ?? video.favorite, source: 'desktop_wechat', position: position('favorite') },
+    comment: { label: '评论', raw: video.commentRaw ?? video.comment, source: 'desktop_wechat', position: position('comment') },
+    rawText: video.rawText || null,
+    frames: video.frames || [],
+  };
+}
+
+function mergeNavigationEvidence(...parts) {
+  return {
+    method: parts.map((p) => p?.method).filter(Boolean).join('+') || 'unknown',
+    detail: parts.map((p) => p?.detail).filter(Boolean).join('；'),
+  };
+}
+
+function firstTitleLine(text) {
+  const lines = String(text || '')
+    .split(/\r?\n| {2,}/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^\d+(\.\d+)?\s*[万wWkK]?$/.test(line));
+  return lines[0] || null;
 }
 
 function firstPresent(...values) {
@@ -217,7 +294,9 @@ function parseCollectedVideos(detail) {
   if (!text) return [];
   try {
     const parsed = JSON.parse(text);
-    return Array.isArray(parsed) ? parsed : [];
+    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed.items)) return parsed.items;
+    return [];
   } catch {
     return [];
   }
@@ -303,6 +382,11 @@ function applyOutcome(result, outcome) {
   result.details.push(outcome);
 }
 
+function normalizeWechatVideoCount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(1, Math.min(10, Math.floor(n))) : DEFAULT_WECHAT_VIDEOS_PER_ACCOUNT;
+}
+
 function isPatrolledSince(acc, startISO) {
   const t = Date.parse(acc?.last_patrolled_at || '');
   const start = Date.parse(startISO || '');
@@ -327,7 +411,13 @@ function friendlyWechatDesktopError(e) {
     return '桌面微信未登录或视频号窗口不可用，请先手动登录微信';
   }
   if (e?.code === 'open_channels_home' || /未找到桌面微信视频号入口|未找到视频号入口/.test(message)) {
-    return '没有找到桌面微信的视频号入口：请先把微信主窗口从台前调度/左侧缩略图展开到屏幕中央，确认左侧栏能看到“视频号”后再重试';
+    return '没有找到桌面微信的视频号入口：请确认微信主窗口可见，左侧栏能看到“视频号”小图标，然后重试';
+  }
+  if (e?.code === 'profile_entry' || /未找到视频号右上角人物头像/.test(message)) {
+    return '没有找到视频号右上角的小人入口：请确认当前已进入视频号窗口，而不是微信聊天窗口';
+  }
+  if (e?.code === 'open_following_overview' || /未找到左侧关注/.test(message)) {
+    return '没有找到右上角小人入口后的左侧“关注”：请确认已进入赞和收藏/个人总览页，而不是顶部视频流“关注”页';
   }
   if (e?.code === 'wechat_window_empty' || /微信主窗口是空白窗口|没有暴露可操作控件/.test(message)) {
     return '桌面微信主窗口当前是空白窗口，没有暴露聊天列表或左侧栏控件；请先重启微信或重新登录微信，确认能看到左侧栏“视频号”后再重试';
@@ -338,10 +428,10 @@ function friendlyWechatDesktopError(e) {
 async function defaultWechatScriptRunner(step, payload = {}) {
   const script = appleScriptForStep(step, payload);
   try {
-    const { stdout, stderr } = await execFileAsync('osascript', ['-e', script], { timeout: 45_000 });
+    const { stdout, stderr } = await execFileAsync('osascript', ['-e', script], { timeout: 60_000 });
     const parsed = parseScriptResult(stdout, stderr);
     if (step === 'collect_latest_videos' && parsed.ok) {
-      const items = parseCollectedVideos(parsed.detail);
+      const items = Array.isArray(parsed.items) ? parsed.items : parseCollectedVideos(parsed.detail);
       if (items.length) {
         const screenshotPath = await captureWechatDesktopScreenshot(payload.nickname || 'wechat');
         parsed.items = items.map((item) => ({ ...item, screenshotPath: item.screenshotPath || screenshotPath }));
@@ -375,78 +465,109 @@ async function captureWechatDesktopScreenshot(label) {
 
 function parseScriptResult(stdout, stderr) {
   const text = String(stdout || '').trim() || String(stderr || '').trim();
+  if (!text) return { ok: false, code: 'osascript', message: 'osascript 未返回结果' };
+  if (text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object') {
+        return {
+          ok: parsed.ok === true,
+          code: parsed.code || parsed.step || 'osascript',
+          method: parsed.method || '',
+          detail: parsed.detail || '',
+          message: parsed.message || parsed.detail || '',
+          items: Array.isArray(parsed.items) ? parsed.items : undefined,
+        };
+      }
+    } catch {
+      // fall through to legacy pipe parser
+    }
+  }
   const [status, code = '', method = '', ...rest] = text.split('|');
-  if (status === 'OK') return { ok: true, method, detail: rest.join('|') };
+  if (status === 'OK') return { ok: true, code, method, detail: rest.join('|') };
   return { ok: false, code: code || 'osascript', message: rest.join('|') || text || 'osascript 未返回结果' };
 }
 
 function appleScriptForStep(step, payload = {}) {
   const nickname = appleString(payload.nickname || '');
-  const terms = {
-    assert_accessibility: '{}',
-    activate_wechat: '{}',
-    open_channels_home: '{"视频号", "Channels"}',
-    open_profile_entry: '{"头像", "个人", "我的", "我", "Profile"}',
-    open_overview: '{"我的关注", "关注", "博主", "创作者", "账号", "总览"}',
-    open_creator: `{${nickname}}`,
-    collect_latest_videos: '{}',
-  }[step];
-  if (!terms) throw new Error(`unknown desktop wechat step: ${step}`);
+  const count = normalizeWechatVideoCount(payload.count);
+  const keepTabTitle = appleString(payload.keepTabTitle || '关注');
+  const knownSteps = new Set([
+    'assert_accessibility',
+    'activate_wechat',
+    'open_channels_home',
+    'open_profile_entry',
+    'open_overview',
+    'open_following_overview',
+    'cleanup_autoplay_tabs',
+    'open_creator',
+    'collect_latest_videos',
+    'close_creator_tabs',
+    'close_channels_tabs',
+  ]);
+  if (!knownSteps.has(step)) throw new Error(`unknown desktop wechat step: ${step}`);
 
   return `
 on run
   tell application "System Events"
-    if UI elements enabled is false then return "ERROR|accessibility||辅助功能权限未开启"
+    if UI elements enabled is false then return my vbp_result(false, "accessibility", "ax", "辅助功能权限未开启")
   end tell
   tell application id "com.tencent.xinWeChat"
     activate
     reopen
   end tell
-  delay 0.8
+  delay 0.6
   tell application "System Events"
     set targetProcess to my vbp_process("${step}")
-    if targetProcess is missing value then return "ERROR|not_logged_in||未找到桌面微信进程"
+    if targetProcess is missing value then return my vbp_result(false, "not_logged_in", "ax", "未找到桌面微信进程")
     set visible of targetProcess to true
     set frontmost of targetProcess to true
     my vbp_raise_window(targetProcess)
     if "${step}" is "assert_accessibility" then
       try
         set windowCount to count of windows of targetProcess
-        if windowCount < 1 then return "ERROR|not_logged_in||桌面微信没有可用窗口"
+        if windowCount < 1 then return my vbp_result(false, "not_logged_in", "ax", "桌面微信没有可用窗口")
         set ignored to name of window 1 of targetProcess
       on error errMsg
-        return "ERROR|accessibility||" & errMsg
+        return my vbp_result(false, "accessibility", "ax", errMsg)
       end try
-      return "OK|accessibility|ax|辅助功能权限可用，已验证可读取微信窗口"
-    end if
-    if "${step}" is "activate_wechat" then return "OK|activate|ax|已激活并置前桌面微信"
-    my vbp_raise_window(targetProcess)
-    if "${step}" is "open_channels_home" then
+      return my vbp_result(true, "assert_accessibility", "ax", "辅助功能权限可用，已验证可读取微信窗口")
+    else if "${step}" is "activate_wechat" then
+      return my vbp_result(true, "activate_wechat", "ax", "已激活并置前桌面微信")
+    else if "${step}" is "open_channels_home" then
       if (my vbp_accessible_content_count(targetProcess)) < 1 then
         my vbp_restore_wechat_window(targetProcess)
-        delay 0.8
+        delay 0.6
       end if
       if (my vbp_accessible_content_count(targetProcess)) < 1 then
-        return "ERROR|wechat_window_empty||桌面微信主窗口是空白窗口，没有暴露可操作控件"
+        return my vbp_result(false, "wechat_window_empty", "ax", "桌面微信主窗口是空白窗口，没有暴露可操作控件")
       end if
-    end if
-    if "${step}" is "open_profile_entry" then
-      if my vbp_click_named(targetProcess, ${terms}, true) then return "OK|open_profile_entry|ax|已点击右上角人物头像"
-      if my vbp_click_top_right(targetProcess) then return "OK|open_profile_entry|coordinate|未找到头像元素，已使用右上角坐标兜底"
-      return "ERROR|profile_entry||未找到视频号右上角人物头像"
+      if my vbp_click_named(targetProcess, {"视频号", "Channels"}, false) then return my vbp_result(true, "open_channels_home", "ax", "已点击视频号入口")
+      if my vbp_click_channels_sidebar_fixed(targetProcess) then return my vbp_result(true, "open_channels_home", "fixed_coordinate", "已精准点击左侧视频号小图标中心")
+      return my vbp_result(false, "open_channels_home", "fixed_coordinate", "未找到桌面微信视频号入口")
+    else if "${step}" is "open_profile_entry" then
+      if my vbp_click_profile_entry(targetProcess) then return my vbp_result(true, "open_profile_entry", "profile_icon", "已点击右上角小人入口")
+      return my vbp_result(false, "profile_entry", "profile_icon", "未找到视频号右上角人物头像")
+    else if "${step}" is "open_overview" then
+      if my vbp_click_named(targetProcess, {"赞和收藏", "我的视频号", "个人中心", "个人主页"}, false) then return my vbp_result(true, "open_overview", "ax", "已进入赞和收藏/个人总览页")
+      return my vbp_result(true, "open_overview", "already_on_overview", "未发现需要额外点击的总览入口，继续查找左侧关注")
+    else if "${step}" is "open_following_overview" then
+      if my vbp_click_left_following(targetProcess) then return my vbp_result(true, "open_following_overview", "left_sidebar_only", "已点击个人总览左侧关注")
+      return my vbp_result(false, "open_following_overview", "left_sidebar_only", "未找到左侧关注，避免误点顶部关注")
+    else if "${step}" is "cleanup_autoplay_tabs" then
+      return my vbp_result(true, "cleanup_autoplay_tabs", "protect_following_tab", my vbp_cleanup_autoplay_tabs(targetProcess, ${keepTabTitle}))
     else if "${step}" is "open_creator" then
-      if my vbp_click_text(targetProcess, ${nickname}) then return "OK|open_creator|ax|已打开匹配博主"
-      if my vbp_search_and_click(targetProcess, ${nickname}) then return "OK|open_creator|ax_search|已搜索并打开匹配博主"
-      return "ERROR|creator_not_found||未在桌面微信视频号里找到匹配博主"
-    else if "${step}" is "open_channels_home" then
-      if my vbp_click_named(targetProcess, ${terms}, false) then return "OK|open_channels_home|ax|已点击视频号入口"
-      if my vbp_click_channels_sidebar(targetProcess) then return "OK|open_channels_home|coordinate|未找到视频号文字控件，已使用左侧栏坐标兜底"
-      return "ERROR|open_channels_home||未找到桌面微信视频号入口"
+      if my vbp_click_creator_in_following(targetProcess, ${nickname}) then return my vbp_result(true, "open_creator", "following_list", "已从关注总览打开匹配博主")
+      if my vbp_search_and_click_creator(targetProcess, ${nickname}) then return my vbp_result(true, "open_creator", "search", "已搜索并打开匹配博主")
+      return my vbp_result(false, "creator_not_found", "following_list", "未在桌面微信视频号里找到匹配博主")
     else if "${step}" is "collect_latest_videos" then
-      return "OK|collect_latest_videos|ax|" & my vbp_collect_latest_videos(targetProcess)
-    else
-      if my vbp_click_named(targetProcess, ${terms}, false) then return "OK|${step}|ax|已完成桌面微信步骤 ${step}"
-      return "ERROR|${step}||未找到桌面微信控件 ${step}"
+      return my vbp_collect_latest_videos(targetProcess, ${count})
+    else if "${step}" is "close_creator_tabs" then
+      return my vbp_result(true, "close_creator_tabs", "protect_following_tab", my vbp_close_non_following_tabs(targetProcess, ${keepTabTitle}))
+    else if "${step}" is "close_channels_tabs" then
+      set closeDetail to my vbp_close_non_following_tabs(targetProcess, ${keepTabTitle})
+      my vbp_return_wechat_home(targetProcess)
+      return my vbp_result(true, "close_channels_tabs", "cleanup", closeDetail & "；已回到微信首页")
     end if
   end tell
 end run
@@ -475,25 +596,12 @@ end vbp_process
 on vbp_raise_window(targetProcessRef)
   tell application "System Events"
     try
-      tell process "WeChat"
-        try
-          click menu item "微信" of menu 1 of menu bar item "窗口" of menu bar 1
-        end try
-        try
-          click menu item "聊天" of menu 1 of menu bar item "窗口" of menu bar 1
-        end try
-        try
-          click menu item "前置全部窗口" of menu 1 of menu bar item "窗口" of menu bar 1
-        end try
-      end tell
-    end try
-    try
       set value of attribute "AXMinimized" of window 1 of targetProcessRef to false
     end try
     try
       perform action "AXRaise" of window 1 of targetProcessRef
     end try
-    delay 0.5
+    delay 0.4
   end tell
 end vbp_raise_window
 
@@ -502,28 +610,19 @@ on vbp_restore_wechat_window(targetProcessRef)
     try
       tell process "WeChat"
         try
-          click menu item "从组中移除窗口" of menu 1 of menu bar item "窗口" of menu bar 1
-          delay 0.5
-        end try
-        try
           click menu item "聊天" of menu 1 of menu bar item "窗口" of menu bar 1
-          delay 0.5
+          delay 0.4
         end try
         try
           click menu item "微信" of menu 1 of menu bar item "窗口" of menu bar 1
-          delay 0.5
+          delay 0.4
         end try
         try
           click menu item "前置全部窗口" of menu 1 of menu bar item "窗口" of menu bar 1
         end try
       end tell
     end try
-    try
-      set value of attribute "AXMinimized" of window 1 of targetProcessRef to false
-    end try
-    try
-      perform action "AXRaise" of window 1 of targetProcessRef
-    end try
+    my vbp_raise_window(targetProcessRef)
   end tell
 end vbp_restore_wechat_window
 
@@ -546,23 +645,23 @@ on vbp_text(el)
       set end of parts to description of el
     end try
     try
-      set end of parts to value of el as text
+      set v to value of el
+      if v is not missing value then set end of parts to v as text
     end try
     return parts as text
   end tell
 end vbp_text
 
-on vbp_click_named(targetProcessRef, terms, topRightOnly)
+on vbp_click_named(targetProcessRef, terms, rightSideOnly)
   tell application "System Events"
     set elems to entire contents of targetProcessRef
     repeat with el in elems
       set label to my vbp_text(el)
       repeat with term in terms
         if label contains (term as text) then
-          if topRightOnly then
+          if rightSideOnly then
             try
               set p to position of el
-              set s to size of el
               set w to window 1 of targetProcessRef
               set wp to position of w
               set ws to size of w
@@ -571,7 +670,7 @@ on vbp_click_named(targetProcessRef, terms, topRightOnly)
           end if
           try
             click el
-            delay 1.2
+            delay 1.0
             return true
           end try
         end if
@@ -581,99 +680,324 @@ on vbp_click_named(targetProcessRef, terms, topRightOnly)
   return false
 end vbp_click_named
 
-on vbp_click_text(targetProcessRef, term)
+on vbp_click_channels_sidebar_fixed(targetProcessRef)
+  tell application "System Events"
+    try
+      set w to window 1 of targetProcessRef
+      set p to position of w
+      set s to size of w
+      set targetX to (item 1 of p) + 55
+      set targetY to (item 2 of p) + ((item 2 of s) * 0.45)
+      click at {targetX, targetY}
+      delay 1.1
+      return true
+    end try
+  end tell
+  return false
+end vbp_click_channels_sidebar_fixed
+
+on vbp_click_profile_entry(targetProcessRef)
+  tell application "System Events"
+    if my vbp_click_named(targetProcessRef, {"头像", "个人", "我的", "我", "Profile"}, true) then return true
+    try
+      set w to window 1 of targetProcessRef
+      set p to position of w
+      set s to size of w
+      click at {(item 1 of p) + (item 1 of s) - 54, (item 2 of p) + 108}
+      delay 1.1
+      return true
+    end try
+  end tell
+  return false
+end vbp_click_profile_entry
+
+on vbp_click_left_following(targetProcessRef)
+  tell application "System Events"
+    set w to window 1 of targetProcessRef
+    set wp to position of w
+    set ws to size of w
+    repeat with el in entire contents of targetProcessRef
+      set label to my vbp_text(el)
+      if label contains "关注" then
+        try
+          set p to position of el
+          if item 1 of p < (item 1 of wp) + ((item 1 of ws) * 0.28) then
+            click el
+            delay 1.1
+            return true
+          end if
+        end try
+      end if
+    end repeat
+  end tell
+  return false
+end vbp_click_left_following
+
+on vbp_cleanup_autoplay_tabs(targetProcessRef, keepTitle)
+  set closedText to my vbp_close_non_following_tabs(targetProcessRef, keepTitle)
+  return closedText & "；已保护标题含“" & keepTitle & "”的关注总览标签"
+end vbp_cleanup_autoplay_tabs
+
+on vbp_close_non_following_tabs(targetProcessRef, keepTitle)
+  tell application "System Events"
+    set closedCount to 0
+    try
+      set w to window 1 of targetProcessRef
+      set wp to position of w
+      set ws to size of w
+      repeat with el in entire contents of targetProcessRef
+        set label to my vbp_text(el)
+        if label contains "关闭" then
+          try
+            set p to position of el
+            if (item 2 of p) < (item 2 of wp) + 85 then
+              if label does not contain keepTitle and label is not "关闭" then
+                click el
+                delay 0.3
+                set closedCount to closedCount + 1
+              end if
+            end if
+          end try
+        end if
+      end repeat
+    end try
+    return "已关闭非关注标签 " & closedCount & " 个"
+  end tell
+end vbp_close_non_following_tabs
+
+on vbp_click_creator_in_following(targetProcessRef, term)
   tell application "System Events"
     repeat with el in entire contents of targetProcessRef
-      if (my vbp_text(el)) contains term then
+      set label to my vbp_text(el)
+      if label contains term then
         try
           click el
-          delay 1.4
+          delay 1.3
           return true
         end try
       end if
     end repeat
   end tell
   return false
-end vbp_click_text
+end vbp_click_creator_in_following
 
-on vbp_search_and_click(targetProcessRef, term)
+on vbp_search_and_click_creator(targetProcessRef, term)
   tell application "System Events"
     if my vbp_click_named(targetProcessRef, {"搜索", "Search"}, false) then
       keystroke term
       key code 36
-      delay 1.8
-      return my vbp_click_text(targetProcessRef, term)
+      delay 1.6
+      return my vbp_click_creator_in_following(targetProcessRef, term)
     end if
   end tell
   return false
-end vbp_search_and_click
+end vbp_search_and_click_creator
 
-on vbp_click_top_right(targetProcessRef)
+on vbp_collect_latest_videos(targetProcessRef, maxCount)
   tell application "System Events"
+    set jsonItems to ""
+    set collectedCount to 0
+    repeat with i from 1 to maxCount
+      if i is 1 then
+        if not my vbp_open_first_non_pinned_video(targetProcessRef) then exit repeat
+      end if
+      delay 0.9
+      my vbp_pause_video_if_possible(targetProcessRef)
+      my vbp_click_expand_if_present(targetProcessRef)
+      set itemJson to my vbp_collect_current_video_json(targetProcessRef, i)
+      if itemJson is not "" then
+        if collectedCount > 0 then set jsonItems to jsonItems & ","
+        set jsonItems to jsonItems & itemJson
+        set collectedCount to collectedCount + 1
+      end if
+      if i < maxCount then
+        if not my vbp_click_next_video_arrow(targetProcessRef) then exit repeat
+      end if
+    end repeat
+    return "{\\"ok\\":true,\\"code\\":\\"collect_latest_videos\\",\\"method\\":\\"video_detail_sequence\\",\\"detail\\":\\"collected " & collectedCount & "\\",\\"items\\":[" & jsonItems & "]}"
+  end tell
+end vbp_collect_latest_videos
+
+on vbp_open_first_non_pinned_video(targetProcessRef)
+  tell application "System Events"
+    set w to window 1 of targetProcessRef
+    set wp to position of w
+    set ws to size of w
+    set minY to (item 2 of wp) + 360
+    set bestEl to missing value
+    set bestY to 99999
+    repeat with el in entire contents of targetProcessRef
+      set label to my vbp_text(el)
+      if label is not "" and label does not contain "置顶" and label does not contain "预约" and label does not contain "直播" then
+        try
+          set p to position of el
+          set s to size of el
+          if (item 2 of p) > minY and (item 1 of s) > 60 and (item 2 of s) > 60 then
+            if (item 2 of p) < bestY then
+              set bestY to item 2 of p
+              set bestEl to el
+            end if
+          end if
+        end try
+      end if
+    end repeat
+    if bestEl is not missing value then
+      try
+        click bestEl
+        delay 1.2
+        return true
+      end try
+    end if
     try
-      set w to window 1 of targetProcessRef
-      set p to position of w
-      set s to size of w
-      click at {(item 1 of p) + (item 1 of s) - 54, (item 2 of p) + 54}
+      click at {(item 1 of wp) + 165, (item 2 of wp) + 555}
       delay 1.2
       return true
     end try
   end tell
   return false
-end vbp_click_top_right
+end vbp_open_first_non_pinned_video
 
-on vbp_click_channels_sidebar(targetProcessRef)
+on vbp_pause_video_if_possible(targetProcessRef)
+  tell application "System Events"
+    try
+      key code 49
+      delay 0.15
+    end try
+  end tell
+end vbp_pause_video_if_possible
+
+on vbp_click_expand_if_present(targetProcessRef)
+  tell application "System Events"
+    repeat with el in entire contents of targetProcessRef
+      set label to my vbp_text(el)
+      if label contains "展开" then
+        try
+          click el
+          delay 0.35
+          return true
+        end try
+      end if
+    end repeat
+  end tell
+  return false
+end vbp_click_expand_if_present
+
+on vbp_click_next_video_arrow(targetProcessRef)
   tell application "System Events"
     try
       set w to window 1 of targetProcessRef
       set p to position of w
       set s to size of w
-      set leftX to (item 1 of p) + 35
-      set topY to item 2 of p
-      set heightLimit to (item 2 of p) + (item 2 of s) - 48
-      repeat with offsetY in {172, 212, 252, 292}
-        set targetY to topY + offsetY
-        if targetY < heightLimit then
-          click at {leftX, targetY}
-          delay 1.2
-          return true
-        end if
-      end repeat
+      click at {(item 1 of p) + (item 1 of s) - 70, (item 2 of p) + ((item 2 of s) * 0.54)}
+      delay 0.9
+      return true
     end try
   end tell
   return false
-end vbp_click_channels_sidebar
+end vbp_click_next_video_arrow
 
-on vbp_collect_latest_videos(targetProcessRef)
+on vbp_collect_current_video_json(targetProcessRef, ordinal)
   tell application "System Events"
-    set texts to {}
-    try
-      repeat with el in entire contents of targetProcessRef
-        set label to my vbp_text(el)
-        if label is not "" then
-          if label does not contain "点赞" and label does not contain "评论" and label does not contain "收藏" and label does not contain "转发" and length of label > 5 then
-            set end of texts to label
-          end if
-        end if
-        if (count of texts) >= 3 then exit repeat
-      end repeat
-    end try
-    set out to "["
-    set i to 0
-    repeat with t in texts
-      set i to i + 1
-      if i > 1 then set out to out & ","
-      set out to out & "{\\"title\\":\\"" & my vbp_json_escape(t as text) & "\\",\\"like\\":null,\\"redHeart\\":null,\\"favorite\\":null,\\"comment\\":null}"
-    end repeat
-    return out & "]"
+    set allText to my vbp_visible_text_dump(targetProcessRef)
+    set likeMetric to my vbp_metric_at_bucket(targetProcessRef, "like")
+    set shareMetric to my vbp_metric_at_bucket(targetProcessRef, "share")
+    set favoriteMetric to my vbp_metric_at_bucket(targetProcessRef, "favorite")
+    set commentMetric to my vbp_metric_at_bucket(targetProcessRef, "comment")
+    set titleText to my vbp_title_from_dump(allText, ordinal)
+    return "{\\"title\\":\\"" & my vbp_json_escape(titleText) & "\\",\\"bodyExcerpt\\":\\"" & my vbp_json_escape(allText) & "\\",\\"like\\":\\"" & my vbp_json_escape(likeMetric) & "\\",\\"share\\":\\"" & my vbp_json_escape(shareMetric) & "\\",\\"favorite\\":\\"" & my vbp_json_escape(favoriteMetric) & "\\",\\"comment\\":\\"" & my vbp_json_escape(commentMetric) & "\\",\\"rawText\\":\\"" & my vbp_json_escape(allText) & "\\",\\"metricPositions\\":{\\"like\\":\\"right-bottom-like\\",\\"share\\":\\"right-bottom-share\\",\\"favorite\\":\\"right-bottom-favorite\\",\\"comment\\":\\"right-bottom-comment\\"}}"
   end tell
-end vbp_collect_latest_videos
+end vbp_collect_current_video_json
+
+on vbp_visible_text_dump(targetProcessRef)
+  tell application "System Events"
+    set out to ""
+    repeat with el in entire contents of targetProcessRef
+      set label to my vbp_text(el)
+      if label is not "" then
+        if out does not contain label then set out to out & label & linefeed
+      end if
+    end repeat
+    return out
+  end tell
+end vbp_visible_text_dump
+
+on vbp_title_from_dump(dumpText, ordinal)
+  set AppleScript's text item delimiters to linefeed
+  set linesList to text items of dumpText
+  set AppleScript's text item delimiters to ""
+  repeat with lineText in linesList
+    set t to lineText as text
+    if length of t > 4 and t does not contain "视频号" and t does not contain "关注" and t does not contain "评论" and t does not contain "收藏" and t does not contain "转发" and t does not contain "点赞" then return t
+  end repeat
+  return "桌面微信视频号视频 " & ordinal
+end vbp_title_from_dump
+
+on vbp_metric_at_bucket(targetProcessRef, bucketName)
+  tell application "System Events"
+    set w to window 1 of targetProcessRef
+    set wp to position of w
+    set ws to size of w
+    set bottomMin to (item 2 of wp) + (item 2 of ws) - 260
+    set rightMin to (item 1 of wp) + (item 1 of ws) - 520
+    set bucketIndex to 1
+    if bucketName is "share" then set bucketIndex to 2
+    if bucketName is "favorite" then set bucketIndex to 3
+    if bucketName is "comment" then set bucketIndex to 4
+    set candidates to {}
+    repeat with el in entire contents of targetProcessRef
+      set label to my vbp_text(el)
+      if my vbp_looks_metric(label) then
+        try
+          set p to position of el
+          if (item 2 of p) > bottomMin and (item 1 of p) > rightMin then
+            set end of candidates to label
+          end if
+        end try
+      end if
+    end repeat
+    if (count of candidates) >= bucketIndex then return item bucketIndex of candidates as text
+  end tell
+  return ""
+end vbp_metric_at_bucket
+
+on vbp_looks_metric(valueText)
+  set s to valueText as text
+  if s is "" then return false
+  if length of s > 12 then return false
+  set allowedChars to "0123456789０１２３４５６７８９.,，.万wWkK+＋"
+  repeat with i from 1 to length of s
+    if allowedChars does not contain character i of s then return false
+  end repeat
+  return true
+end vbp_looks_metric
+
+on vbp_return_wechat_home(targetProcessRef)
+  tell application "System Events"
+    try
+      tell application id "com.tencent.xinWeChat" to activate
+      delay 0.3
+      set p to first process whose bundle identifier is "com.tencent.xinWeChat"
+      set frontmost of p to true
+      my vbp_raise_window(p)
+    end try
+  end tell
+end vbp_return_wechat_home
+
+on vbp_result(okFlag, codeText, methodText, detailText)
+  if okFlag then
+    set okValue to "true"
+  else
+    set okValue to "false"
+  end if
+  return "{\\"ok\\":" & okValue & ",\\"code\\":\\"" & my vbp_json_escape(codeText) & "\\",\\"method\\":\\"" & my vbp_json_escape(methodText) & "\\",\\"detail\\":\\"" & my vbp_json_escape(detailText) & "\\",\\"message\\":\\"" & my vbp_json_escape(detailText) & "\\"}"
+end vbp_result
 
 on vbp_json_escape(valueText)
   set s to valueText as text
-  set s to my vbp_replace(s, quote, "'")
-  set s to my vbp_replace(s, return, " ")
-  set s to my vbp_replace(s, linefeed, " ")
+  set s to my vbp_replace(s, "\\\\", "\\\\\\\\")
+  set s to my vbp_replace(s, quote, "\\\\\\"")
+  set s to my vbp_replace(s, return, "\\\\n")
+  set s to my vbp_replace(s, linefeed, "\\\\n")
   return s
 end vbp_json_escape
 
@@ -696,4 +1020,5 @@ export const __wechatDesktopInternals = {
   appleScriptForStep,
   friendlyWechatDesktopError,
   parseScriptResult,
+  normalizeWechatVideoCount,
 };

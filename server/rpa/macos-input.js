@@ -188,6 +188,130 @@ for (var i = 0; i < deltasY.length; i++) {
 postWheel(0, 0, PHASE_ENDED);`;
 }
 
+function escapeAppleScriptText(value) {
+  return String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+export function normalizeWechatTabTitle(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+export function shouldCloseWechatTab(tab, { targetTitle = '视频号', keepTitle = '关注' } = {}) {
+  const title = normalizeWechatTabTitle(tab?.title);
+  if (!title) return false;
+  if (title === normalizeWechatTabTitle(keepTitle)) return false;
+  if (tab?.selected === true) return false;
+  return title === normalizeWechatTabTitle(targetTitle);
+}
+
+export function buildCloseInactiveWechatTabScript({ targetTitle = '视频号', keepTitle = '关注' } = {}) {
+  const target = escapeAppleScriptText(normalizeWechatTabTitle(targetTitle));
+  const keep = escapeAppleScriptText(normalizeWechatTabTitle(keepTitle));
+  return `
+on elementText(el)
+  set t to ""
+  try
+    set t to value of attribute "AXTitle" of el as text
+  end try
+  if t is "" then
+    try
+      set t to name of el as text
+    end try
+  end if
+  if t is "" then
+    try
+      set t to value of el as text
+    end try
+  end if
+  return t
+end elementText
+
+on elementDescription(el)
+  try
+    return description of el as text
+  on error
+    return ""
+  end try
+end elementDescription
+
+on elementSelected(el)
+  try
+    if (value of attribute "AXSelected" of el) is true then return true
+  end try
+  return false
+end elementSelected
+
+on tryCloseElement(el)
+  try
+    perform action "AXClose" of el
+    return true
+  end try
+
+  try
+    set kids to UI elements of el
+    repeat with kid in kids
+      set labelText to (my elementText(kid)) & " " & (my elementDescription(kid))
+      if labelText contains "关闭" or labelText contains "Close" or labelText contains "close" then
+        try
+          click kid
+          return true
+        end try
+        try
+          perform action "AXPress" of kid
+          return true
+        end try
+      end if
+    end repeat
+  end try
+  return false
+end tryCloseElement
+
+tell application "System Events"
+  repeat with processName in {"WeChat", "微信"}
+    if exists process (processName as text) then
+      tell process (processName as text)
+        set frontmost to true
+        repeat with w in windows
+          set foundKeepTab to false
+          try
+            set elems to entire contents of w
+          on error
+            set elems to {}
+          end try
+
+          repeat with el in elems
+            if (my elementText(el)) is "${keep}" then set foundKeepTab to true
+          end repeat
+
+          repeat with el in elems
+            set titleText to my elementText(el)
+            if titleText is "${target}" and titleText is not "${keep}" and (my elementSelected(el)) is false then
+              if my tryCloseElement(el) then
+                if foundKeepTab then
+                  return "closed:kept-current"
+                else
+                  return "closed:no-keep-title-seen"
+                end if
+              end if
+            end if
+          end repeat
+        end repeat
+      end tell
+    end if
+  end repeat
+end tell
+return "not_found"`;
+}
+
+export async function closeInactiveWechatTab(opts = {}) {
+  const out = await runOsa(buildCloseInactiveWechatTabScript(opts), { timeout: opts.timeout ?? 8000 });
+  const status = String(out || '').trim();
+  return {
+    closed: status.startsWith('closed:'),
+    status: status || 'not_found',
+  };
+}
+
 /** 点击全局点坐标。 */
 export async function clickAtPoint(x, y, opts = {}) {
   await runOsa(buildClickScript(x, y, opts), { lang: 'JavaScript' });
@@ -311,6 +435,7 @@ export class MacInputSession {
   }
   async pressEscape() { await keyCode(53); await sleep(200); }
   async closeTab() { await keyCode(13, 'command down'); await sleep(300); } // Cmd+W
+  async closeInactiveTab(opts = {}) { return closeInactiveWechatTab(opts); }
   async copy() { await keyCode(8, 'command down'); await sleep(200); }       // Cmd+C
   async paste() { await keyCode(9, 'command down'); await sleep(250); }      // Cmd+V
   async enter() { await keyCode(36); await sleep(400); }                     // Return

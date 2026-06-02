@@ -12,7 +12,7 @@
  *
  * 导航规格（来自用户）：
  *   视频号：朋友圈下方视频号入口 → 右上小人 → 赞和收藏 → 关注 → 逐个关注博主
- *     → 首进先关掉自动播放的第一个视频 → 跳置顶 → 开第一条 → 读数入库
+ *     → 到达关注总览后关闭左侧旧「视频号」标签（保留当前「关注」标签）→ 跳置顶 → 开第一条 → 读数入库
  *     → 触控板式双指上滑翻页（失败时滚轮兜底）→ 默认每博主 maxVideosPerCreator 条
  *     → 关标签回关注总览。
  *   公众号：左上搜索 → 搜博主 → 进主页（没进就点右上小人）→ 跳置顶/付费
@@ -354,7 +354,8 @@ export async function runWechatPatrol(opts = {}) {
       progress('未能打开视频号入口，停止视频号巡检');
       return result;
     }
-    // 首进关掉自动播放的第一个视频
+    // 首进先尝试退出自动播放层；真正的旧「视频号」标签要等进入「关注」总览后按标题关闭，
+    // 这样不会误关当前正在使用的「关注」标签。
     await session.pressEscape();
     await session.sleep(500);
     const openedProfile = await tap(session, '视频号窗口右上角那个小人一样的按钮', progress, { afterMs: 1500 });
@@ -370,6 +371,16 @@ export async function runWechatPatrol(opts = {}) {
       result.details = pending.map((a) => ({ account: a.nickname, error: '未能打开视频号关注列表' }));
       progress('未能打开视频号关注列表，停止视频号巡检');
       return result;
+    }
+    try {
+      const closeRes = await session.closeInactiveTab({ targetTitle: '视频号', keepTitle: '关注' });
+      if (closeRes.closed) {
+        progress('已关闭左侧旧「视频号」标签，保留当前「关注」总览标签');
+      } else {
+        progress(`未找到可关闭的左侧旧「视频号」标签（${closeRes.status}），继续保留当前「关注」总览`);
+      }
+    } catch (e) {
+      progress(`关闭左侧旧「视频号」标签失败：${e.message}；继续保留当前「关注」总览`);
     }
   }
 

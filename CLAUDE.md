@@ -51,7 +51,7 @@
 - **为什么不一样**：视频号/公众号互动数只在微信桌面端 App 内显示，微信不暴露 CDP 调试端口，Chrome 那套 `goto`/`evaluate` 够不到。所以这条线走 **OS 级视觉 Agent**：`screencapture` 截图 + `osascript`（JXA + CoreGraphics CGEvent）坐标点击/滚动（`server/rpa/macos-input.js`，零依赖、仅 macOS），视觉模型 `ai/observe.js` 的 `locateWechatTarget`（定位按钮像素坐标）/ `readWechatDetail`（读标题/发布时间/互动数）驱动导航（`server/rpa/wechat.js`）。
 - **数字不可信**：视觉读出的数字一律 `metrics_source='desktop_agent'` → needs_review，人工确认前绝不自动达标（不变量 #1）。视觉定位 prompt 禁止点击点赞/支付/验证码等敏感按钮。
 - **不入日报**：视频号/公众号只进独立「视频号·公众号热点」视图（`GET /api/wechat/hotspots`，前端「微信热点」页），按 `server/wechat/score.js` 的时间衰减档位（early_breakout/qualified/watch/below/unknown）排序；绝不进正式每日日报（不变量 #4）。
-- **视频号导航**：视频号入口是左侧竖排里「蝴蝶 / 横向 W 翅膀」形状的图标（视频号官方 logo），在相机光圈状的「朋友圈」图标**正下方**——别点成上方光圈图标（那是看一看/朋友圈，推荐流长得很像，已踩过坑）。入口 → 右上小人 → 赞和收藏 → 关注 → 逐个关注博主 → 首进先 Esc 关掉自动播放的第一个视频（防外放/省内存）→ 跳置顶 → 开第一条读数入库 → 触控板式双指上滑翻页（失败时滚轮兜底）→ 默认每博主 `cfg.wechat.maxVideosPerCreator`(3) 条 → 关详情回关注总览。
+- **视频号导航**：视频号入口是左侧竖排里「蝴蝶 / 横向 W 翅膀」形状的图标（视频号官方 logo），在相机光圈状的「朋友圈」图标**正下方**——别点成上方光圈图标（那是看一看/朋友圈，推荐流长得很像，已踩过坑）。入口 → 右上小人 → 赞和收藏 → 关注 → 到达关注总览后关闭左侧旧「视频号」标签（按标题匹配，只关非当前标签，保留当前「关注」标签，避免外放）→ 逐个关注博主 → 跳置顶 → 开第一条读数入库 → 触控板式双指上滑翻页（失败时滚轮兜底）→ 默认每博主 `cfg.wechat.maxVideosPerCreator`(3) 条 → 关详情回关注总览。
 - **公众号导航**：左上搜索 → 搜博主 → 进主页（没进就点右上小人）→ 跳置顶/付费 → 按窗口开文章 → `parseChinesePublishTime` 读精确发布时间（北京时间）→ 早于窗口即结束该博主 → 入库。
 - **入口**：`POST /api/wechat/patrol/run`（body `{platform:'wechat_channels'|'wechat_article'}`），复用 `control.js` 单活跃巡检 + `/api/patrol/stop` 停止控制（与抖音/小红书互斥）。前端「微信热点巡检」先视频号阶段、后公众号阶段。
 - **坐标导航需在本机实跑校准**：窗口位置因人而异，找不到目标时记录跳过原因、不瞎点。

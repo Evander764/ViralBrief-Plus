@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parsePngSize, imagePxToPoint, buildClickScript, buildScrollScript, buildTrackpadSwipeScript,
+  parsePngSize,
+  imagePxToPoint,
+  buildClickScript,
+  buildScrollScript,
+  buildTrackpadSwipeScript,
+  buildCloseInactiveWechatTabScript,
+  shouldCloseWechatTab,
 } from '../server/rpa/macos-input.js';
 import { parseChinesePublishTime } from '../server/rpa/wechat.js';
 
@@ -54,6 +60,22 @@ test('buildTrackpadSwipeScript：生成连续滚动阶段，模拟触控板上�
   assert.match(s, /PHASE_CHANGED/);
   assert.match(s, /PHASE_ENDED/);
   assert.match(s, /deltasY = \[-/);
+});
+
+test('shouldCloseWechatTab：只关闭非当前的视频号标签，保留关注总览', () => {
+  assert.equal(shouldCloseWechatTab({ title: '视频号', selected: false }), true);
+  assert.equal(shouldCloseWechatTab({ title: '视频号', selected: true }), false);
+  assert.equal(shouldCloseWechatTab({ title: '关注', selected: true }), false);
+  assert.equal(shouldCloseWechatTab({ title: '关注', selected: false }), false);
+  assert.equal(shouldCloseWechatTab({ title: ' 视频号\n', selected: false }), true);
+});
+
+test('buildCloseInactiveWechatTabScript：按标题关闭旧视频号标签并排除关注标签', () => {
+  const s = buildCloseInactiveWechatTabScript({ targetTitle: '视频号', keepTitle: '关注' });
+  assert.match(s, /titleText is "视频号"/);
+  assert.match(s, /titleText is not "关注"/);
+  assert.match(s, /foundKeepTab/);
+  assert.match(s, /AXClose/);
 });
 
 test('parseChinesePublishTime：相对时间', () => {

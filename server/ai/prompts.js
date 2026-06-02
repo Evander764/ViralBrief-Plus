@@ -301,6 +301,7 @@ export const SYSTEM_WECHAT_READ = `你是内容详情读数助手。任务：从
 - 数字保留原始展示文本（如 "1.2万"、"10万+"、"315"），不要自己换算。
 - 发布时间尽量精确：优先"编辑于 XXX"、"举报"附近的时间，或"X小时前"、具体日期。按北京时间理解。
 - 判断是否置顶内容（is_pinned）、是否付费/付费可见内容（is_paid）。
+- 如果截图里正文/描述已经展开，读取可见正文片段到 body_excerpt；未展开或看不清则给 null。
 - 指标键固定为 like/share/favorite/comment/read，按平台对应图标取数：
   · 视频号：like=赞(👍)，share=转发(↗)，favorite=收藏/喜欢(❤️)，comment=评论(💬)，read=null。
   · 公众号：read=阅读，like=赞(👍)，share=在看，favorite=收藏，comment=留言/评论。
@@ -309,6 +310,7 @@ export const SYSTEM_WECHAT_READ = `你是内容详情读数助手。任务：从
 JSON 结构：
 {
   "title": "标题文本或 null",
+  "body_excerpt": "正文/描述可见片段或 null",
   "publish_time": "发布时间原文或 null",
   "is_pinned": true/false,
   "is_paid": true/false,

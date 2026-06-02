@@ -98,9 +98,20 @@ export async function screenPointSize() {
 /** 构造 JXA 点击脚本（纯函数，便于测试）。坐标为全局点。 */
 export function buildClickScript(x, y, { holdMs = 60, button = 'left' } = {}) {
   const isRight = button === 'right';
-  const down = isRight ? '$.kCGEventRightMouseDown' : '$.kCGEventLeftMouseDown';
-  const up = isRight ? '$.kCGEventRightMouseUp' : '$.kCGEventLeftMouseUp';
-  const btn = isRight ? '$.kCGMouseButtonRight' : '$.kCGMouseButtonLeft';
+  const isMiddle = button === 'middle';
+  const down = isMiddle
+    ? '$.kCGEventOtherMouseDown'
+    : (isRight ? '$.kCGEventRightMouseDown' : '$.kCGEventLeftMouseDown');
+  const up = isMiddle
+    ? '$.kCGEventOtherMouseUp'
+    : (isRight ? '$.kCGEventRightMouseUp' : '$.kCGEventLeftMouseUp');
+  const btn = isMiddle ? '2' : (isRight ? '$.kCGMouseButtonRight' : '$.kCGMouseButtonLeft');
+  const middleField = isMiddle
+    ? 'if (typeof $.kCGMouseEventButtonNumber !== "undefined") $.CGEventSetIntegerValueField(d, $.kCGMouseEventButtonNumber, 2);'
+    : '';
+  const middleFieldUp = isMiddle
+    ? 'if (typeof $.kCGMouseEventButtonNumber !== "undefined") $.CGEventSetIntegerValueField(u, $.kCGMouseEventButtonNumber, 2);'
+    : '';
   // 实测：用 CGEvent MouseMoved 定位会落点不准（目标 300,300 实际落到 ~253,179）；
   // CGWarpMouseCursorPosition 则像素级精准（200,200→200,200）。所以先 Warp 再点。
   return `ObjC.import('CoreGraphics');
@@ -109,9 +120,11 @@ var p = $.CGPointMake(${Number(x)}, ${Number(y)});
 $.CGWarpMouseCursorPosition(p);
 $.NSThread.sleepForTimeInterval(0.05);
 var d = $.CGEventCreateMouseEvent($(), ${down}, p, ${btn});
+${middleField}
 $.CGEventPost($.kCGHIDEventTap, d);
 $.NSThread.sleepForTimeInterval(${Math.max(0, Number(holdMs)) / 1000});
 var u = $.CGEventCreateMouseEvent($(), ${up}, p, ${btn});
+${middleFieldUp}
 $.CGEventPost($.kCGHIDEventTap, u);`;
 }
 
@@ -188,6 +201,230 @@ for (var i = 0; i < deltasY.length; i++) {
 postWheel(0, 0, PHASE_ENDED);`;
 }
 
+function keyModifierMask(modifiers = null) {
+  const text = Array.isArray(modifiers) ? modifiers.join(' ') : String(modifiers || '');
+  let mask = 0;
+  if (/command/i.test(text)) mask |= 1 << 20;
+  if (/shift/i.test(text)) mask |= 1 << 17;
+  if (/control|ctrl/i.test(text)) mask |= 1 << 18;
+  if (/option|alternate|alt/i.test(text)) mask |= 1 << 19;
+  return mask;
+}
+
+export function buildKeyCodeScript(code, modifiers = null, { holdMs = 45 } = {}) {
+  const key = Math.max(0, Math.floor(Number(code)));
+  const flags = keyModifierMask(modifiers);
+  return `ObjC.import('CoreGraphics');
+ObjC.import('Foundation');
+var key = ${key};
+var flags = ${flags};
+var down = $.CGEventCreateKeyboardEvent($(), key, true);
+if (flags) $.CGEventSetFlags(down, flags);
+$.CGEventPost($.kCGHIDEventTap, down);
+$.NSThread.sleepForTimeInterval(${Math.max(0, Number(holdMs)) / 1000});
+var up = $.CGEventCreateKeyboardEvent($(), key, false);
+if (flags) $.CGEventSetFlags(up, flags);
+$.CGEventPost($.kCGHIDEventTap, up);`;
+}
+
+export function parseNumberList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => Number(String(item).trim()))
+    .filter(Number.isFinite);
+}
+
+export function wechatChannelsEntryPoint(bounds) {
+  if (bounds?.x == null || bounds?.y == null) {
+    throw new Error('微信主窗口坐标无效');
+  }
+  const x = Number(bounds?.x);
+  const y = Number(bounds?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error('微信主窗口坐标无效');
+  }
+  return {
+    x: Math.round(x + 30),
+    y: Math.round(y + 354),
+  };
+}
+
+export function wechatChannelsProfilePoint(bounds) {
+  const x = Number(bounds?.x);
+  const y = Number(bounds?.y);
+  const width = Number(bounds?.width);
+  if (bounds?.x == null || bounds?.y == null || !Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error('视频号窗口坐标无效');
+  }
+  const rightAnchoredOffset = Number.isFinite(width) && width > 60
+    ? Math.min(width - 30, 894)
+    : 894;
+  return {
+    x: Math.round(x + rightAnchoredOffset),
+    y: Math.round(y + 64),
+  };
+}
+
+export function wechatChannelsFollowMenuPoint(bounds) {
+  const x = Number(bounds?.x);
+  const y = Number(bounds?.y);
+  if (bounds?.x == null || bounds?.y == null || !Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error('视频号窗口坐标无效');
+  }
+  return {
+    x: Math.round(x + 52),
+    y: Math.round(y + 151),
+  };
+}
+
+export function wechatChannelsInitialVideoTabPoint(bounds) {
+  const x = Number(bounds?.x);
+  const y = Number(bounds?.y);
+  if (bounds?.x == null || bounds?.y == null || !Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error('视频号窗口坐标无效');
+  }
+  return {
+    x: Math.round(x + 276),
+    y: Math.round(y + 25),
+  };
+}
+
+export function buildWechatMainWindowBoundsScript() {
+  return `tell application "System Events"
+  repeat with processName in {"WeChat", "微信"}
+    if exists process (processName as text) then
+      tell process (processName as text)
+        repeat with w in windows
+          try
+            if (name of w as text) is "微信" then
+              set p to position of w
+              set s to size of w
+              return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+            end if
+          end try
+        end repeat
+        if (count of windows) > 0 then
+          set w to window 1
+          set p to position of w
+          set s to size of w
+          return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+        end if
+      end tell
+    end if
+  end repeat
+end tell
+return ""`;
+}
+
+export function buildWechatAuxiliaryWindowBoundsScript() {
+  return `tell application "System Events"
+  repeat with processName in {"WeChat", "微信"}
+    if exists process (processName as text) then
+      tell process (processName as text)
+        set bestBounds to ""
+        set bestArea to 0
+        repeat with w in windows
+          try
+            if (name of w as text) is not "微信" then
+              set p to position of w
+              set s to size of w
+              set ww to item 1 of s
+              set hh to item 2 of s
+              if ww >= 500 and hh >= 300 then
+                set area to ww * hh
+                if area > bestArea then
+                  set bestArea to area
+                  set bestBounds to (item 1 of p as text) & "," & (item 2 of p as text) & "," & (ww as text) & "," & (hh as text)
+                end if
+              end if
+            end if
+          end try
+        end repeat
+        if bestBounds is not "" then return bestBounds
+      end tell
+    end if
+  end repeat
+end tell
+return ""`;
+}
+
+export async function getWechatMainWindowBounds() {
+  const out = await runOsa(buildWechatMainWindowBoundsScript(), { timeout: 8000 });
+  const nums = parseNumberList(out);
+  if (nums.length < 4) throw new Error('未能读取微信主窗口位置');
+  return { x: nums[0], y: nums[1], width: nums[2], height: nums[3] };
+}
+
+export async function getWechatAuxiliaryWindowBounds() {
+  const out = await runOsa(buildWechatAuxiliaryWindowBoundsScript(), { timeout: 8000 });
+  const nums = parseNumberList(out);
+  if (nums.length < 4) throw new Error('未能读取视频号窗口位置');
+  return { x: nums[0], y: nums[1], width: nums[2], height: nums[3] };
+}
+
+export async function getWechatWindowCount() {
+  const out = await runOsa(`tell application "System Events"
+  repeat with processName in {"WeChat", "微信"}
+    if exists process (processName as text) then
+      tell process (processName as text)
+        return count of windows
+      end tell
+    end if
+  end repeat
+end tell
+return 0`, { timeout: 8000 });
+  return Number(String(out || '').trim()) || 0;
+}
+
+export async function waitForWechatAuxiliaryWindow({ timeoutMs = 8000, pollMs = 400 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start <= timeoutMs) {
+    try {
+      await getWechatAuxiliaryWindowBounds();
+      return true;
+    } catch { /* keep polling */ }
+    await sleep(pollMs);
+  }
+  return false;
+}
+
+export async function openWechatChannelsEntry({ afterMs = 2500 } = {}) {
+  await activateWeChat();
+  const bounds = await getWechatMainWindowBounds();
+  const point = wechatChannelsEntryPoint(bounds);
+  await clickAtPoint(point.x, point.y, { holdMs: 60 });
+  await sleep(afterMs);
+  const opened = await waitForWechatAuxiliaryWindow({ timeoutMs: 5000 });
+  return { opened, point, bounds };
+}
+
+export async function openWechatChannelsProfile({ afterMs = 7000 } = {}) {
+  await activateWeChat();
+  const bounds = await getWechatAuxiliaryWindowBounds();
+  const point = wechatChannelsProfilePoint(bounds);
+  await clickAtPoint(point.x, point.y, { holdMs: 60 });
+  await sleep(afterMs);
+  return { point, bounds };
+}
+
+export async function openWechatChannelsFollowMenu({ afterMs = 1500 } = {}) {
+  await activateWeChat();
+  const bounds = await getWechatAuxiliaryWindowBounds();
+  const point = wechatChannelsFollowMenuPoint(bounds);
+  await clickAtPoint(point.x, point.y, { holdMs: 60 });
+  await sleep(afterMs);
+  return { point, bounds };
+}
+
+export async function closeWechatChannelsInitialVideoTabFromFollow({ afterMs = 900 } = {}) {
+  await activateWeChat();
+  const bounds = await getWechatAuxiliaryWindowBounds();
+  const point = wechatChannelsInitialVideoTabPoint(bounds);
+  await clickAtPoint(point.x, point.y, { button: 'middle', holdMs: 70 });
+  await sleep(afterMs);
+  return { point, bounds };
+}
+
 function escapeAppleScriptText(value) {
   return String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
@@ -209,61 +446,73 @@ export function buildCloseInactiveWechatTabScript({ targetTitle = '视频号', k
   const keep = escapeAppleScriptText(normalizeWechatTabTitle(keepTitle));
   return `
 on elementText(el)
-  set t to ""
-  try
-    set t to value of attribute "AXTitle" of el as text
-  end try
-  if t is "" then
+  tell application "System Events"
+    set t to ""
     try
-      set t to name of el as text
+      set t to value of attribute "AXTitle" of el as text
     end try
-  end if
-  if t is "" then
-    try
-      set t to value of el as text
-    end try
-  end if
-  return t
+    if t is "" then
+      try
+        set t to name of el as text
+      end try
+    end if
+    if t is "" then
+      try
+        set t to value of el as text
+      end try
+    end if
+    return t
+  end tell
 end elementText
 
 on elementDescription(el)
-  try
-    return description of el as text
-  on error
-    return ""
-  end try
+  tell application "System Events"
+    try
+      return description of el as text
+    on error
+      return ""
+    end try
+  end tell
 end elementDescription
 
 on elementSelected(el)
-  try
-    if (value of attribute "AXSelected" of el) is true then return true
-  end try
-  return false
+  tell application "System Events"
+    try
+      if (value of attribute "AXSelected" of el) is true then return true
+    end try
+    return false
+  end tell
 end elementSelected
 
 on tryCloseElement(el)
-  try
-    perform action "AXClose" of el
-    return true
-  end try
+  tell application "System Events"
+    try
+      perform action "AXClose" of el
+      return true
+    end try
 
-  try
-    set kids to UI elements of el
-    repeat with kid in kids
-      set labelText to (my elementText(kid)) & " " & (my elementDescription(kid))
-      if labelText contains "关闭" or labelText contains "Close" or labelText contains "close" then
-        try
-          click kid
-          return true
-        end try
-        try
-          perform action "AXPress" of kid
-          return true
-        end try
-      end if
-    end repeat
-  end try
-  return false
+    try
+      set kids to UI elements of el
+      repeat with kid in kids
+        set labelText to (my elementText(kid)) & " " & (my elementDescription(kid))
+        set shouldTryClose to false
+        if labelText contains "关闭" then set shouldTryClose to true
+        if labelText contains "Close" then set shouldTryClose to true
+        if labelText contains "close" then set shouldTryClose to true
+        if shouldTryClose then
+          try
+            click kid
+            return true
+          end try
+          try
+            perform action "AXPress" of kid
+            return true
+          end try
+        end if
+      end repeat
+    end try
+    return false
+  end tell
 end tryCloseElement
 
 tell application "System Events"
@@ -285,7 +534,14 @@ tell application "System Events"
 
           repeat with el in elems
             set titleText to my elementText(el)
-            if titleText is "${target}" and titleText is not "${keep}" and (my elementSelected(el)) is false then
+            set selectedNow to my elementSelected(el)
+            set shouldCloseTab to false
+            if titleText is "${target}" then
+              if titleText is not "${keep}" then
+                if selectedNow is false then set shouldCloseTab to true
+              end if
+            end if
+            if shouldCloseTab then
               if my tryCloseElement(el) then
                 if foundKeepTab then
                   return "closed:kept-current"
@@ -352,6 +608,36 @@ export async function swipeUpLikeTrackpad({
   }
 }
 
+/** 触控板式下滑，失败时降级为普通滚轮上翻。 */
+export async function swipeDownLikeTrackpad({
+  distancePx = 900,
+  steps = 9,
+  intervalMs = 16,
+  x = null,
+  y = null,
+} = {}) {
+  const distance = Math.max(120, Math.abs(Math.round(Number(distancePx) || 900)));
+  try {
+    await runOsa(buildTrackpadSwipeScript({
+      deltaY: distance,
+      deltaX: 0,
+      steps,
+      intervalMs,
+      x,
+      y,
+    }), { lang: 'JavaScript', timeout: 6000 });
+    return { method: 'trackpad_swipe' };
+  } catch (primaryError) {
+    try {
+      await scrollByPixels(distance, 0);
+      return { method: 'wheel_scroll', fallbackFrom: primaryError.message };
+    } catch (fallbackError) {
+      fallbackError.message = `触控板式下滑失败，滚轮兜底也失败: ${fallbackError.message}; 原始下滑错误: ${primaryError.message}`;
+      throw fallbackError;
+    }
+  }
+}
+
 /** 激活微信窗口（中英文名都试）。 */
 export async function activateWeChat() {
   for (const name of ['WeChat', '微信']) {
@@ -370,8 +656,7 @@ export async function keyStroke(keyExpr) {
 
 /** 发送 key code（如 53=esc, 13=w）。modifiers 形如 "command down"。 */
 export async function keyCode(code, modifiers = null) {
-  const using = modifiers ? ` using {${modifiers}}` : '';
-  await runOsa(`tell application "System Events" to key code ${Number(code)}${using}`);
+  await runOsa(buildKeyCodeScript(code, modifiers), { lang: 'JavaScript' });
 }
 
 /** 写系统剪贴板（用 pbcopy，中文/IME 安全；后续 Cmd+V 粘贴比逐字 keystroke 可靠）。 */
@@ -433,9 +718,28 @@ export class MacInputSession {
     await sleep(opts.afterMs ?? 700);
     return result;
   }
+  async swipeDown(opts = {}) {
+    const imgW = this.lastShot?.width || 0;
+    const imgH = this.lastShot?.height || 0;
+    const pointW = this.pointWidth || imgW;
+    const defaultPoint = imgW > 0 && imgH > 0
+      ? imagePxToPoint({ x: imgW / 2, y: imgH * 0.56 }, imgW, pointW)
+      : null;
+    const result = await swipeDownLikeTrackpad({
+      ...opts,
+      x: opts.x ?? defaultPoint?.x ?? null,
+      y: opts.y ?? defaultPoint?.y ?? null,
+    });
+    await sleep(opts.afterMs ?? 700);
+    return result;
+  }
   async pressEscape() { await keyCode(53); await sleep(200); }
   async closeTab() { await keyCode(13, 'command down'); await sleep(300); } // Cmd+W
   async closeInactiveTab(opts = {}) { return closeInactiveWechatTab(opts); }
+  async openChannelsEntry(opts = {}) { return openWechatChannelsEntry(opts); }
+  async openChannelsProfile(opts = {}) { return openWechatChannelsProfile(opts); }
+  async openChannelsFollowMenu(opts = {}) { return openWechatChannelsFollowMenu(opts); }
+  async closeChannelsInitialVideoTabFromFollow(opts = {}) { return closeWechatChannelsInitialVideoTabFromFollow(opts); }
   async copy() { await keyCode(8, 'command down'); await sleep(200); }       // Cmd+C
   async paste() { await keyCode(9, 'command down'); await sleep(250); }      // Cmd+V
   async enter() { await keyCode(36); await sleep(400); }                     // Return

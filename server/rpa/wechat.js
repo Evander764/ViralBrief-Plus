@@ -12,7 +12,8 @@
  *
  * 导航规格（来自用户）：
  *   视频号：朋友圈下方视频号入口 → 右上小人 → 赞和收藏 → 关注 → 逐个关注博主
- *     → 到达关注总览后关闭左侧旧「视频号」标签（保留当前「关注」标签）→ 跳置顶 → 开第一条 → 读数入库
+ *     → 关注总览 → 中键关闭最开始自动播放的「视频号」标签 → 逐个关注博主
+ *     → 跳置顶 → 开第一条 → 读数入库
  *     → 触控板式双指上滑翻页（失败时滚轮兜底）→ 默认每博主 maxVideosPerCreator 条
  *     → 关标签回关注总览。
  *   公众号：左上搜索 → 搜博主 → 进主页（没进就点右上小人）→ 跳置顶/付费
@@ -112,6 +113,7 @@ function ingestWechatDetail(acc, platform, detail, screenshotPath) {
     author_name: acc.nickname,
     url: null, // 微信详情无稳定网页 URL；靠 平台+作者+标题 指纹去重
     title: detail.title || '无标题',
+    body_excerpt: detail.body_excerpt || null,
     content_type: platform === 'wechat_channels' ? 'video' : 'article',
     publish_time: parseChinesePublishTime(detail.publish_time),
     screenshot_path: screenshotPath,
@@ -152,9 +154,90 @@ async function tap(session, description, progress, { afterMs = 600, minConfidenc
   return true;
 }
 
+async function waitForWechatVisual(session, description, progress, {
+  timeoutMs = 90_000,
+  pollMs = 3_000,
+  minConfidence = 0.65,
+} = {}) {
+  const started = Date.now();
+  let lastNote = '未识别';
+  while (Date.now() - started <= timeoutMs) {
+    try { await activateWeChat(); } catch { /* runWechatPatrol 的前置检查会报告微信缺失 */ }
+    const shot = await session.screenshot();
+    try {
+      const hit = await locateWechatTarget(shot.base64, {
+        description,
+        imageWidth: shot.width,
+        imageHeight: shot.height,
+      });
+      lastNote = hit?.note || '未识别';
+      if (hit?.found && Number(hit.confidence) >= minConfidence) {
+        return hit;
+      }
+    } catch (e) {
+      lastNote = e.message;
+    }
+    await session.sleep(pollMs);
+  }
+  progress(`  等待画面加载失败：${description}（${lastNote}）`);
+  return null;
+}
+
+async function closeInitialChannelsTabFromFollow(session, progress) {
+  try { await activateWeChat(); } catch { /* runWechatPatrol 的前置检查会报告微信缺失 */ }
+  const shot = await session.screenshot();
+  let hit;
+  try {
+    hit = await locateWechatTarget(shot.base64, {
+      description: '检查顶部标签栏是否同时存在两个标签：左侧旧「视频号」标签，以及右侧当前正在显示的「关注」标签。只有同时看到这两个标签，才返回左侧旧「视频号」标签中心；如果只有一个「关注」标签、只有一个「视频号」标签、或看不到右侧当前「关注」标签，必须返回 found=false。不要返回页面左侧菜单里的视频号或关注。',
+      imageWidth: shot.width,
+      imageHeight: shot.height,
+    });
+  } catch (e) {
+    progress(`  确认左侧旧「视频号」标签失败，保留当前「关注」总览继续巡检: ${e.message}`);
+    return false;
+  }
+  if (!hit?.found || Number(hit.confidence) < 0.75) {
+    progress(`  未确认同时存在左侧旧「视频号」标签和当前「关注」标签（${hit?.note || '未找到'}），不关闭任何标签`);
+    return false;
+  }
+  try {
+    const res = await session.closeChannelsInitialVideoTabFromFollow({ afterMs: 900 });
+    progress(`  已中键关闭左侧旧「视频号」标签（坐标 ${res.point.x},${res.point.y}），继续在「关注」总览巡检博主`);
+    return true;
+  } catch (e) {
+    progress(`  关闭左侧旧「视频号」标签失败，保留当前「关注」总览继续巡检: ${e.message}`);
+    return false;
+  }
+}
+
+async function expandWechatDetailText(session, progress) {
+  try { await activateWeChat(); } catch { /* runWechatPatrol 的前置检查会报告微信缺失 */ }
+  const shot = await session.screenshot();
+  let hit;
+  try {
+    hit = await locateWechatTarget(shot.base64, {
+      description: '当前视频详情左下角标题或正文末尾的“展开”“更多”“全文”或省略号按钮，用于展开完整文案。不要返回播放、搜索、点赞、评论、转发、收藏、绿色按钮或头像。',
+      imageWidth: shot.width,
+      imageHeight: shot.height,
+    });
+  } catch (e) {
+    progress(`  展开正文定位失败: ${e.message}`);
+    return false;
+  }
+  if (!hit?.found || Number(hit.confidence) < 0.55) {
+    progress(`  未发现可展开正文（${hit?.note || '未找到'}）`);
+    return false;
+  }
+  await session.clickImagePx({ x: hit.x, y: hit.y }, { afterMs: 700 });
+  progress('  已点击展开正文/详情');
+  return true;
+}
+
 /** 截当前详情 → 视觉读数 → 入库。返回 { result, detail, score } 或 null。 */
 async function captureCurrentDetail(session, acc, platform, progress) {
   try { await activateWeChat(); } catch { /* runWechatPatrol 的前置检查会报告微信缺失 */ }
+  await expandWechatDetailText(session, progress);
   const shot = await session.screenshot();
   let detail;
   try {
@@ -175,6 +258,50 @@ async function captureCurrentDetail(session, acc, platform, progress) {
   );
   progress(`  已采集「${(detail.title || '无标题').slice(0, 18)}」${detail.is_pinned ? '（置顶）' : ''} → ${result.duplicate ? '去重' : '新增'}`);
   return { result, detail, score };
+}
+
+async function findAndOpenChannelsCreator(session, nickname, progress, {
+  maxScrolls = 8,
+  minConfidence = 0.65,
+} = {}) {
+  const name = String(nickname || '').trim();
+  if (!name) return false;
+  for (let attempt = 0; attempt <= maxScrolls; attempt++) {
+    try { await activateWeChat(); } catch { /* runWechatPatrol 的前置检查会报告微信缺失 */ }
+    const shot = await session.screenshot();
+    let hit;
+    try {
+      hit = await locateWechatTarget(shot.base64, {
+        description: `视频号账号总览列表中，账号名称文字正好是「${name}」的博主条目。返回该条目的头像或名称文字中心，便于进入该博主主页；不要返回其他账号、顶部标签、搜索图标或任何右侧按钮。`,
+        imageWidth: shot.width,
+        imageHeight: shot.height,
+      });
+    } catch (e) {
+      progress(`  定位博主「${name}」失败: ${e.message}`);
+      hit = null;
+    }
+    if (hit?.found && Number(hit.confidence) >= minConfidence) {
+      const pt = await session.clickImagePx({ x: hit.x, y: hit.y }, { afterMs: 2500 });
+      progress(`  已点击博主「${name}」（坐标 ${pt.x},${pt.y}）`);
+      return true;
+    }
+    if (attempt >= maxScrolls) break;
+    progress(`  当前屏未找到「${name}」，模拟用户上滑翻页继续查找（${attempt + 1}/${maxScrolls}）`);
+    try {
+      const res = await session.swipeUp({
+        distancePx: 620,
+        steps: 8,
+        intervalMs: 16,
+        afterMs: 1600,
+      });
+      if (res.method === 'wheel_scroll') progress('  触控板式上滑不可用，已用滚轮兜底翻页');
+    } catch (e) {
+      progress(`  查找博主时上滑失败: ${e.message}`);
+      return false;
+    }
+  }
+  progress(`  已滑动查找但仍未找到博主「${name}」`);
+  return false;
 }
 
 function detailSignature(detail) {
@@ -208,7 +335,7 @@ async function swipeChannelsToNextVideo(session, progress) {
 async function patrolChannelsCreator(session, acc, progress, { maxVideos, shouldStop }) {
   const items = { newItems: 0, duplicates: 0 };
   // 进入博主主页（在关注总览里点博主名）
-  const entered = await tap(session, `关注列表里名为「${acc.nickname}」的视频号博主条目`, progress, { afterMs: 1500 });
+  const entered = await findAndOpenChannelsCreator(session, acc.nickname, progress);
   if (!entered) return { ...items, skipped: '未能进入博主主页' };
 
   // 首进：关掉自动播放的第一个视频，避免外放声音、占内存。
@@ -344,11 +471,18 @@ export async function runWechatPatrol(opts = {}) {
   // 进入视频号关注总览（公众号走主窗口搜索，无需此步）。
   if (platform === 'wechat_channels') {
     progress('进入视频号关注总览：视频号(蝴蝶/W 图标)入口 → 右上小人 → 赞和收藏 → 关注');
-    // 关键：视频号入口是「蝴蝶 / 横向 W 翅膀」形状的图标（视频号官方 logo），
-    // 位于左侧竖排里「朋友圈」(相机光圈状圆形图标) 的正下方。
-    // 千万别点成上方的光圈图标(那是看一看/朋友圈，会打开很像的推荐信息流)。
-    const openedChannels = await tap(session, '微信主窗口最左侧竖排图标里的「视频号」入口：一个像蝴蝶、横向 W 翅膀形状的图标（视频号官方 logo），就在相机光圈状的「朋友圈」图标正下方。不要点光圈图标。', progress, { afterMs: 2500 });
-    if (!openedChannels) {
+    // 视频号入口固定在微信主窗口左侧栏。这里不用视觉模型猜入口坐标：
+    // 先读微信主窗口位置，再按相对坐标点击，最后确认额外的视频号窗口已出现。
+    let openedChannels = null;
+    try {
+      openedChannels = await session.openChannelsEntry({ afterMs: 6000 });
+      if (openedChannels.opened) {
+        progress(`  已打开视频号窗口（入口坐标 ${openedChannels.point.x},${openedChannels.point.y}）`);
+      }
+    } catch (e) {
+      progress(`  打开视频号入口失败: ${e.message}`);
+    }
+    if (!openedChannels?.opened) {
       result.failed = pending.length;
       result.details = pending.map((a) => ({ account: a.nickname, error: '未能打开视频号入口' }));
       progress('未能打开视频号入口，停止视频号巡检');
@@ -358,30 +492,61 @@ export async function runWechatPatrol(opts = {}) {
     // 这样不会误关当前正在使用的「关注」标签。
     await session.pressEscape();
     await session.sleep(500);
-    const openedProfile = await tap(session, '视频号窗口右上角那个小人一样的按钮', progress, { afterMs: 1500 });
-    if (!openedProfile) {
+    const profileReady = await waitForWechatVisual(
+      session,
+      '视频号页面右上角的小人/个人入口图标已经可见；它通常在搜索放大镜右侧，用于进入赞和收藏/个人入口。这里只确认图标可见，不要返回搜索放大镜，也不要返回视频里的头像或绿色关注按钮。',
+      progress,
+      { timeoutMs: 90_000, minConfidence: 0.7 },
+    );
+    if (!profileReady) {
       result.failed = pending.length;
-      result.details = pending.map((a) => ({ account: a.nickname, error: '未能进入视频号个人入口' }));
-      progress('未能进入视频号个人入口，停止视频号巡检');
-      return result;
-    }
-    const openedFollow = await tap(session, '左侧一列里的「关注」入口', progress, { afterMs: 1500 });
-    if (!openedFollow) {
-      result.failed = pending.length;
-      result.details = pending.map((a) => ({ account: a.nickname, error: '未能打开视频号关注列表' }));
-      progress('未能打开视频号关注列表，停止视频号巡检');
+      result.details = pending.map((a) => ({ account: a.nickname, error: '视频号页面未加载出右上角个人入口' }));
+      progress('未等到视频号右上角个人入口，停止视频号巡检');
       return result;
     }
     try {
-      const closeRes = await session.closeInactiveTab({ targetTitle: '视频号', keepTitle: '关注' });
-      if (closeRes.closed) {
-        progress('已关闭左侧旧「视频号」标签，保留当前「关注」总览标签');
-      } else {
-        progress(`未找到可关闭的左侧旧「视频号」标签（${closeRes.status}），继续保留当前「关注」总览`);
-      }
+      const profileRes = await session.openChannelsProfile({ afterMs: 1200 });
+      progress(`  已打开视频号个人入口（小人坐标 ${profileRes.point.x},${profileRes.point.y}）`);
     } catch (e) {
-      progress(`关闭左侧旧「视频号」标签失败：${e.message}；继续保留当前「关注」总览`);
+      result.failed = pending.length;
+      result.details = pending.map((a) => ({ account: a.nickname, error: '未能进入视频号个人入口' }));
+      progress(`未能进入视频号个人入口，停止视频号巡检：${e.message}`);
+      return result;
     }
+    const favoritesReady = await waitForWechatVisual(
+      session,
+      '视频号赞和收藏页面已经加载完成：左侧导航栏能看到赞和收藏、浏览记录、第三个导航入口、我的视频号等条目，页面主体是内容网格。这里只确认页面加载完成，不定位内容区按钮。',
+      progress,
+      { timeoutMs: 90_000, minConfidence: 0.65 },
+    );
+    if (!favoritesReady) {
+      result.failed = pending.length;
+      result.details = pending.map((a) => ({ account: a.nickname, error: '视频号赞和收藏页面未加载完成' }));
+      progress('未等到视频号赞和收藏页面加载完成，停止视频号巡检');
+      return result;
+    }
+    try {
+      const followRes = await session.openChannelsFollowMenu({ afterMs: 1500 });
+      progress(`  已打开「关注」总览（关注入口坐标 ${followRes.point.x},${followRes.point.y}）`);
+    } catch (e) {
+      result.failed = pending.length;
+      result.details = pending.map((a) => ({ account: a.nickname, error: '未能打开视频号关注列表' }));
+      progress(`未能打开视频号关注列表，停止视频号巡检：${e.message}`);
+      return result;
+    }
+    const followReady = await waitForWechatVisual(
+      session,
+      '视频号关注总览页面已经加载完成：页面主标题是“我关注的视频号”，下方是多个视频号博主条目列表。这里只确认已经跳转到总览，不定位绿色关注按钮。',
+      progress,
+      { timeoutMs: 90_000, minConfidence: 0.65 },
+    );
+    if (!followReady) {
+      result.failed = pending.length;
+      result.details = pending.map((a) => ({ account: a.nickname, error: '视频号关注总览未加载完成' }));
+      progress('未等到视频号关注总览加载完成，停止视频号巡检');
+      return result;
+    }
+    await closeInitialChannelsTabFromFollow(session, progress);
   }
 
   const windowStartISO = new Date(Date.now() - windowDays(windowType) * 86400_000).toISOString();

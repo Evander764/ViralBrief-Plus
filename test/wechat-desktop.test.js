@@ -219,9 +219,18 @@ test('desktop WeChat parser accepts structured JSON result with long text delimi
 });
 
 test('desktop WeChat AppleScript uses fixed channels icon, profile-first following, and protected tabs', () => {
+  const accessibilityScript = __wechatDesktopInternals.appleScriptForStep('assert_accessibility');
+  assert.match(accessibilityScript, /vbp_recover_blank_wechat_window/);
+  assert.match(accessibilityScript, /桌面微信没有可用窗口；已尝试从 Dock 微信图标中心和重启微信恢复/);
+
   const channelsScript = __wechatDesktopInternals.appleScriptForStep('open_channels_home');
   assert.match(channelsScript, /vbp_click_channels_sidebar_fixed/);
   assert.match(channelsScript, /已精准点击左侧视频号小图标中心/);
+  assert.match(channelsScript, /vbp_recover_blank_wechat_window/);
+  assert.match(channelsScript, /vbp_click_wechat_dock_icon_center/);
+  assert.match(channelsScript, /vbp_window_looks_preferences/);
+  assert.match(channelsScript, /vbp_close_preferences_window/);
+  assert.match(channelsScript, /dock_center/);
   assert.doesNotMatch(channelsScript, /repeat with offsetY/);
   assert.doesNotMatch(channelsScript, /Feishu|飞书/);
 

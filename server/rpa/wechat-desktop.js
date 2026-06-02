@@ -455,12 +455,73 @@ async function captureWechatDesktopScreenshot(label) {
     const safe = String(label || 'wechat').replace(/[^\p{L}\p{N}_-]+/gu, '_').slice(0, 50) || 'wechat';
     const filename = `rpa_wechat_channels_home_${safe}_${Date.now()}.png`;
     const filepath = join(SCREENSHOTS_DIR, filename);
-    await execFileAsync('screencapture', ['-x', filepath], { timeout: 10_000 });
-    return `screenshots/${filename}`;
+    const region = await getWechatScreenshotRegion();
+    const attempts = [];
+    if (region) attempts.push({ method: 'screen_region', args: ['-x', '-R', `${region.x},${region.y},${region.width},${region.height}`, filepath] });
+    attempts.push({ method: 'full_screen', args: ['-x', filepath] });
+    let lastError = null;
+    for (const attempt of attempts) {
+      try {
+        await execFileAsync('screencapture', attempt.args, { timeout: 10_000 });
+        return `screenshots/${filename}`;
+      } catch (e) {
+        lastError = e;
+        log.warn(`[RPA] 微信视频号${attempt.method === 'screen_region' ? '区域' : '整屏'}截图失败: ${screenshotErrorMessage(e)}`);
+      }
+    }
+    throw lastError || new Error('screencapture 执行失败');
   } catch (e) {
-    log.warn(`[RPA] 微信视频号首页截图失败: ${e.message}`);
+    log.warn(`[RPA] 微信视频号首页截图失败: ${screenshotErrorMessage(e)}`);
     return null;
   }
+}
+
+async function getWechatScreenshotRegion() {
+  const script = `
+on run
+  tell application "System Events"
+    set preferredBids to {"com.tencent.flue.WeChatAppEx", "com.tencent.xinWeChat"}
+    repeat with bid in preferredBids
+      try
+        set p to first process whose bundle identifier is bid
+        if (count of windows of p) > 0 then
+          set w to window 1 of p
+          set posValue to position of w
+          set sizeValue to size of w
+          set xValue to (item 1 of posValue) as integer
+          set yValue to (item 2 of posValue) as integer
+          set widthValue to (item 1 of sizeValue) as integer
+          set heightValue to (item 2 of sizeValue) as integer
+          if widthValue > 100 and heightValue > 100 then return (xValue as text) & "," & (yValue as text) & "," & (widthValue as text) & "," & (heightValue as text)
+        end if
+      end try
+    end repeat
+  end tell
+  return ""
+end run
+`;
+  try {
+    const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 8_000 });
+    const parts = String(stdout || '').trim().split(',').map((part) => Number(part.trim()));
+    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null;
+    const [x, y, width, height] = parts.map((n) => Math.round(n));
+    if (width <= 100 || height <= 100) return null;
+    return { x, y, width, height };
+  } catch (e) {
+    log.warn(`[RPA] 微信视频号截图区域读取失败: ${screenshotErrorMessage(e)}`);
+    return null;
+  }
+}
+
+function screenshotErrorMessage(e) {
+  const message = String(e?.stderr || e?.stdout || e?.message || e || '').trim();
+  if (/could not create image from window|无法捕捉窗口图像/i.test(message)) {
+    return `${message}；已禁用窗口 ID 截图，请使用屏幕区域截图兜底`;
+  }
+  if (/not authorized|not allowed|screen|capture|permission|TCC|录制|权限/i.test(message)) {
+    return `${message || '截图权限不足'}；请在系统设置 > 隐私与安全性 > 屏幕与系统音频录制 中允许 Viral Brief Plus 后重启应用`;
+  }
+  return message || '未知错误';
 }
 
 function parseScriptResult(stdout, stderr) {
@@ -526,7 +587,14 @@ on run
     if "${step}" is "assert_accessibility" then
       try
         set windowCount to count of windows of targetProcess
-        if windowCount < 1 then return my vbp_result(false, "not_logged_in", "ax", "桌面微信没有可用窗口")
+        if windowCount < 1 then
+          set recoveredBy to my vbp_recover_blank_wechat_window()
+          delay 1.0
+          set targetProcess to my vbp_process("${step}")
+          if targetProcess is missing value then return my vbp_result(false, "not_logged_in", "ax", "桌面微信没有可用窗口；已尝试恢复：" & recoveredBy)
+          set windowCount to count of windows of targetProcess
+        end if
+        if windowCount < 1 then return my vbp_result(false, "not_logged_in", "ax", "桌面微信没有可用窗口；已尝试从 Dock 微信图标中心和重启微信恢复")
         set ignored to name of window 1 of targetProcess
       on error errMsg
         return my vbp_result(false, "accessibility", "ax", errMsg)
@@ -535,12 +603,23 @@ on run
     else if "${step}" is "activate_wechat" then
       return my vbp_result(true, "activate_wechat", "ax", "已激活并置前桌面微信")
     else if "${step}" is "open_channels_home" then
+      if my vbp_window_looks_preferences(targetProcess) then
+        my vbp_close_preferences_window(targetProcess)
+        delay 0.6
+        set targetProcess to my vbp_process("${step}")
+      end if
       if (my vbp_accessible_content_count(targetProcess)) < 1 then
         my vbp_restore_wechat_window(targetProcess)
         delay 0.6
+        set targetProcess to my vbp_process("${step}")
       end if
-      if (my vbp_accessible_content_count(targetProcess)) < 1 then
-        return my vbp_result(false, "wechat_window_empty", "ax", "桌面微信主窗口是空白窗口，没有暴露可操作控件")
+      if targetProcess is not missing value and (my vbp_accessible_content_count(targetProcess)) < 1 then
+        set recoveredBy to my vbp_recover_blank_wechat_window()
+        delay 1.0
+        set targetProcess to my vbp_process("${step}")
+      end if
+      if targetProcess is missing value or (my vbp_accessible_content_count(targetProcess)) < 1 then
+        return my vbp_result(false, "wechat_window_empty", "ax", "桌面微信主窗口是空白窗口，没有暴露可操作控件；已尝试从窗口菜单、Dock 微信图标中心和重启微信恢复")
       end if
       if my vbp_click_named(targetProcess, {"视频号", "Channels"}, false) then return my vbp_result(true, "open_channels_home", "ax", "已点击视频号入口")
       if my vbp_click_channels_sidebar_fixed(targetProcess) then return my vbp_result(true, "open_channels_home", "fixed_coordinate", "已精准点击左侧视频号小图标中心")
@@ -625,6 +704,88 @@ on vbp_restore_wechat_window(targetProcessRef)
     my vbp_raise_window(targetProcessRef)
   end tell
 end vbp_restore_wechat_window
+
+on vbp_recover_blank_wechat_window()
+  set actionsText to ""
+  try
+    tell application id "com.tencent.xinWeChat"
+      activate
+      reopen
+    end tell
+    set actionsText to actionsText & "reopen"
+    delay 1.0
+  end try
+  try
+    set dockResult to my vbp_click_wechat_dock_icon_center()
+    if dockResult is not "" then set actionsText to actionsText & "+dock_center"
+    delay 1.2
+  end try
+  tell application "System Events"
+    try
+      set p to first process whose bundle identifier is "com.tencent.xinWeChat"
+      if (count of windows of p) > 0 and (my vbp_accessible_content_count(p)) > 1 then return actionsText
+    end try
+  end tell
+  try
+    tell application id "com.tencent.xinWeChat" to quit
+    delay 2.0
+    tell application id "com.tencent.xinWeChat" to activate
+    set actionsText to actionsText & "+relaunch"
+    delay 4.0
+  end try
+  return actionsText
+end vbp_recover_blank_wechat_window
+
+on vbp_click_wechat_dock_icon_center()
+  tell application "System Events"
+    try
+      tell process "Dock"
+        repeat with dockItem in UI elements of list 1
+          set labelText to ""
+          try
+            set labelText to name of dockItem as text
+          end try
+          if labelText contains "微信" or labelText contains "WeChat" then
+            set p to position of dockItem
+            set s to size of dockItem
+            set centerX to (item 1 of p) + ((item 1 of s) / 2)
+            set centerY to (item 2 of p) + ((item 2 of s) / 2)
+            click at {centerX, centerY}
+            delay 1.0
+            return "dock_center"
+          end if
+        end repeat
+      end tell
+    end try
+  end tell
+  return ""
+end vbp_click_wechat_dock_icon_center
+
+on vbp_window_looks_preferences(targetProcessRef)
+  try
+    set dumpText to my vbp_visible_text_dump(targetProcessRef)
+    if dumpText contains "账号与存储" and dumpText contains "快捷键" then return true
+    if dumpText contains "关于微信" and dumpText contains "控制范围" then return true
+    if dumpText contains "恢复默认设置" and dumpText contains "截图" then return true
+  end try
+  return false
+end vbp_window_looks_preferences
+
+on vbp_close_preferences_window(targetProcessRef)
+  tell application "System Events"
+    try
+      click button 1 of window 1 of targetProcessRef
+      delay 0.5
+    end try
+  end tell
+  try
+    tell application id "com.tencent.xinWeChat"
+      activate
+      reopen
+    end tell
+    delay 0.8
+  end try
+end vbp_close_preferences_window
 
 on vbp_accessible_content_count(targetProcessRef)
   tell application "System Events"

@@ -106,9 +106,10 @@ export async function runDailyReport({
 
       // 执行巡检：按平台阶段分别跑，便于前端/外部调用观察每个阶段完成状态。
       const stageResults = [];
-      for (const platform of ['xiaohongshu', 'douyin']) {
+      for (const platform of ['xiaohongshu', 'douyin', 'wechat_channels']) {
         if (shouldStop()) break;
-        progress('rpa', `开始${platform === 'xiaohongshu' ? '小红书' : '抖音'}阶段巡检...`);
+        const label = platform === 'xiaohongshu' ? '小红书' : (platform === 'douyin' ? '抖音' : '视频号');
+        progress('rpa', `开始${label}阶段巡检...`);
         stageResults.push(await runPatrol(client, {
           onProgress: (msg) => progress('rpa', msg),
           windowType,

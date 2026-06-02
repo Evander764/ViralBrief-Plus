@@ -138,13 +138,14 @@ test('RPA skill 明确要求巡检阶段先保存后筛选', () => {
   assert.match(skill, /是否入日报只在巡检后的筛选阶段决定/);
 });
 
-test('自动巡检前端按小红书、抖音两个阶段发起，并提供停止按钮', () => {
+test('自动巡检前端按小红书、抖音、视频号三个阶段发起，并提供停止按钮', () => {
   const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
   const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
   const serverJs = readFileSync(join(root, 'server', 'index.js'), 'utf8');
 
   assert.match(appJs, /platform: 'xiaohongshu'/);
   assert.match(appJs, /platform: 'douyin'/);
+  assert.match(appJs, /platform: 'wechat_channels'/);
   assert.match(appJs, /includePatrolledToday: true/);
   assert.match(appJs, /\/patrol\/stop/);
   assert.match(serverJs, /requestPatrolStop/);

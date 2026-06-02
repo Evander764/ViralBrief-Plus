@@ -59,6 +59,12 @@ export function looksLikeRealProfile(platform, url) {
       || /^\/explore\/[^/?#]+$/i.test(path)
       || /^\/discovery\/item\/[^/?#]+$/i.test(path);
   }
+  if (platform === 'wechat_channels') {
+    const text = `${u.pathname}${u.search}`;
+    if (/feed_id=|object_id=|objectId=|exportkey=|\/feed\b|\/video\b/i.test(text)) return false;
+    return /finder(username)?=|profile|creator|author|user|channels|finder/i.test(text)
+      || path.length >= 8;
+  }
   return /(finder|channels|u)\//i.test(url) || path.length >= 8;
 }
 

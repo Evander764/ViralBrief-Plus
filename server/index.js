@@ -272,7 +272,7 @@ async function handleApi(req, res, url, segs) {
       const windowType = body.window || cfg.schedule?.window || 'last_1_days';
       const maxTabsPerBatch = body.maxTabsPerBatch ?? cfg.rpa?.maxTabsPerBatch;
       const includePatrolledToday = body.includePatrolledToday === true;
-      const platforms = body.platform ? [body.platform] : (Array.isArray(body.platforms) && body.platforms.length ? body.platforms : ['xiaohongshu', 'douyin']);
+      const platforms = body.platform ? [body.platform] : (Array.isArray(body.platforms) && body.platforms.length ? body.platforms : ['xiaohongshu', 'douyin', 'wechat_channels']);
       runCtrl = beginPatrolRun({ source: 'api', platforms });
       log.info(`正在执行 Node.js CDP 自动巡检（${platforms.join(', ')}）...`);
       const client = new CDPClient();
@@ -542,7 +542,7 @@ async function handleApi(req, res, url, segs) {
       const body = await readJson(req);
       let runCtrl = null;
       try {
-        if (body.skipRpa !== true) runCtrl = beginPatrolRun({ source: 'report-generate', platforms: ['xiaohongshu', 'douyin'] });
+        if (body.skipRpa !== true) runCtrl = beginPatrolRun({ source: 'report-generate', platforms: ['xiaohongshu', 'douyin', 'wechat_channels'] });
         const r = await runDailyReport({
           windowType: body.window || cfg.schedule.window,
           force: !!body.force,

@@ -16,7 +16,7 @@ const STATUS_LABEL = {
 };
 let accountsCache = [];
 let accountSuggestionCache = [];
-const ACCOUNT_SEARCH_PLATFORMS = ['xiaohongshu', 'douyin'];
+const ACCOUNT_SEARCH_PLATFORMS = ['xiaohongshu', 'douyin', 'wechat_channels'];
 let patrolRunning = false;
 
 async function api(path, opts = {}) {
@@ -217,6 +217,7 @@ async function runPatrolStages(progressText = null, options = {}) {
   for (const stage of [
     { platform: 'xiaohongshu', label: '小红书' },
     { platform: 'douyin', label: '抖音' },
+    { platform: 'wechat_channels', label: '视频号' },
   ]) {
     if (progressText) progressText.textContent = `正在巡检${stage.label}账号...`;
     const res = await api('/patrol/run', {
@@ -485,7 +486,7 @@ $('#candRunRpa').addEventListener('click', async (e) => {
   btn.textContent = '巡检中...';
   try {
     setPatrolRunning(true, btn);
-    toast('正在启动已登录 Chrome，先发起小红书巡检 API，再发起抖音巡检 API...', 'ok');
+    toast('正在启动已登录 Chrome，依次发起小红书、抖音、视频号巡检 API...', 'ok');
     const res = await runPatrolStages(null, { includePatrolledToday: true });
     const tabInfo = res.maxTabsPerBatch ? `，每轮 ${res.maxTabsPerBatch} 个账号标签` : '';
     toast(`${res.stopped ? '自动巡检已停止' : '自动巡检完成'}：巡检账号 ${res.total || 0} 个，新增 ${res.newItems || 0} 条，今日跳过 ${res.skippedToday || 0} 个${tabInfo}`, res.stopped ? '' : 'ok');
@@ -608,7 +609,7 @@ async function loadLibrary() {
 // ---------------------------------------------------------------- accounts ----
 async function loadAccounts() {
   const rows = await getAccountsCache(true);
-  const platformOpts = (sel) => ['douyin','xiaohongshu','other'].map(
+  const platformOpts = (sel) => ['douyin','xiaohongshu','wechat_channels','other'].map(
     p => `<option value="${p}" ${p===sel?'selected':''}>${PLATFORM_LABEL[p]||p}</option>`
   ).join('');
   const prioOpts = (sel) => ['S','A','B'].map(
@@ -853,7 +854,7 @@ function renderAiAccountResults(data = {}, query = '', error = '') {
   $$('#acAiResults [data-ac-ai-fill]').forEach((b) => b.addEventListener('click', () => {
     const item = accountSuggestionCache[Number(b.dataset.acAiFill)];
     if (!item) return;
-    $('#acSearchPlatform').value = item.platform === 'wechat_channels' ? 'other' : item.platform;
+    $('#acSearchPlatform').value = item.platform;
     $('#acSearchNick').value = item.nickname;
     $('#acSearchUrl').value = item.homepage_url;
     syncSearchJumpLink();

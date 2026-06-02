@@ -48,6 +48,13 @@ class FakeClient {
     this.dataByUrl = opts.dataByUrl || {};
     this.douyinNextByUrl = opts.douyinNextByUrl || {};
     this.douyinNextButtonRect = opts.douyinNextButtonRect || { x: 1180, y: 126, width: 1280, height: 800, score: 220, label: '下一个' };
+    this.wechatProfileEntryRect = opts.wechatProfileEntryRect || { left: 1160, top: 36, width: 44, height: 44, viewport: { width: 1280, height: 800 }, score: 180, text: '我的' };
+    this.wechatOverviewTabRect = opts.wechatOverviewTabRect || { left: 220, top: 150, width: 88, height: 36, viewport: { width: 1280, height: 800 }, score: 170, text: '关注' };
+    this.wechatCreatorHitUrl = opts.wechatCreatorHitUrl || 'https://channels.weixin.qq.com/platform/profile?finderusername=creator123';
+    this.wechatCreatorHitText = opts.wechatCreatorHitText || '目标视频号 视频号 关注';
+    this.wechatDetailUrls = opts.wechatDetailUrls || ['https://channels.weixin.qq.com/web/pages/feed?feed_id=feed123'];
+    this.wechatProfileClicks = 0;
+    this.wechatOverviewClicks = 0;
     this.pauseCalls = 0;
     this.screenshots = 0;
   }
@@ -83,6 +90,15 @@ class FakeClient {
       }
       return;
     }
+    if (this.url.includes('channels.weixin.qq.com') && y < 110 && x > 1000) {
+      this.wechatProfileClicks++;
+      this.url = 'https://channels.weixin.qq.com/platform/profile';
+      return;
+    }
+    if (this.url.includes('channels.weixin.qq.com/platform/profile') && y < 240 && x < 420) {
+      this.wechatOverviewClicks++;
+      return;
+    }
     if (this.url.includes('xiaohongshu.com/user/profile') && this.clickLandingUrls.length > 0) {
       this.url = this.clickLandingUrls.shift();
       return;
@@ -99,6 +115,17 @@ class FakeClient {
     if (expr.includes('vbp-douyin-next-button')) {
       return this.url.includes('douyin.com/video/') && Object.hasOwn(this.douyinNextByUrl, this.url)
         ? this.douyinNextButtonRect
+        : null;
+    }
+    if (expr.includes('vbp-wechat-profile-entry')) {
+      return this.url.includes('channels.weixin.qq.com') ? this.wechatProfileEntryRect : null;
+    }
+    if (expr.includes('vbp-wechat-overview-tab')) {
+      return this.url.includes('channels.weixin.qq.com/platform/profile') ? this.wechatOverviewTabRect : null;
+    }
+    if (expr.includes('vbp-wechat-creator-hit')) {
+      return this.url.includes('channels.weixin.qq.com/platform/profile')
+        ? { url: this.wechatCreatorHitUrl, text: this.wechatCreatorHitText, score: 180, rect: { left: 260, top: 260, width: 260, height: 80, viewport: { width: 1280, height: 800 } } }
         : null;
     }
     if (expr.includes('vbp-douyin-detail-signature')) {
@@ -155,6 +182,15 @@ class FakeClient {
           publishRaw: '2小时前',
         })));
       }
+      if (this.url.includes('channels.weixin.qq.com')) {
+        return filterCandidatesForScript(expr, this.wechatDetailUrls.map((url, i) => ({
+          url,
+          rect: { left: 160 + i * 240, top: 220, width: 220, height: 160 },
+          viewport: { width: 1280, height: 800 },
+          titleRaw: `视频号候选 ${i + 1}`,
+          publishRaw: '2小时前',
+        })));
+      }
       return filterCandidatesForScript(expr, this.postCandidates || this.douyinPostUrls);
     }
     if (expr.includes('const isDetail')) {
@@ -162,6 +198,19 @@ class FakeClient {
     }
     if (expr.includes('dataBlobs')) {
       const isXhs = this.url.includes('xiaohongshu.com');
+      if (this.url.includes('channels.weixin.qq.com')) {
+        return {
+          dataBlobs: [],
+          domTexts: { like: '点赞 2001', share: '转发 2003', comment: '评论 88', favorite: '收藏 2002' },
+          textSample: '视频号正文 #视频号标签 #AI选题',
+          pageUrl: this.url,
+          title: this.titleByUrl[this.url] || '视频号新视频',
+          bodyText: '视频号正文 #视频号标签 #AI选题',
+          hashtags: ['#视频号标签', '#AI选题'],
+          pubTime: Object.hasOwn(this.pubTimeByUrl, this.url) ? this.pubTimeByUrl[this.url] : '2小时前',
+          contentType: 'video',
+        };
+      }
       const bodyText = this.bodyByUrl[this.url] || (isXhs ? '小红书正文 #小红书标签 #AI选题' : '抖音正文 #抖音标签 #AI选题');
       const dataBlob = this.dataByUrl[this.url] || (isXhs
         ? { note: { interactInfo: { liked_count: '2001', collected_count: '3002', comment_count: '88' } } }
@@ -296,6 +345,42 @@ function cardClicks(client) {
 function closeClicks(client) {
   return client.clicks.filter((click) => click.kind === 'xhs-close');
 }
+
+test('runPatrol supports wechat_channels by entering profile overview and opening matched creator', async () => {
+  const acc = upsertAccount({
+    platform: 'wechat_channels',
+    nickname: '目标视频号',
+    homepage_url: '',
+    monitor_enabled: true,
+  });
+  const client = new FakeClient();
+
+  const result = await runPatrol(client, {
+    discoverFollows: false,
+    platforms: ['wechat_channels'],
+    maxCandidatesPerAccount: 1,
+    includePatrolledToday: true,
+  });
+
+  assert.equal(result.success, 1);
+  assert.equal(result.newItems, 1);
+  assert.equal(client.wechatProfileClicks, 1, '点击右上角个人入口');
+  assert.equal(client.wechatOverviewClicks, 1, '进入博主总览/关注区域');
+  assert.ok(client.gotos.includes('https://channels.weixin.qq.com/'));
+  assert.ok(client.gotos.includes(client.wechatCreatorHitUrl));
+  assert.ok(client.gotos.includes(client.wechatDetailUrls[0]));
+
+  const savedAccount = get('SELECT * FROM accounts WHERE id = ?', [acc.id]);
+  assert.equal(savedAccount.homepage_url, client.wechatCreatorHitUrl);
+  assert.equal(savedAccount.platform_user_id, 'creator123');
+
+  const item = get('SELECT * FROM contents WHERE account_id = ? AND platform = ?', [acc.id, 'wechat_channels']);
+  assert.equal(item.url, client.wechatDetailUrls[0]);
+  assert.equal(item.content_type, 'video');
+  assert.equal(item.like_count, 2001);
+  assert.equal(item.share_count, 2003);
+  assert.equal(item.favorite_count, 2002);
+});
 
 test('runPatrol stops before account work without marking the account as patrolled today', async () => {
   const acc = upsertAccount({

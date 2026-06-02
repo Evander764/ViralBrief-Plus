@@ -14,7 +14,7 @@
 1. **关键数据绝不靠 AI**。点赞/转发/收藏、1000 阈值判定、时间窗口、去重、达标清单的数字，全部走确定性代码（`normalize.js` / `filter.js` / `dedup.js` / `store.js`）。AI 只产出定性内容（选题/聚类/标题/建议）。
 2. **未知 ≠ 0**。`normalizeMetric` 识别不到时返回 `value:null`；`null` 表示待复核/待补录，已知值 `< 1000` 才是 `below_threshold`。不要把 null 当 0。
 3. **只有 `confirmed` 入榜**。`computeDataStatus` 优先级：duplicate > archived > monitoring(未确认且 24h 内) > needs_review(自动且未确认) > confirmed / below_threshold。自动弱来源在用户确认前不入榜。
-4. **入榜范围必须收紧**。正式日报只收 `douyin` / `xiaohongshu`，且内容必须关联 `accounts` 账号池；视频号、公众号文章和未关联账号的内容可保存、不可入日报。
+4. **入榜范围必须收紧**。网页正式日报只收 `douyin` / `xiaohongshu`，且内容必须关联 `accounts` 账号池；视频号、公众号文章和未关联账号的内容可保存、不可入网页日报。微信日报是独立入口，只收 `wechat_channels` / `wechat_article` 中已人工确认、已关联账号池、未归档且非重复的窗口内内容，不走 1000 阈值。
    - 小红书入选必须 `like` 和 `favorite` 都达标；抖音入选必须 `like`、`favorite`、`share` 都达标。`1000+` 按超过 1000，纯 1000 不达标。
 5. **日报数字从 DB 渲染，不采信 AI 文本**。`report/render.js` 的达标清单只用传入的 `items`（DB 行）。AI 返回 JSON 仅提供母题/原因/标题，且引用的编号（C1..Cn）会被校验必须真实存在。
 6. **API Key 安全**：只存桌面端、AES-256-GCM 加密（`lib/secret.js`）、日志脱敏（`lib/log.js` 的 `addRedaction`）、不导出、可清除。插件不存 Key、不调模型。
@@ -22,8 +22,8 @@
 8. **RPA 只负责顺序采集，不负责入选判断**。每读完一条详情内容，先记录/规范化发布时间和指标，再截图入库；未知时间、超窗口、未达阈值都要进入内容库。巡检阶段不因时间窗口或标题匹配判断而丢弃已打开详情；小红书/抖音非置顶详情若已确认早于窗口，保存本条后可结束当前博主巡检。正式日报只在巡检结束后的 `recomputeAll()` / `getEligible()` 阶段筛选。
 
 ## 巡检流程（当前唯一口径）
-- 巡检前先排序：前端/API 实际按平台阶段执行，小红书阶段整体先于抖音阶段，抖音阶段完成后再跑桌面微信视频号阶段；每个阶段内部评级越高越前，同评级按 `created_at` 更早优先；缺少时间时随机打散。`sortPatrolAccounts()` 仍保留混合列表的同评级小红书优先规则。
-- API 阶段拆开：前端依次调用 `/api/patrol/run` 跑 `{ platform: "xiaohongshu" }`、`{ platform: "douyin" }`、`{ platform: "wechat_channels" }`；小红书/抖音由 Chrome CDP 巡检，`wechat_channels` 只操作 macOS 微信客户端内的视频号，不打开网页版视频号；`/api/reports/generate` 在前端阶段巡检后只负责生成日报。
+- 巡检前先排序：前端/API 实际按平台阶段执行，网页内容小红书阶段整体先于抖音阶段，微信视频号阶段由独立入口发起；每个阶段内部评级越高越前，同评级按 `created_at` 更早优先；缺少时间时随机打散。`sortPatrolAccounts()` 仍保留混合列表的同评级小红书优先规则。
+- API 阶段拆开：网页内容前端依次调用 `/api/patrol/run` 跑 `{ platform: "xiaohongshu" }`、`{ platform: "douyin" }`；微信视频号由独立按钮调用 `/api/patrol/run` 跑 `{ platform: "wechat_channels" }`。小红书/抖音由 Chrome CDP 巡检，`wechat_channels` 只操作 macOS 微信客户端内的视频号，不打开网页版视频号；`/api/reports/generate` 默认生成 `reportType:"web"` 网页日报，`reportType:"wechat"` 生成微信日报。
 - 单活跃巡检：同一时间只允许一个巡检运行；已有巡检时，新的 `/api/patrol/run` 或含 RPA 的 `/api/reports/generate` 必须返回 409，并保留原巡检的停止控制。
 - 并发标签：`rpa.maxTabsPerBatch` 默认 6，允许 1-10；内存不足可自动下调。多标签模式每个账号标签使用独立 CDP client，账号跑完立即关标签。
 - 停止控制：`POST /api/patrol/stop` 设置当前巡检 stop flag；长循环、批次和详情采集都要检查 `shouldStop` 并收尾关闭标签；尚未实际处理完成的账号不得写 `last_patrolled_at`。
@@ -48,7 +48,7 @@
 - 全部账号完成或剩余账号正在跑时不再额外开新标签；单个账号跑完立即关闭自己的标签。
 
 ### 视频号阶段
-- 抖音阶段结束后再发起视频号巡检 API；视频号在本项目中只指 macOS 微信客户端内的视频号，可保存到内容库和候选池，但第一版不进入正式日报筛选。
+- 视频号巡检由独立按钮/API 发起，不跟随小红书/抖音网页日报自动混跑；视频号在本项目中只指 macOS 微信客户端内的视频号，可保存到内容库和候选池，并可在人工确认后进入独立微信日报。
 - 视频号巡检由 `server/rpa/wechat-desktop.js` 调用 `osascript` / System Events 操作桌面微信：激活微信 → 点击“视频号”入口 → 点击右上角人物头像 → 进入个人/总览页 → 打开关注/博主区域 → 按账号池昵称匹配博主。
 - 默认不使用 Python、不使用 AI 视觉识别、不打开网页版视频号；优先通过 Accessibility 元素点击，找不到头像时使用窗口右上角相对坐标兜底，并在证据里记录方法。
 - 成功打开博主后写入 `wechat-desktop://content/<account-id>/<date>` 待复核记录；不保存网页主页 URL，互动指标保持 `null` 等待人工复核或后续桌面视觉补录。
@@ -61,7 +61,7 @@
   - 共同：`upsertCapture()` 标准化指标、算 url_key/fingerprint、去重合并、账号池自动关联、`computeDataStatus`、落库；截图存 `data/screenshots/`。
 - 确认：仪表盘候选池 → `POST /api/contents/:id/confirm` → `store.confirmContent()`：重算指标、强制 `metrics_source='manual'` + `user_confirmed=1`、重算状态。
 - 账号池打开：`POST /api/accounts/open-platform` 只筛选小红书 `/user/profile/<id>` 和抖音 `/user/<id>` 主页并交给 Chrome 打开；视频号不走浏览器打开，必须通过桌面微信巡检。
-- 出报：`pipeline.runDailyReport({windowType})`：可选先跑小红书、抖音 Chrome RPA 阶段，再跑桌面微信视频号阶段 → `recomputeAll(窗口)` → `getEligible(窗口起点)`（小红书/抖音 + 账号池 + confirmed + 平台必需指标都达标；视频号第一版不入正式日报）→ 逐条 `analyzeContent`（按 content_id 缓存）→ `generateReportData`（校验编号）→ `render*` → 落 `daily_reports` + 写 `data/exports/`（MD/HTML/CSV/ZIP）。0 达标则用 `fallbackReportData` 跳过 AI。
+- 出报：`pipeline.runDailyReport({windowType})` 生成网页日报：可选先跑小红书、抖音 Chrome RPA 阶段 → `recomputeAll(窗口)` → `getEligible(窗口起点)`（小红书/抖音 + 账号池 + confirmed + 平台必需指标都达标）→ 逐条 `analyzeContent`（按 content_id 缓存）→ `generateReportData`（校验编号）→ `render*` → 落 `daily_reports(report_type='web')` + 写 `data/exports/`（MD/HTML/CSV/ZIP）。`pipeline.runWechatReport({windowType})` 生成微信日报：只取 `wechat_channels` / `wechat_article` 中窗口内、已人工确认、已关联账号池、未归档、非重复内容，落 `daily_reports(report_type='wechat')`。0 条则用 `fallbackReportData` 跳过 AI。
 - 自动：`scheduler.startScheduler()`，setTimeout 到点跑；用 `meta.last_auto_run_date` 防重复；可补跑。设置变更后调 `restartScheduler()`。
 
 ## Token 策略（既省又准）

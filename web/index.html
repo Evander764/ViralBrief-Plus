@@ -30,13 +30,26 @@
       <div class="cards" id="statCards"></div>
       <div class="panel">
         <h3>生成每日爆款选题日报</h3>
-        <div class="row">
-          <label class="check" style="font-size:13px; margin-left:12px;">
+        <div class="row accent-row">
+          <div style="flex:1; min-width:240px;">
+            <b style="color: var(--brand-strong);">网页内容</b>
+            <div class="muted" style="font-size:13px; margin-top:4px;">小红书 / 抖音</div>
+          </div>
+          <label class="check" style="font-size:13px;">
             <input type="checkbox" id="ovAutoCollect" checked /> 先自动采集（RPA）
           </label>
-          <button class="primary" id="ovGenerate">立即生成日报</button>
+          <button class="primary" id="ovGenerate">生成网页日报</button>
           <button id="ovStopPatrol" class="danger" disabled>停止巡检</button>
           <span class="muted" id="ovGenMsg"></span>
+        </div>
+        <div class="row accent-row">
+          <div style="flex:1; min-width:240px;">
+            <b style="color: var(--brand-strong);">微信内容</b>
+            <div class="muted" style="font-size:13px; margin-top:4px;">视频号 / 公众号文章</div>
+          </div>
+          <button class="primary" id="ovRunWechatPatrol">巡检微信视频号</button>
+          <button class="primary" id="ovGenerateWechat">生成微信日报</button>
+          <span class="muted" id="ovWechatMsg"></span>
         </div>
         <div id="ovProgress" style="display:none; margin-top:10px; padding:10px; background:var(--bg2); border-radius:6px; font-size:13px;">
           <div style="display:flex; align-items:center; gap:8px;">
@@ -45,7 +58,7 @@
           </div>
         </div>
         <p class="muted">入选条件（硬阈值，由系统确定性判定）：小红书需点赞和收藏都达标；抖音需点赞、收藏和转发都达标。1000+ 按超过 1000 处理。</p>
-        <p class="muted" style="font-size:12px;">勾选「先自动采集」后，系统会依次发起小红书、抖音、视频号巡检；小红书/抖音使用 Chrome，视频号使用桌面微信。Chrome 每轮默认同时打开 6 个账号标签页，可在 1-10 间调整。</p>
+        <p class="muted" style="font-size:12px;">勾选「先自动采集」后，网页日报只发起小红书、抖音巡检；微信视频号需使用上方独立按钮巡检。Chrome 每轮默认同时打开 6 个账号标签页，可在 1-10 间调整。</p>
       </div>
       <div class="panel">
         <h3>今日候选池 <span class="muted">— 待你确认/补录指标的内容</span></h3>
@@ -53,9 +66,9 @@
         <div class="row accent-row" style="margin-bottom: 15px;">
           <div style="flex: 1;">
             <b style="color: var(--brand-strong);">自动巡检</b>
-            <div class="muted" style="font-size: 13px; margin-top: 4px;">小红书/抖音使用你已登录的 Chrome；视频号使用已登录的桌面微信 App。</div>
+            <div class="muted" style="font-size: 13px; margin-top: 4px;">小红书/抖音使用你已登录的 Chrome；微信视频号在上方独立巡检。</div>
           </div>
-          <button class="primary" id="candRunRpa" style="align-self: center;">一键自动巡检</button>
+          <button class="primary" id="candRunRpa" style="align-self: center;">巡检网页内容</button>
           <button class="danger" id="candStopRpa" style="align-self: center;" disabled>停止巡检</button>
         </div>
         <div class="row" style="margin-bottom: 15px; gap: 8px;">
@@ -100,6 +113,7 @@
             <option value="douyin">抖音</option>
             <option value="xiaohongshu">小红书</option>
             <option value="wechat_channels">视频号</option>
+            <option value="wechat_article">公众号文章</option>
             <option value="other">其他</option>
           </select>
           <button id="libRefresh">刷新</button>
@@ -111,7 +125,7 @@
     <!-- 账号池 -->
     <section id="tab-accounts" class="tab hidden">
       <div class="panel">
-        <h3>账号池 <span class="muted">— 你关注的博主（抖音 / 小红书 / 视频号）</span></h3>
+        <h3>账号池 <span class="muted">— 你关注的博主（抖音 / 小红书 / 视频号 / 公众号）</span></h3>
         <div class="row accent-row" style="margin-bottom: 14px;">
           <div style="flex:1">
             <b style="color: var(--brand-strong);">从已登录浏览器发现关注账号</b>
@@ -130,6 +144,7 @@
                   <option value="douyin">抖音</option>
                   <option value="xiaohongshu">小红书</option>
                   <option value="wechat_channels">视频号</option>
+                  <option value="wechat_article">公众号文章</option>
                   <option value="other">其他</option>
                 </select>
               </label>

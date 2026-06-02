@@ -33,7 +33,7 @@ import {
   countsByStatus, listAccounts, upsertAccount, deleteAccount, importAccountsCsv, importAccountsLines,
   listReports, getReport, deleteReport, getUsageForDay, getAnalysis, getObservation, upsertObservation,
 } from './store.js';
-import { runDailyReport } from './pipeline.js';
+import { runDailyReport, runWechatReport } from './pipeline.js';
 import { materializeReportExport } from './report/recovery.js';
 import { startScheduler, restartScheduler } from './scheduler.js';
 import { testConnection } from './ai/client.js';
@@ -274,7 +274,7 @@ async function handleApi(req, res, url, segs) {
       const windowType = body.window || cfg.schedule?.window || 'last_1_days';
       const maxTabsPerBatch = body.maxTabsPerBatch ?? cfg.rpa?.maxTabsPerBatch;
       const includePatrolledToday = body.includePatrolledToday === true;
-      const platforms = body.platform ? [body.platform] : (Array.isArray(body.platforms) && body.platforms.length ? body.platforms : ['xiaohongshu', 'douyin', 'wechat_channels']);
+      const platforms = body.platform ? [body.platform] : (Array.isArray(body.platforms) && body.platforms.length ? body.platforms : ['xiaohongshu', 'douyin']);
       runCtrl = beginPatrolRun({ source: 'api', platforms });
       log.info(`正在执行自动巡检（${platforms.join(', ')}）...`);
       const stageResults = [];
@@ -550,13 +550,18 @@ async function handleApi(req, res, url, segs) {
 
   // ---- reports ----
   if (p[0] === 'reports') {
-    if (p.length === 1 && method === 'GET') return sendJson(res, 200, listReports());
+    if (p.length === 1 && method === 'GET') {
+      return sendJson(res, 200, listReports({ reportType: url.searchParams.get('reportType') || undefined }));
+    }
     if (p[1] === 'generate' && method === 'POST') {
       const body = await readJson(req);
       let runCtrl = null;
+      const reportType = body.reportType === 'wechat' ? 'wechat' : 'web';
       try {
-        if (body.skipRpa !== true) runCtrl = beginPatrolRun({ source: 'report-generate', platforms: ['xiaohongshu', 'douyin', 'wechat_channels'] });
-        const r = await runDailyReport({
+        const platforms = reportType === 'wechat' ? ['wechat_channels'] : ['xiaohongshu', 'douyin'];
+        if (body.skipRpa !== true) runCtrl = beginPatrolRun({ source: 'report-generate', platforms });
+        const runner = reportType === 'wechat' ? runWechatReport : runDailyReport;
+        const r = await runner({
           windowType: body.window || cfg.schedule.window,
           force: !!body.force,
           skipRpa: body.skipRpa === true,
@@ -564,6 +569,7 @@ async function handleApi(req, res, url, segs) {
         });
         return sendJson(res, 200, {
           id: r.report.id,
+          reportType: r.report.report_type || reportType,
           eligibleCount: r.eligibleCount,
           aiUsed: r.aiUsed,
           patrolResult: r.patrolResult || null,

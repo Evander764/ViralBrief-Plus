@@ -77,7 +77,7 @@ POST /api/accounts/open-platform
 
 ## 巡检
 
-仪表盘“一键自动巡检”调用：
+仪表盘“巡检网页内容”和“巡检微信视频号”调用：
 
 ```http
 POST /api/patrol/run
@@ -93,11 +93,11 @@ POST /api/patrol/run
 }
 ```
 
-前端一键巡检会先调用一次 `platform = "xiaohongshu"`，完成后再调用一次 `platform = "douyin"`；服务端也仍支持 `platforms: ["xiaohongshu", "douyin"]` 的兼容写法。`maxTabsPerBatch` 默认 6，允许 1-10。
+前端网页巡检会先调用一次 `platform = "xiaohongshu"`，完成后再调用一次 `platform = "douyin"`；微信视频号巡检单独调用 `platform = "wechat_channels"`。服务端也仍支持 `platforms: ["xiaohongshu", "douyin"]` 的兼容写法。`maxTabsPerBatch` 默认 6，允许 1-10。
 
 巡检按平台分批打开账号主页。详情页读取后先记录发布时间和互动指标，只要详情可采就截图并保存；缺少发布时间、未达阈值、标题不匹配不会在巡检阶段被丢弃。小红书详情页会优先读取标题/正文下方“编辑于”区域，抖音详情页会优先读取“举报”附近的可见发布日期；数据库已采集重复只记录去重，不直接结束账号；如果非置顶详情读到的日期早于本次窗口，保存该条后结束当前博主巡检。正式日报在巡检结束后再用 `recomputeAll` / `getEligible` 按窗口、账号池、确认状态和平台必需指标筛选。
 
-同一时间只允许一个活跃巡检。已有巡检运行时，再调用 `/api/patrol/run` 或未设置 `skipRpa:true` 的 `/api/reports/generate` 会返回 409；调用方应先查询 `/api/patrol/state`，等待完成或调用停止接口。停止只中断后续处理，尚未实际处理完成的账号不会被标记为当天已巡检。
+同一时间只允许一个活跃巡检。已有巡检运行时，再调用 `/api/patrol/run` 或未设置 `skipRpa:true` 的 `/api/reports/generate` 会返回 409；调用方应先查询 `/api/patrol/state`，等待完成或调用停止接口。停止只中断后续处理，尚未实际处理完成的账号不会被标记为当天已巡检。`POST /api/reports/generate` 默认生成 `reportType:"web"` 网页日报；传 `reportType:"wechat"` 时生成微信日报，只整理已人工确认的微信视频号/公众号内容。
 
 停止当前巡检：
 

@@ -12,7 +12,9 @@
  */
 import { loadConfig } from '../config.js';
 import { callJSON } from './client.js';
-import { SYSTEM_REPORT, SYSTEM_REPORT_FEW, buildReportUser } from './prompts.js';
+import {
+  SYSTEM_REPORT, SYSTEM_REPORT_FEW, SYSTEM_REPORT_WECHAT, SYSTEM_REPORT_FEW_WECHAT, buildReportUser,
+} from './prompts.js';
 import { windowLabel } from '../filter.js';
 
 const LOW_SAMPLE_FORBIDDEN_TERMS = ['趋势', '聚焦', '集中', '呈现出', '反映出', '表明'];
@@ -132,16 +134,19 @@ export function normalizeReportData(json) {
   return json;
 }
 
-export async function generateReportData({ windowType, items, analyses }) {
+export async function generateReportData({ windowType, items, analyses, reportType = 'web' }) {
   const cfg = loadConfig();
 
   // 少样本（≤2 条）使用精简 prompt，不做方向推断
   const isFewShot = items.length <= 2;
-  const systemPrompt = isFewShot ? SYSTEM_REPORT_FEW : SYSTEM_REPORT;
+  const isWechat = reportType === 'wechat';
+  const systemPrompt = isWechat
+    ? (isFewShot ? SYSTEM_REPORT_FEW_WECHAT : SYSTEM_REPORT_WECHAT)
+    : (isFewShot ? SYSTEM_REPORT_FEW : SYSTEM_REPORT);
 
   const { json, model } = await callJSON({
     system: systemPrompt,
-    user: buildReportUser(windowLabel(windowType), items, analyses),
+    user: buildReportUser(windowLabel(windowType), items, analyses, { reportType }),
     model: cfg.reportModel || cfg.model,
     task: 'report',
     // 降低 temperature 以减少随机编造（0.15 比 0.4 显著降低幻觉率）

@@ -135,8 +135,78 @@ JSON 结构：
 }
 top_topic_clusters 数量不超过内容条数，每条内容最多归入 1 个 cluster。`;
 
+export const SYSTEM_REPORT_WECHAT = `你是内容归类助手。系统会给你「最近 N 天内、已人工确认并关联账号池的微信视频号/公众号内容」清单。
+这些内容不代表已达到小红书/抖音的互动阈值；你的任务是把相似内容归入母题，并基于清单中的标题改写可复用选题。
+
+你不是趋势分析师。你只是在做机械的归类和改写工作。
+
+严格禁令（违反任何一条都会导致输出被系统拒绝）：
+1. representative_content_ids 只能引用清单里出现过的编号（如 C1、C2）；编造编号会被系统检测并拒绝。
+2. 绝不编造来源链接、点赞数、转发数、评论数或任何数字——这些由系统负责渲染。
+3. 绝不编造不在清单中的内容标题、作者名称、视频或文章。你能引用的内容仅限于清单中的 C1..Cn。
+4. daily_summary 中不要出现具体的点赞/转发/收藏数字，这些由系统渲染。
+5. rewrite_titles 必须基于清单中真实内容的标题改写，不可凭空编造与清单无关的选题。
+6. 不要使用"数据显示""根据分析""研究表明""用户反馈表明"等暗示你掌握额外数据的措辞。
+7. why_it_spread 必须以"可能原因："开头——你不知道为什么传播，只能基于标题推测。
+8. recommended_actions 必须以"建议方向："开头——这是建议，不是确定性结论。
+9. daily_summary 必须以"基于 N 条已确认微信内容的观察："开头（N = 实际条数）。
+10. 不要对内容做价值判断（如"优质""低质""深度""浅薄"），只做客观归类。
+11. cluster_name 必须是纯描述性的名词短语（≤15字），不得包含评价性形容词。
+
+如果样本量 ≤ 3 条，不要使用"趋势""聚焦""集中""呈现出""反映出""表明"等结论性措辞。
+如果样本量 ≤ 3 条，必须在 data_warnings 里明确说明"样本量仅 N 条，方向判断参考价值有限"。
+
+输出必须是一个严格的 JSON 对象，不要 Markdown 代码块、不要解释性文字。中文输出。
+JSON 结构：
+{
+  "daily_summary": "基于 N 条已确认微信内容的观察：……（注意：这是基于有限样本的观察，不是确定性结论）",
+  "top_topic_clusters": [
+    {
+      "cluster_name": "母题名称（纯描述，≤15字，无评价性形容词）",
+      "why_it_spread": "可能原因：基于标题推测的传播原因",
+      "representative_content_ids": ["C1"],
+      "rewrite_titles": ["3-5 个基于清单内容标题改写的选题"]
+    }
+  ],
+  "recommended_actions": ["建议方向：基于清单内容推测的商业承接方向"],
+  "data_warnings": ["数据注意事项"]
+}
+top_topic_clusters 最多 5 个，按重要性排序。每个 cluster 的 rewrite_titles 最多 5 个。`;
+
+export const SYSTEM_REPORT_FEW_WECHAT = `你是内容摘要助手。系统会给你少量已人工确认的微信视频号/公众号内容。
+由于样本极少，你的任务不是做方向判断，而是对每条内容做逐条摘录。
+
+你是观察员，不是分析师。只复述，不推测。
+
+严格禁令：
+1. representative_content_ids 只能引用清单里出现过的编号（如 C1）；编造编号会被系统拒绝。
+2. 绝不编造来源链接、点赞数、转发数、内容标题或作者名称。
+3. 不要使用"趋势""聚焦""集中""呈现出""反映出""表明"等趋势性或结论性措辞——样本太少。
+4. daily_summary 中不要出现具体的点赞/转发/收藏数字。
+5. rewrite_titles 必须基于清单中真实内容的标题改写。
+6. why_it_spread 必须以"可能原因："开头。
+7. recommended_actions 必须以"建议方向："开头。
+8. 不要对内容做价值判断，只做客观摘录。
+
+输出必须是一个严格的 JSON 对象，不要 Markdown 代码块、不要解释性文字。中文输出。
+JSON 结构：
+{
+  "daily_summary": "本期仅 N 条已确认微信内容，以下为逐条观察，不构成方向判断。",
+  "top_topic_clusters": [
+    {
+      "cluster_name": "内容主题（纯描述，≤15字）",
+      "why_it_spread": "可能原因：基于标题推测的传播原因",
+      "representative_content_ids": ["C1"],
+      "rewrite_titles": ["2-3 个基于原标题改写的选题"]
+    }
+  ],
+  "recommended_actions": ["建议方向：基于内容推测的商业承接方向"],
+  "data_warnings": ["样本量极少（仅 N 条），不做方向结论"]
+}
+top_topic_clusters 数量不超过内容条数，每条内容最多归入 1 个 cluster。`;
+
 /** 给日报模型的紧凑输入：只喂选题/钩子/标题/真实计数，不喂全文，省 token。 */
-export function buildReportUser(windowLabel, items, analyses = {}) {
+export function buildReportUser(windowLabel, items, analyses = {}, { reportType = 'web' } = {}) {
   const lines = items.map((it, i) => {
     const a = analyses[it.id] || {};
     const parts = [
@@ -159,8 +229,12 @@ export function buildReportUser(windowLabel, items, analyses = {}) {
       ? `\n\n注意：本期仅 ${items.length} 条达标内容，样本较少。不要使用"趋势""聚焦""集中"等措辞。`
       : '';
 
+  const scope = reportType === 'wechat'
+    ? `已确认微信内容（共 ${items.length} 条，均已人工确认并关联账号池；不使用小红书/抖音互动阈值）`
+    : `已确认达标内容（共 ${items.length} 条，均已由系统按平台硬规则筛选：小红书点赞和收藏都达标；抖音点赞、收藏和转发都达标）`;
+
   return `时间窗口：${windowLabel}
-已确认达标内容（共 ${items.length} 条，均已由系统按平台硬规则筛选：小红书点赞和收藏都达标；抖音点赞、收藏和转发都达标）：
+${scope}：
 ${lines.join('\n')}
 
 请基于以上清单输出符合要求的 JSON。

@@ -14,9 +14,10 @@
  */
 import { writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { windowStartISO, normalizeWindowType } from './filter.js';
+import { windowStartISO, normalizeWindowType, ELIGIBLE_PLATFORMS } from './filter.js';
 import {
-  recomputeAll, getEligible, getAnalysesForContents, insertReport, countsByStatus, getUsageForDay,
+  recomputeAll, getEligible, getWechatReportItems, getAnalysesForContents, insertReport,
+  countsByStatus, getUsageForDay, WECHAT_REPORT_PLATFORMS,
 } from './store.js';
 import { analyzeContent } from './ai/analyze.js';
 import { generateReportData } from './ai/report.js';
@@ -55,6 +56,96 @@ function combinePatrolResults(results = []) {
     out.maxTabsPerBatch ||= r.maxTabsPerBatch;
   }
   return out;
+}
+
+async function renderReportFromItems({
+  reportType = 'web',
+  windowType,
+  force,
+  items,
+  counts,
+  reportDate,
+  progress,
+}) {
+  let reportData;
+  let model = null;
+  let aiUsed = false;
+
+  if (items.length === 0) {
+    reportData = fallbackReportData(windowType, counts, { reportType });
+    progress('ai', '本期 0 条可生成内容，跳过 AI 调用。');
+  } else {
+    if (!hasApiKey()) throw new Error('未配置 API Key，无法生成 AI 日报。请先在「设置」里填写。');
+
+    const cfg = loadConfig();
+    if (cfg.budgetDailyTokens > 0) {
+      const used = getUsageForDay().total;
+      if (used >= cfg.budgetDailyTokens) {
+        log.warn(`今日 token 用量 ${used} 已达预算 ${cfg.budgetDailyTokens}，仍继续以保证日报完整。`);
+      }
+    }
+
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      progress('ai', `分析内容 (${i + 1}/${items.length}): ${it.title || it.id}`);
+      try {
+        await analyzeContent(it, { force });
+      } catch (e) {
+        log.warn(`单条分析失败（不影响整体）：${it.id} ${e.message}`);
+      }
+    }
+
+    const analyses = getAnalysesForContents(items.map((i) => i.id));
+    progress('ai', '正在生成内容归类报告...');
+    const r = await generateReportData({ windowType, items, analyses, reportType });
+    reportData = r.data;
+    model = r.model;
+    aiUsed = true;
+  }
+
+  progress('render', '正在渲染日报...');
+
+  const analyses = getAnalysesForContents(items.map((i) => i.id));
+  const meta = { reportType, windowType, reportDate, generatedAt: new Date().toISOString(), counts, model, aiUsed };
+
+  const md = renderMarkdown(reportData, items, analyses, meta);
+  const html = renderHtml(reportData, items, analyses, meta);
+  const csv = renderCsv(items, analyses);
+
+  const stamp = `${reportDate}_${windowType}`;
+  const prefix = reportType === 'wechat' ? 'wechat_report' : 'report';
+  const mdPath = join(EXPORTS_DIR, `${prefix}_${stamp}.md`);
+  const htmlPath = join(EXPORTS_DIR, `${prefix}_${stamp}.html`);
+  const csvPath = join(EXPORTS_DIR, `${prefix}_${stamp}.csv`);
+  const zipPath = join(EXPORTS_DIR, `${prefix}_${stamp}.zip`);
+  writeFileSync(mdPath, md);
+  writeFileSync(htmlPath, html);
+  writeFileSync(csvPath, csv);
+  writeFileSync(zipPath, createZip([
+    { name: basename(mdPath), data: md },
+    { name: basename(htmlPath), data: html },
+    { name: basename(csvPath), data: csv },
+  ]));
+
+  const row = insertReport({
+    report_type: reportType,
+    report_date: reportDate,
+    window_type: windowType,
+    eligible_count: items.length,
+    report_json: JSON.stringify(reportData),
+    report_markdown: md,
+    export_md_path: mdPath,
+    export_html_path: htmlPath,
+    export_csv_path: csvPath,
+    export_zip_path: zipPath,
+  });
+
+  const statusStr = aiUsed ? `AI=on(${model})` : 'AI=skip';
+  const label = reportType === 'wechat' ? '微信日报' : '日报';
+  progress('done', `${label}已生成：${windowType}，内容 ${items.length} 条，${statusStr}`);
+  log.info(`${label}已生成：${windowType}，内容 ${items.length} 条，${statusStr}`);
+
+  return { report: row, markdown: md, eligibleCount: items.length, aiUsed };
 }
 
 /**
@@ -96,7 +187,7 @@ export async function runDailyReport({
     let client = null;
 
     try {
-      // 小红书/抖音使用 Chrome CDP；视频号只使用桌面微信客户端。
+      // 网页日报只跑小红书/抖音 Chrome CDP；视频号由微信日报入口单独处理。
       const chrome = await launchChrome({ port: 9222, waitMs: 15000 });
       chromeChild = chrome.closeOnDone ? chrome.child : null;
 
@@ -153,93 +244,75 @@ export async function runDailyReport({
   progress('filter', '刷新数据状态...');
   recomputeAll(startISO);
   const items = getEligible(startISO);
-  const counts = countsByStatus();
+  const counts = countsByStatus({ platforms: ELIGIBLE_PLATFORMS });
   const reportDate = new Date().toISOString().slice(0, 10);
 
   progress('filter', `达标内容: ${items.length} 条`);
 
-  // ====================================================================
-  // 第 4-5 步：AI 摘录与内容归类
-  // ====================================================================
-  let reportData;
-  let model = null;
-  let aiUsed = false;
-
-  if (items.length === 0) {
-    // 0 达标 → 完全跳过 AI，一分钱不花。
-    reportData = fallbackReportData(windowType, counts);
-    progress('ai', '本期 0 条达标，跳过 AI 调用。');
-  } else {
-    if (!hasApiKey()) throw new Error('未配置 API Key，无法生成 AI 日报。请先在「设置」里填写。');
-
-    // 预算软提醒（不硬停）
-    if (cfg.budgetDailyTokens > 0) {
-      const used = getUsageForDay().total;
-      if (used >= cfg.budgetDailyTokens) {
-        log.warn(`今日 token 用量 ${used} 已达预算 ${cfg.budgetDailyTokens}，仍继续以保证日报完整。`);
-      }
-    }
-
-    // 逐条分析
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      progress('ai', `分析内容 (${i + 1}/${items.length}): ${it.title || it.id}`);
-      try {
-        await analyzeContent(it, { force });
-      } catch (e) {
-        log.warn(`单条分析失败（不影响整体）：${it.id} ${e.message}`);
-      }
-    }
-
-    const analyses = getAnalysesForContents(items.map((i) => i.id));
-    progress('ai', '正在生成内容归类报告...');
-    const r = await generateReportData({ windowType, items, analyses });
-    reportData = r.data;
-    model = r.model;
-    aiUsed = true;
-  }
-
-  // ====================================================================
-  // 第 6 步：渲染输出
-  // ====================================================================
-  progress('render', '正在渲染日报...');
-
-  const analyses = getAnalysesForContents(items.map((i) => i.id));
-  const meta = { windowType, reportDate, generatedAt: new Date().toISOString(), counts, model, aiUsed };
-
-  const md = renderMarkdown(reportData, items, analyses, meta);
-  const html = renderHtml(reportData, items, analyses, meta);
-  const csv = renderCsv(items, analyses);
-
-  const stamp = `${reportDate}_${windowType}`;
-  const mdPath = join(EXPORTS_DIR, `report_${stamp}.md`);
-  const htmlPath = join(EXPORTS_DIR, `report_${stamp}.html`);
-  const csvPath = join(EXPORTS_DIR, `report_${stamp}.csv`);
-  const zipPath = join(EXPORTS_DIR, `report_${stamp}.zip`);
-  writeFileSync(mdPath, md);
-  writeFileSync(htmlPath, html);
-  writeFileSync(csvPath, csv);
-  writeFileSync(zipPath, createZip([
-    { name: basename(mdPath), data: md },
-    { name: basename(htmlPath), data: html },
-    { name: basename(csvPath), data: csv },
-  ]));
-
-  const row = insertReport({
-    report_date: reportDate,
-    window_type: windowType,
-    eligible_count: items.length,
-    report_json: JSON.stringify(reportData),
-    report_markdown: md,
-    export_md_path: mdPath,
-    export_html_path: htmlPath,
-    export_csv_path: csvPath,
-    export_zip_path: zipPath,
+  const result = await renderReportFromItems({
+    reportType: 'web',
+    windowType,
+    force,
+    items,
+    counts,
+    reportDate,
+    progress,
   });
 
-  const statusStr = aiUsed ? `AI=on(${model})` : 'AI=skip';
-  progress('done', `日报已生成：${windowType}，达标 ${items.length} 条，${statusStr}`);
-  log.info(`日报已生成：${windowType}，达标 ${items.length} 条，${statusStr}`);
+  return { ...result, patrolResult, rpaError };
+}
 
-  return { report: row, markdown: md, eligibleCount: items.length, aiUsed, patrolResult, rpaError };
+export async function runWechatReport({
+  windowType = 'last_1_day',
+  force = false,
+  skipRpa = true,
+  onProgress,
+  shouldStop = () => false,
+} = {}) {
+  const progress = (phase, detail) => {
+    log.info(`[Pipeline:wechat:${phase}] ${detail}`);
+    if (onProgress) onProgress(phase, detail);
+  };
+
+  windowType = normalizeWindowType(windowType);
+  const startISO = windowStartISO(windowType);
+
+  let patrolResult = null;
+  let rpaError = null;
+
+  if (!skipRpa) {
+    progress('rpa', '开始桌面微信视频号阶段巡检...');
+    try {
+      patrolResult = await runWechatDesktopPatrol({
+        onProgress: (msg) => progress('rpa', msg),
+        shouldStop,
+      });
+    } catch (rpaErr) {
+      rpaError = rpaErr.message || String(rpaErr);
+      log.warn(`[Pipeline] 桌面微信视频号巡检失败，继续使用已有数据: ${rpaErr.message}`);
+      progress('rpa', `巡检失败: ${rpaErr.message}（将使用已有数据继续）`);
+    }
+  } else {
+    progress('rpa', '已跳过微信巡检（使用已有数据）');
+  }
+
+  progress('filter', '刷新微信内容状态...');
+  recomputeAll(startISO);
+  const items = getWechatReportItems(startISO);
+  const counts = countsByStatus({ platforms: WECHAT_REPORT_PLATFORMS });
+  const reportDate = new Date().toISOString().slice(0, 10);
+
+  progress('filter', `微信可生成内容: ${items.length} 条`);
+
+  const result = await renderReportFromItems({
+    reportType: 'wechat',
+    windowType,
+    force,
+    items,
+    counts,
+    reportDate,
+    progress,
+  });
+
+  return { ...result, patrolResult, rpaError };
 }

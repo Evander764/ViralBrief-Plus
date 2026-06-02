@@ -134,7 +134,7 @@ async function quitRunningChromeForRpa(userDataDir) {
   if (!shouldAutoRelaunchChrome()) {
     throw new Error(
       '当前 Chrome 已在运行，但没有开启 RPA 调试端口，应用无法直接接管它。\n' +
-      '请先完全退出 Google Chrome，再点「一键自动巡检」。应用会用同一份已登录资料目录重新打开 Chrome，登录态会保留。\n' +
+      '请先完全退出 Google Chrome，再点「巡检网页内容」。应用会用同一份已登录资料目录重新打开 Chrome，登录态会保留。\n' +
       `使用的资料目录：${userDataDir}`
     );
   }

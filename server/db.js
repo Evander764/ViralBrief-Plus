@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS ai_analysis (
 
 CREATE TABLE IF NOT EXISTS daily_reports (
   id TEXT PRIMARY KEY,
+  report_type TEXT DEFAULT 'web',
   report_date TEXT,
   window_type TEXT,
   eligible_count INTEGER,
@@ -142,6 +143,7 @@ function ensureColumn(table, column, ddl) {
 }
 
 ensureColumn('daily_reports', 'export_zip_path', 'export_zip_path TEXT');
+ensureColumn('daily_reports', 'report_type', "report_type TEXT DEFAULT 'web'");
 ensureColumn('accounts', 'platform_user_id', 'platform_user_id TEXT');
 ensureColumn('accounts', 'discovery_source', 'discovery_source TEXT');
 ensureColumn('accounts', 'discovered_at', 'discovered_at TEXT');

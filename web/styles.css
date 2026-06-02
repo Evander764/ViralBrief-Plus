@@ -737,6 +737,7 @@ button:disabled {
   vertical-align: middle;
 }
 .badge.confirmed { background: var(--ok-soft); color: var(--ok); border-color: rgba(52,211,153,0.3); box-shadow: 0 0 14px rgba(52,211,153,0.14); }
+.badge.wechat { background: rgba(56,189,248,0.12); color: #7dd3fc; border-color: rgba(56,189,248,0.34); box-shadow: 0 0 14px rgba(56,189,248,0.14); }
 .badge.needs_review { background: var(--warn-soft); color: var(--warn); border-color: rgba(251,191,36,0.3); box-shadow: 0 0 14px rgba(251,191,36,0.12); }
 .badge.monitoring { background: rgba(var(--brand-rgb),0.14); color: var(--brand-strong); border-color: rgba(var(--brand-rgb),0.32); box-shadow: 0 0 14px rgba(var(--brand-rgb),0.16); }
 .badge.missing_share, .badge.missing_like, .badge.missing_favorite { background: var(--bad-soft); color: var(--bad); border-color: rgba(251,113,133,0.3); }

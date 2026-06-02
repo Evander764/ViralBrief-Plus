@@ -138,20 +138,38 @@ test('RPA skill 明确要求巡检阶段先保存后筛选', () => {
   assert.match(skill, /是否入日报只在巡检后的筛选阶段决定/);
 });
 
-test('自动巡检前端按小红书、抖音、视频号三个阶段发起，并提供停止按钮', () => {
+test('自动巡检前端拆成网页两阶段和微信独立入口，并提供停止按钮', () => {
   const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
   const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
   const serverJs = readFileSync(join(root, 'server', 'index.js'), 'utf8');
 
+  assert.match(appJs, /WEB_PATROL_STAGES/);
+  assert.match(appJs, /WECHAT_PATROL_STAGE/);
   assert.match(appJs, /platform: 'xiaohongshu'/);
   assert.match(appJs, /platform: 'douyin'/);
   assert.match(appJs, /platform: 'wechat_channels'/);
   assert.match(appJs, /includePatrolledToday: true/);
-  assert.match(appJs, /视频号使用桌面微信/);
+  assert.match(appJs, /ovRunWechatPatrol/);
+  assert.match(appJs, /ovGenerateWechat/);
+  assert.match(appJs, /reportType: 'wechat'/);
   assert.match(appJs, /\/patrol\/stop/);
   assert.match(serverJs, /requestPatrolStop/);
   assert.match(serverJs, /runWechatDesktopPatrol/);
   assert.match(serverJs, /chromePlatforms/);
   assert.match(html, /id="ovStopPatrol"/);
+  assert.match(html, /id="ovRunWechatPatrol"/);
+  assert.match(html, /id="ovGenerateWechat"/);
   assert.match(html, /id="candStopRpa"/);
+});
+
+test('前端账号池、内容库和日报列表显示微信日报与公众号文章', () => {
+  const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
+  const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
+
+  assert.match(appJs, /wechat_article: '公众号文章'/);
+  assert.match(appJs, /微信日报/);
+  assert.match(appJs, /网页日报/);
+  assert.match(html, /value="wechat_article">公众号文章/);
+  assert.match(html, /生成微信日报/);
+  assert.match(html, /巡检微信视频号/);
 });

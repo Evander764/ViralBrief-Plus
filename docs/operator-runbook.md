@@ -57,7 +57,7 @@ VBP_RPA_CHROME_PROFILE=Default npm run rpa:chrome
 VBP_RPA_CHROME_USER_DATA_DIR="/path/to/chrome-data" npm start
 ```
 
-仪表盘里的“发现关注账号”和“一键自动巡检”依赖当前 Chrome 登录态。遇到登录或验证页时，先在 Chrome 手动完成登录，再重新触发。
+仪表盘里的“发现关注账号”和“巡检网页内容”依赖当前 Chrome 登录态。遇到登录或验证页时，先在 Chrome 手动完成登录，再重新触发。微信视频号巡检使用桌面微信登录态。
 
 抖音巡检会先从账号主页打开第一条非置顶视频，再优先用详情页右侧“下一个/下箭头”连续翻后续视频。右侧按钮找不到、点击后页面没变化，或翻页后离开详情页时，会自动回退到旧的逐候选详情链接方案。
 

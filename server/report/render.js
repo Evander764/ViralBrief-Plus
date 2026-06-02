@@ -53,13 +53,33 @@ function excludedSummary(counts) {
   return parts.join('，');
 }
 
-export function fallbackReportData(windowType, counts) {
+function reportCopy(meta = {}) {
+  if (meta.reportType === 'wechat') {
+    return {
+      title: '微信内容日报',
+      sourceLabel: '账号池内已人工确认的微信视频号/公众号内容',
+      zeroSummary: `过去${windowLabel(meta.windowType)}内，暂无已人工确认且关联账号池的微信视频号/公众号内容，样本不足。`,
+      dataScope: '微信视频号/公众号 + 已人工确认 + 账号池关联',
+      note: '微信日报按人工确认内容整理，不使用小红书/抖音的 1000 阈值。',
+    };
+  }
+  return {
+    title: '每日爆款选题总结',
+    sourceLabel: '账号池内小红书/抖音 + 平台必需指标都达标（小红书：点赞+收藏；抖音：点赞+收藏+转发）',
+    zeroSummary: `过去${windowLabel(meta.windowType)}内，暂无满足「小红书点赞和收藏都达标；抖音点赞、收藏和转发都达标」且证据可信的内容，样本不足。`,
+    dataScope: '账号池内小红书/抖音 + 平台必需指标都达标',
+    note: '点赞/转发/收藏等数字来自稳定页面数据、插件采集或人工确认；截图/OCR 等弱证据只进待复核，不直接入榜。',
+  };
+}
+
+export function fallbackReportData(windowType, counts, options = {}) {
+  const copy = reportCopy({ ...options, windowType });
   const ex = excludedSummary(counts);
   return {
-    daily_summary: `过去${windowLabel(windowType)}内，暂无满足「小红书点赞和收藏都达标；抖音点赞、收藏和转发都达标」且证据可信的内容，样本不足。${ex ? `当前库内：${ex}。建议在「今日候选」里补录/确认指标后再生成。` : ''}`,
+    daily_summary: `${copy.zeroSummary}${ex ? `当前库内：${ex}。建议在「今日候选」里补录/确认指标后再生成。` : ''}`,
     top_topic_clusters: [],
     recommended_actions: [],
-    data_warnings: ['样本不足：达标内容为 0 条，本期不做方向结论。'],
+    data_warnings: [`样本不足：${options.reportType === 'wechat' ? '可生成微信内容' : '达标内容'}为 0 条，本期不做方向结论。`],
   };
 }
 
@@ -67,10 +87,13 @@ export function fallbackReportData(windowType, counts) {
 
 export function renderMarkdown(reportData, items, analyses, meta) {
   const L = windowLabel(meta.windowType);
+  const copy = reportCopy(meta);
+  const listTitle = meta.reportType === 'wechat' ? '内容清单' : '达标内容清单';
+  const reasonHeader = meta.reportType === 'wechat' ? '纳入口径' : '入选原因';
   const out = [];
-  out.push(`# 每日爆款选题总结 — ${L}`);
+  out.push(`# ${copy.title} — ${L}`);
   out.push('');
-  out.push(`> 生成时间：${meta.generatedAt}　｜　窗口：${L}　｜　达标内容：**${items.length}** 条　｜　入选条件：账号池内小红书/抖音 + 平台必需指标都达标（小红书：点赞+收藏；抖音：点赞+收藏+转发）`);
+  out.push(`> 生成时间：${meta.generatedAt}　｜　窗口：${L}　｜　内容数量：**${items.length}** 条　｜　筛选口径：${copy.sourceLabel}`);
   out.push('');
 
   out.push('## 一、AI 观察摘要');
@@ -103,10 +126,10 @@ export function renderMarkdown(reportData, items, analyses, meta) {
     });
   }
 
-  out.push('## 三、达标内容清单（数据来自本地库，精确值）');
+  out.push(`## 三、${listTitle}（数据来自本地库，精确值）`);
   out.push('');
   if (items.length) {
-    out.push('| 内容编号 | 平台 | 作者 | 标题 | 点赞 | 转发/分享 | 收藏 | 评论 | 入选原因 | 发布时间 | 链接 |');
+    out.push(`| 内容编号 | 平台 | 作者 | 标题 | 点赞 | 转发/分享 | 收藏 | 评论 | ${reasonHeader} | 发布时间 | 链接 |`);
     out.push('|----------|------|------|------|------|-----------|------|------|----------|----------|------|');
     items.forEach((it, i) => {
       const t = (it.title || '').replace(/\|/g, '／');
@@ -115,7 +138,7 @@ export function renderMarkdown(reportData, items, analyses, meta) {
       out.push(`| C${i + 1} | ${it.platform || '?'} | ${(it.author_name || '?').replace(/\|/g, '／')} | ${t} | ${fmt(it.like_count)} | ${fmt(it.share_count)} | ${fmt(it.favorite_count)} | ${fmt(it.comment_count)} | ${(it.eligible_reason || '—').replace(/\|/g, '／')} | ${pub} | ${link} |`);
     });
   } else {
-    out.push('_本期无达标内容。_');
+    out.push('_本期无可生成内容。_');
   }
   out.push('');
 
@@ -137,17 +160,17 @@ export function renderMarkdown(reportData, items, analyses, meta) {
 
   out.push('## 六、数据备注');
   out.push('');
-  out.push('- **数据口径**：点赞/转发/收藏等数字来自稳定页面数据、插件采集或人工确认；截图/OCR 等弱证据只进待复核，不直接入榜。');
+  out.push(`- **数据口径**：${copy.note}`);
   const ex = excludedSummary(meta.counts || {});
   if (ex) out.push(`- **本期未入选统计**：${ex}（这些内容因缺数据或未达标，未计入正式榜单）。`);
-  out.push(`- **样本量**：达标 ${items.length} 条。`);
+  out.push(`- **样本量**：${items.length} 条。`);
   if (items.length <= 2) {
-    out.push('- ⚠️ **少样本提示**：本期达标内容仅 ' + items.length + ' 条，AI 摘录和归类仅供参考，请结合更长窗口数据综合判断。');
+    out.push('- ⚠️ **少样本提示**：本期内容仅 ' + items.length + ' 条，AI 摘录和归类仅供参考，请结合更长窗口数据综合判断。');
   }
   for (const w of reportData.data_warnings || []) out.push(`- ${w}`);
   out.push('');
   out.push('---');
-  out.push(`_由「Viral Brief Plus」生成${meta.aiUsed ? `（分析模型：${meta.model || '—'}）` : '（本期 0 达标，未调用 AI）'}。日报中的互动数字为本地库记录值。_`);
+  out.push(`_由「Viral Brief Plus」生成${meta.aiUsed ? `（分析模型：${meta.model || '—'}）` : '（本期 0 条，未调用 AI）'}。日报中的互动数字为本地库记录值。_`);
   return out.join('\n');
 }
 
@@ -155,6 +178,9 @@ export function renderMarkdown(reportData, items, analyses, meta) {
 
 export function renderHtml(reportData, items, analyses, meta) {
   const L = windowLabel(meta.windowType);
+  const copy = reportCopy(meta);
+  const listTitle = meta.reportType === 'wechat' ? '内容清单' : '达标内容清单';
+  const reasonHeader = meta.reportType === 'wechat' ? '纳入口径' : '入选原因';
   const clusters = reportData.top_topic_clusters || [];
   const titles = gatherReusableTitles(reportData, analyses);
   const actions = reportData.recommended_actions || [];
@@ -190,7 +216,7 @@ export function renderHtml(reportData, items, analyses, meta) {
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>每日爆款选题总结 — ${esc(L)}</title>
+<title>${esc(copy.title)} — ${esc(L)}</title>
 <style>
   :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --brand:#2563eb; --bg:#f8fafc; }
   * { box-sizing:border-box; }
@@ -214,8 +240,8 @@ export function renderHtml(reportData, items, analyses, meta) {
   @media print { body { background:#fff; } .wrap { max-width:none; padding:0; } .noprint { display:none; } }
 </style></head>
 <body><div class="wrap">
-  <h1>每日爆款选题总结 <span class="badge">${esc(L)}</span></h1>
-  <div class="meta">生成时间：${esc(meta.generatedAt)}　｜　达标内容：<b>${items.length}</b> 条　｜　入选条件：账号池内小红书/抖音 + 平台必需指标都达标（小红书：点赞+收藏；抖音：点赞+收藏+转发）</div>
+  <h1>${esc(copy.title)} <span class="badge">${esc(L)}</span></h1>
+  <div class="meta">生成时间：${esc(meta.generatedAt)}　｜　内容数量：<b>${items.length}</b> 条　｜　筛选口径：${esc(copy.sourceLabel)}</div>
   <p class="noprint muted">提示：按 Cmd/Ctrl + P 可「打印为 PDF」。</p>
 
   <h2>一、AI 观察摘要</h2>
@@ -224,8 +250,8 @@ export function renderHtml(reportData, items, analyses, meta) {
 
   ${clusters.length ? `<h2>二、AI 母题聚类 TOP ${clusters.length}（仅供参考）</h2>${clusterHtml}` : ''}
 
-  <h2>三、达标内容清单 <span class="muted">（数据来自本地库，为精确值）</span></h2>
-  ${items.length ? `<table><thead><tr><th>内容编号</th><th>平台</th><th>作者</th><th>标题</th><th>点赞</th><th>转发/分享</th><th>收藏</th><th>评论</th><th>入选原因</th><th>发布</th><th>链接</th></tr></thead><tbody>${rows}</tbody></table>` : '<p><i>本期无达标内容。</i></p>'}
+  <h2>三、${esc(listTitle)} <span class="muted">（数据来自本地库，为精确值）</span></h2>
+  ${items.length ? `<table><thead><tr><th>内容编号</th><th>平台</th><th>作者</th><th>标题</th><th>点赞</th><th>转发/分享</th><th>收藏</th><th>评论</th><th>${esc(reasonHeader)}</th><th>发布</th><th>链接</th></tr></thead><tbody>${rows}</tbody></table>` : '<p><i>本期无可生成内容。</i></p>'}
 
   ${titles.length ? `<h2>四、AI 建议选题（仅供参考）</h2><ol>${titles.map((t) => `<li>${esc(t)}</li>`).join('')}</ol>` : ''}
 
@@ -233,14 +259,14 @@ export function renderHtml(reportData, items, analyses, meta) {
 
   <h2>六、数据备注</h2>
   <ul class="notes">
-    <li><b>数据口径：</b>点赞/转发/收藏等数字来自稳定页面数据、插件采集或人工确认；截图/OCR 等弱证据只进待复核，不直接入榜。</li>
+    <li><b>数据口径：</b>${esc(copy.note)}</li>
     ${ex ? `<li><b>本期未入选统计：</b>${esc(ex)}（缺数据或未达标，不计入榜单）。</li>` : ''}
-    <li><b>样本量：</b>达标 ${items.length} 条。</li>
-    ${items.length <= 2 ? `<li>⚠️ <b>少样本提示：</b>本期达标内容仅 ${items.length} 条，AI 摘录和归类仅供参考，请结合更长窗口数据综合判断。</li>` : ''}
+    <li><b>样本量：</b>${items.length} 条。</li>
+    ${items.length <= 2 ? `<li>⚠️ <b>少样本提示：</b>本期内容仅 ${items.length} 条，AI 摘录和归类仅供参考，请结合更长窗口数据综合判断。</li>` : ''}
     ${(reportData.data_warnings || []).map((w) => `<li>${esc(w)}</li>`).join('')}
   </ul>
 
-  <footer>由「Viral Brief Plus」生成${meta.aiUsed ? `（分析模型：${esc(meta.model || '—')}）` : '（本期 0 达标，未调用 AI）'}。日报中的互动数字为本地库记录值。</footer>
+  <footer>由「Viral Brief Plus」生成${meta.aiUsed ? `（分析模型：${esc(meta.model || '—')}）` : '（本期 0 条，未调用 AI）'}。日报中的互动数字为本地库记录值。</footer>
 </div></body></html>`;
 }
 

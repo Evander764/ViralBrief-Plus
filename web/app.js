@@ -7,7 +7,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const PLATFORM_LABEL = {
-  douyin: '抖音', xiaohongshu: '小红书', wechat_channels: '视频号', other: '其他',
+  douyin: '抖音', xiaohongshu: '小红书', wechat_channels: '视频号', wechat_article: '公众号文章', other: '其他',
 };
 const STATUS_LABEL = {
   confirmed: '已确认', needs_review: '待复核', missing_share: '缺转发数',
@@ -17,6 +17,12 @@ const STATUS_LABEL = {
 let accountsCache = [];
 let accountSuggestionCache = [];
 const ACCOUNT_SEARCH_PLATFORMS = ['xiaohongshu', 'douyin'];
+const ACCOUNT_FORM_PLATFORMS = ['douyin', 'xiaohongshu', 'wechat_channels', 'wechat_article', 'other'];
+const WEB_PATROL_STAGES = [
+  { platform: 'xiaohongshu', label: '小红书' },
+  { platform: 'douyin', label: '抖音' },
+];
+const WECHAT_PATROL_STAGE = { platform: 'wechat_channels', label: '微信视频号' };
 let patrolRunning = false;
 
 async function api(path, opts = {}) {
@@ -177,7 +183,55 @@ async function getDefaultWindowType() {
 $('#ovGenerate').addEventListener('click', async () => {
   const skipRpa = !$('#ovAutoCollect').checked;
   try {
-    await generateReport(await getDefaultWindowType(), $('#ovGenMsg'), skipRpa, { button: $('#ovGenerate') });
+    await generateReport(await getDefaultWindowType(), $('#ovGenMsg'), skipRpa, {
+      button: $('#ovGenerate'),
+      reportType: 'web',
+      reportLabel: '网页日报',
+      patrolStages: WEB_PATROL_STAGES,
+    });
+  } catch (e) {
+    toast('生成失败：' + e.message, 'bad');
+  }
+});
+
+$('#ovRunWechatPatrol').addEventListener('click', async (e) => {
+  const btn = e.target;
+  btn.disabled = true;
+  btn.textContent = '巡检中...';
+  const progressEl = $('#ovProgress');
+  const progressText = $('#ovProgressText');
+  $('#ovWechatMsg').textContent = '';
+  if (progressEl) progressEl.style.display = 'block';
+  if (progressText) progressText.textContent = '正在巡检微信视频号账号...';
+  try {
+    setPatrolRunning(true, btn);
+    const res = await runPatrolStages(progressText, {
+      includePatrolledToday: true,
+      stages: [WECHAT_PATROL_STAGE],
+    });
+    const detail = `巡检账号 ${res.total || 0} 个，新增 ${res.newItems || 0} 条，今日跳过 ${res.skippedToday || 0} 个`;
+    $('#ovWechatMsg').textContent = `${res.stopped ? '已停止' : '完成'}：${detail}`;
+    toast(`${res.stopped ? '微信视频号巡检已停止' : '微信视频号巡检完成'}：${detail}`, res.stopped ? '' : 'ok');
+    loadCandidates();
+    loadOverview();
+  } catch (err) {
+    $('#ovWechatMsg').textContent = '巡检失败：' + err.message;
+    toast('微信巡检失败：' + err.message, 'bad');
+  } finally {
+    if (progressEl) progressEl.style.display = 'none';
+    setPatrolRunning(false);
+    btn.disabled = false;
+    btn.textContent = '巡检微信视频号';
+  }
+});
+
+$('#ovGenerateWechat').addEventListener('click', async () => {
+  try {
+    await generateReport(await getDefaultWindowType(), $('#ovWechatMsg'), true, {
+      button: $('#ovGenerateWechat'),
+      reportType: 'wechat',
+      reportLabel: '微信日报',
+    });
   } catch (e) {
     toast('生成失败：' + e.message, 'bad');
   }
@@ -213,12 +267,9 @@ function mergePatrolSummary(summary, res) {
 
 async function runPatrolStages(progressText = null, options = {}) {
   const includePatrolledToday = options.includePatrolledToday === true;
+  const stages = Array.isArray(options.stages) && options.stages.length ? options.stages : WEB_PATROL_STAGES;
   const summary = { total: 0, success: 0, failed: 0, newItems: 0, duplicates: 0, discovered: 0, skippedToday: 0, stopped: false, maxTabsPerBatch: 0 };
-  for (const stage of [
-    { platform: 'xiaohongshu', label: '小红书' },
-    { platform: 'douyin', label: '抖音' },
-    { platform: 'wechat_channels', label: '视频号' },
-  ]) {
+  for (const stage of stages) {
     if (progressText) progressText.textContent = `正在巡检${stage.label}账号...`;
     const res = await api('/patrol/run', {
       method: 'POST',
@@ -235,14 +286,16 @@ async function generateReport(win, msgEl, skipRpa = false, options = {}) {
   const progressEl = Object.hasOwn(options, 'progressEl') ? options.progressEl : $('#ovProgress');
   const progressText = Object.hasOwn(options, 'progressText') ? options.progressText : $('#ovProgressText');
   const btn = options.button || $('#ovGenerate');
+  const reportType = options.reportType === 'wechat' ? 'wechat' : 'web';
+  const reportLabel = options.reportLabel || (reportType === 'wechat' ? '微信日报' : '日报');
 
   if (btn) btn.disabled = true;
   if (progressEl) progressEl.style.display = 'block';
 
   if (progressText && skipRpa) {
-    progressText.textContent = '正在分析已有数据并生成日报...';
+    progressText.textContent = `正在分析已有数据并生成${reportLabel}...`;
   } else if (progressText) {
-    progressText.textContent = '正在启动浏览器，自动采集最新数据...';
+    progressText.textContent = reportType === 'wechat' ? '正在启动微信巡检...' : '正在启动浏览器，自动采集最新网页数据...';
   }
   msgEl.textContent = '';
 
@@ -250,17 +303,20 @@ async function generateReport(win, msgEl, skipRpa = false, options = {}) {
     let patrolSummary = null;
     if (!skipRpa) {
       setPatrolRunning(true, btn);
-      patrolSummary = await runPatrolStages(progressText, { includePatrolledToday: true });
+      patrolSummary = await runPatrolStages(progressText, {
+        includePatrolledToday: true,
+        stages: options.patrolStages || WEB_PATROL_STAGES,
+      });
       setPatrolRunning(false, btn);
       if (patrolSummary.stopped) {
         msgEl.textContent = '已停止巡检，未生成日报。';
         return;
       }
-      if (progressText) progressText.textContent = '巡检完成，正在调用模型生成日报...';
+      if (progressText) progressText.textContent = `巡检完成，正在调用模型生成${reportLabel}...`;
     }
     const r = await api('/reports/generate', {
       method: 'POST',
-      body: JSON.stringify({ window: win, skipRpa: true }),
+      body: JSON.stringify({ window: win, skipRpa: true, reportType }),
     });
 
     if (progressEl) progressEl.style.display = 'none';
@@ -270,7 +326,7 @@ async function generateReport(win, msgEl, skipRpa = false, options = {}) {
       return;
     }
 
-    let detail = `达标 ${r.eligibleCount} 条`;
+    let detail = `${reportType === 'wechat' ? '内容' : '达标'} ${r.eligibleCount} 条`;
     if (patrolSummary) {
       detail += ` | 巡检账号 ${patrolSummary.total}, 新增 ${patrolSummary.newItems}, 去重 ${patrolSummary.duplicates}, 今日跳过 ${patrolSummary.skippedToday}`;
     } else if (r.patrolResult) {
@@ -278,9 +334,9 @@ async function generateReport(win, msgEl, skipRpa = false, options = {}) {
     } else if (r.rpaError) {
       detail += ` | RPA 未完成：${r.rpaError}`;
     }
-    if (!r.aiUsed) detail += '（0 达标，未调用 AI）';
-    msgEl.textContent = `✅ 完成：${detail}`;
-    toast('日报已生成', 'ok');
+    if (!r.aiUsed) detail += '（0 条，未调用 AI）';
+    msgEl.textContent = `完成：${detail}`;
+    toast(`${reportLabel}已生成`, 'ok');
     loadReports();
     loadOverview();
     loadCandidates();
@@ -479,17 +535,17 @@ $('#candBatchConfirm').addEventListener('click', async () => {
   loadCandidates(); loadOverview();
 });
 
-// 一键自动巡检
+// 网页内容自动巡检
 $('#candRunRpa').addEventListener('click', async (e) => {
   const btn = e.target;
   btn.disabled = true;
   btn.textContent = '巡检中...';
   try {
     setPatrolRunning(true, btn);
-    toast('正在启动自动巡检：小红书/抖音使用 Chrome，视频号使用桌面微信...', 'ok');
+    toast('正在巡检网页内容：小红书/抖音使用 Chrome...', 'ok');
     const res = await runPatrolStages(null, { includePatrolledToday: true });
     const tabInfo = res.maxTabsPerBatch ? `，每轮 ${res.maxTabsPerBatch} 个账号标签` : '';
-    toast(`${res.stopped ? '自动巡检已停止' : '自动巡检完成'}：巡检账号 ${res.total || 0} 个，新增 ${res.newItems || 0} 条，今日跳过 ${res.skippedToday || 0} 个${tabInfo}`, res.stopped ? '' : 'ok');
+    toast(`${res.stopped ? '网页巡检已停止' : '网页巡检完成'}：巡检账号 ${res.total || 0} 个，新增 ${res.newItems || 0} 条，今日跳过 ${res.skippedToday || 0} 个${tabInfo}`, res.stopped ? '' : 'ok');
     loadCandidates();
     loadOverview();
   } catch (err) {
@@ -497,7 +553,7 @@ $('#candRunRpa').addEventListener('click', async (e) => {
   } finally {
     setPatrolRunning(false);
     btn.disabled = false;
-    btn.textContent = '一键自动巡检';
+    btn.textContent = '巡检网页内容';
   }
 });
 
@@ -609,7 +665,7 @@ async function loadLibrary() {
 // ---------------------------------------------------------------- accounts ----
 async function loadAccounts() {
   const rows = await getAccountsCache(true);
-  const platformOpts = (sel) => ['douyin','xiaohongshu','wechat_channels','other'].map(
+  const platformOpts = (sel) => ACCOUNT_FORM_PLATFORMS.map(
     p => `<option value="${p}" ${p===sel?'selected':''}>${PLATFORM_LABEL[p]||p}</option>`
   ).join('');
   const prioOpts = (sel) => ['S','A','B'].map(
@@ -940,7 +996,9 @@ function closeReportPreview() {
 
 async function showReportPreview(id) {
   const report = reportsCache.find((r) => r.id === id) || await api(`/reports/${encodeURIComponent(id)}`);
-  $('#rpViewerTitle').textContent = `${report.report_date} ｜ ${windowLabel(report.window_type)} ｜ 达标 ${report.eligible_count} 条`;
+  const typeLabel = report.report_type === 'wechat' ? '微信日报' : '网页日报';
+  const countLabel = report.report_type === 'wechat' ? '内容' : '达标';
+  $('#rpViewerTitle').textContent = `${typeLabel} ｜ ${report.report_date} ｜ ${windowLabel(report.window_type)} ｜ ${countLabel} ${report.eligible_count} 条`;
   $('#rpViewerMeta').textContent = `生成于 ${new Date(report.created_at).toLocaleString('zh-CN')}`;
   $('#rpViewerFrame').src = reportExportUrl(id, 'html', { inline: true });
   $('#rpViewer').classList.remove('hidden');
@@ -971,7 +1029,7 @@ async function loadReports() {
   reportsCache = rows;
   $('#rpList').innerHTML = rows.length ? rows.map((r) => `
     <div class="item"><div class="body">
-      <div class="t">${r.report_date} ｜ ${windowLabel(r.window_type)} ｜ 达标 ${r.eligible_count} 条</div>
+      <div class="t"><span class="badge ${r.report_type === 'wechat' ? 'wechat' : 'confirmed'}">${r.report_type === 'wechat' ? '微信日报' : '网页日报'}</span> ${r.report_date} ｜ ${windowLabel(r.window_type)} ｜ ${r.report_type === 'wechat' ? '内容' : '达标'} ${r.eligible_count} 条</div>
       <div class="sub">生成于 ${new Date(r.created_at).toLocaleString('zh-CN')}</div>
       <div class="actions">
         <button type="button" class="filebtn" data-rp-view="${esc(r.id)}">查看日报</button>
@@ -1007,7 +1065,13 @@ async function loadReports() {
 $('#rpViewerClose').addEventListener('click', closeReportPreview);
 $('#rpGenerate').addEventListener('click', async () => {
   try {
-    await generateReport(await getDefaultWindowType(), $('#rpMsg'), true, { button: $('#rpGenerate'), progressEl: null, progressText: null });
+    await generateReport(await getDefaultWindowType(), $('#rpMsg'), true, {
+      button: $('#rpGenerate'),
+      progressEl: null,
+      progressText: null,
+      reportType: 'web',
+      reportLabel: '网页日报',
+    });
   } catch (e) {
     toast('生成失败：' + e.message, 'bad');
   }

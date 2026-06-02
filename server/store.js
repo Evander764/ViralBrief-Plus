@@ -11,9 +11,12 @@ import { computeDataStatus, ELIGIBLE_PLATFORMS, eligibleReason } from './filter.
 
 const nowISO = () => new Date().toISOString();
 const METRICS = ['like', 'share', 'comment', 'favorite'];
+export const REPORT_TYPES = ['web', 'wechat'];
+export const WECHAT_REPORT_PLATFORMS = ['wechat_channels', 'wechat_article'];
 
 const cleanId = (v) => (v == null || String(v).trim() === '' ? null : String(v).trim());
 const cleanText = (v) => String(v || '').trim().toLowerCase();
+export const normalizeReportType = (v) => (v === 'wechat' ? 'wechat' : 'web');
 
 export function beijingDayStartISO(now = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -313,8 +316,41 @@ export function getEligible(windowStartISO) {
   );
 }
 
-export function countsByStatus() {
-  const rows = all('SELECT data_status, COUNT(*) AS n FROM contents GROUP BY data_status');
+/** 微信日报：只收已人工确认、已关联账号池、在窗口内的微信视频号/公众号内容，不走 1000 阈值。 */
+export function getWechatReportItems(windowStartISO) {
+  const platformPlaceholders = WECHAT_REPORT_PLATFORMS.map(() => '?').join(',');
+  const rows = all(
+    `SELECT c.*, a.nickname AS account_nickname, a.category AS account_category, a.priority AS account_priority
+     FROM contents c
+     JOIN accounts a ON a.id = c.account_id
+     WHERE c.platform IN (${platformPlaceholders})
+       AND c.content_type IN ('video','article')
+       AND c.user_confirmed = 1
+       AND COALESCE(c.archived, 0) = 0
+       AND COALESCE(c.is_duplicate, 0) = 0
+       AND c.publish_time IS NOT NULL AND c.publish_time >= ?
+     ORDER BY COALESCE(c.publish_time, c.captured_at, c.created_at) DESC`,
+    [...WECHAT_REPORT_PLATFORMS, windowStartISO],
+  );
+  return rows.map((row) => ({
+    ...row,
+    eligible_reason: row.eligible_reason || (row.platform === 'wechat_channels'
+      ? '微信视频号已人工确认，纳入微信日报'
+      : '公众号文章已人工确认，纳入微信日报'),
+  }));
+}
+
+export function countsByStatus({ platforms } = {}) {
+  const params = [];
+  const where = [];
+  if (Array.isArray(platforms) && platforms.length > 0) {
+    where.push(`platform IN (${platforms.map(() => '?').join(',')})`);
+    params.push(...platforms);
+  }
+  const rows = all(
+    `SELECT data_status, COUNT(*) AS n FROM contents ${where.length ? 'WHERE ' + where.join(' AND ') : ''} GROUP BY data_status`,
+    params,
+  );
   const out = {};
   for (const r of rows) out[r.data_status] = r.n;
   return out;
@@ -585,21 +621,36 @@ export function upsertObservation(contentId, data, model) {
 
 export function insertReport(r) {
   const id = r.id || randomUUID();
+  const reportType = normalizeReportType(r.report_type || r.reportType);
   run(
-    `INSERT INTO daily_reports (id, report_date, window_type, eligible_count, report_json, report_markdown, export_md_path, export_html_path, export_csv_path, export_zip_path, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, r.report_date, r.window_type, r.eligible_count, r.report_json, r.report_markdown,
+    `INSERT INTO daily_reports (id, report_type, report_date, window_type, eligible_count, report_json, report_markdown, export_md_path, export_html_path, export_csv_path, export_zip_path, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, reportType, r.report_date, r.window_type, r.eligible_count, r.report_json, r.report_markdown,
       r.export_md_path, r.export_html_path, r.export_csv_path, r.export_zip_path, nowISO()],
   );
   return getReport(id);
 }
 
-export function listReports(limit = 60) {
-  return all('SELECT id, report_date, window_type, eligible_count, export_md_path, export_html_path, export_csv_path, export_zip_path, created_at FROM daily_reports ORDER BY created_at DESC LIMIT ?', [limit]);
+export function listReports(options = 60) {
+  const opts = typeof options === 'number' ? { limit: options } : (options || {});
+  const limit = opts.limit || 60;
+  const params = [];
+  const where = [];
+  if (opts.reportType) {
+    where.push('COALESCE(report_type, ?) = ?');
+    params.push('web', normalizeReportType(opts.reportType));
+  }
+  params.push(limit);
+  return all(
+    `SELECT id, COALESCE(report_type, 'web') AS report_type, report_date, window_type, eligible_count, export_md_path, export_html_path, export_csv_path, export_zip_path, created_at
+     FROM daily_reports ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY created_at DESC LIMIT ?`,
+    params,
+  );
 }
 
 export function getReport(id) {
-  return get('SELECT * FROM daily_reports WHERE id = ?', [id]);
+  return get("SELECT *, COALESCE(report_type, 'web') AS report_type FROM daily_reports WHERE id = ?", [id]);
 }
 
 export function deleteReport(id) {

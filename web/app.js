@@ -24,6 +24,7 @@ const STATUS_LABEL = {
 };
 let accountsCache = [];
 let accountSuggestionCache = [];
+const ACCOUNT_PLATFORM_OPTIONS = ['douyin', 'xiaohongshu', 'wechat_channels', 'wechat_article', 'other'];
 const ACCOUNT_SEARCH_PLATFORMS = ['xiaohongshu', 'douyin'];
 let patrolRunning = false;
 
@@ -616,7 +617,7 @@ async function loadLibrary() {
 // ---------------------------------------------------------------- accounts ----
 async function loadAccounts() {
   const rows = await getAccountsCache(true);
-  const platformOpts = (sel) => ['douyin','xiaohongshu','other'].map(
+  const platformOpts = (sel) => ACCOUNT_PLATFORM_OPTIONS.map(
     p => `<option value="${p}" ${p===sel?'selected':''}>${PLATFORM_LABEL[p]||p}</option>`
   ).join('');
   const prioOpts = (sel) => ['S','A','B'].map(
@@ -861,7 +862,7 @@ function renderAiAccountResults(data = {}, query = '', error = '') {
   $$('#acAiResults [data-ac-ai-fill]').forEach((b) => b.addEventListener('click', () => {
     const item = accountSuggestionCache[Number(b.dataset.acAiFill)];
     if (!item) return;
-    $('#acSearchPlatform').value = item.platform === 'wechat_channels' ? 'other' : item.platform;
+    $('#acSearchPlatform').value = ACCOUNT_PLATFORM_OPTIONS.includes(item.platform) ? item.platform : 'other';
     $('#acSearchNick').value = item.nickname;
     $('#acSearchUrl').value = item.homepage_url;
     syncSearchJumpLink();

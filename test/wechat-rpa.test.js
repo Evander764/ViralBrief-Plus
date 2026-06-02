@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parsePngSize, imagePxToPoint, buildClickScript, buildScrollScript,
+  parsePngSize, imagePxToPoint, buildClickScript, buildScrollScript, buildTrackpadSwipeScript,
 } from '../server/rpa/macos-input.js';
 import { parseChinesePublishTime } from '../server/rpa/wechat.js';
 
@@ -43,6 +43,17 @@ test('buildScrollScript：含滚轮事件与位移', () => {
   const s = buildScrollScript(-180);
   assert.match(s, /CGEventCreateScrollWheelEvent/);
   assert.match(s, /-180/);
+});
+
+test('buildTrackpadSwipeScript：生成连续滚动阶段，模拟触控板上滑', () => {
+  const s = buildTrackpadSwipeScript({ deltaY: -900, steps: 4, intervalMs: 12, x: 300, y: 500 });
+  assert.match(s, /CGWarpMouseCursorPosition/);
+  assert.match(s, /kCGScrollWheelEventIsContinuous/);
+  assert.match(s, /kCGScrollWheelEventScrollPhase/);
+  assert.match(s, /PHASE_BEGAN/);
+  assert.match(s, /PHASE_CHANGED/);
+  assert.match(s, /PHASE_ENDED/);
+  assert.match(s, /deltasY = \[-/);
 });
 
 test('parseChinesePublishTime：相对时间', () => {

@@ -4,7 +4,7 @@
  * 微信桌面端的视频号/公众号是内置 webview，不暴露 CDP 调试端口，CDP 那套
  * goto/evaluate 够不到。所以这里用系统自带能力驱动它：
  *   - 截屏：`screencapture`（命令行，系统自带）。
- *   - 鼠标/键盘：`osascript` 跑 JXA，经 ObjC 桥调用 CoreGraphics 的 CGEvent。
+ *   - 鼠标/键盘/触控板式滚动：`osascript` 跑 JXA，经 ObjC 桥调用 CoreGraphics 的 CGEvent。
  *
  * 坐标系约定：
  *   - 视觉模型读出的坐标是「截图像素」坐标。
@@ -122,6 +122,72 @@ var e = $.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitPixel, 2, ${Mat
 $.CGEventPost($.kCGHIDEventTap, e);`;
 }
 
+function splitSwipeDelta(total, steps) {
+  const n = Math.min(18, Math.max(3, Math.round(Number(steps) || 9)));
+  const target = Math.round(Number(total) || 0);
+  if (target === 0) return Array.from({ length: n }, () => 0);
+
+  const weights = Array.from({ length: n }, (_, i) => {
+    const t = (i + 0.5) / n;
+    return Math.sin(Math.PI * t);
+  });
+  const weightSum = weights.reduce((sum, item) => sum + item, 0) || 1;
+  const values = weights.map((w) => Math.round(target * w / weightSum));
+  values[values.length - 1] += target - values.reduce((sum, item) => sum + item, 0);
+  return values;
+}
+
+/**
+ * 构造更接近触控板双指上滑的连续滚动脚本。
+ *
+ * macOS 不给普通 JXA 直接制造真实多点触控帧；这里采用系统可接受的
+ * continuous pixel scroll + scroll phase，行为上比单次滚轮更接近两指滑动。
+ * deltaY<0 表示手指向上滑，内容上移，通常进入下一条视频。
+ */
+export function buildTrackpadSwipeScript({
+  deltaY = -900,
+  deltaX = 0,
+  steps = 9,
+  intervalMs = 16,
+  x = null,
+  y = null,
+} = {}) {
+  const deltasY = splitSwipeDelta(deltaY, steps);
+  const deltasX = splitSwipeDelta(deltaX, deltasY.length);
+  const wait = Math.max(4, Math.min(60, Math.round(Number(intervalMs) || 16))) / 1000;
+  const hasPoint = Number.isFinite(Number(x)) && Number.isFinite(Number(y));
+  const pointBlock = hasPoint
+    ? `var p = $.CGPointMake(${Math.round(Number(x))}, ${Math.round(Number(y))});
+$.CGWarpMouseCursorPosition(p);
+$.NSThread.sleepForTimeInterval(0.03);`
+    : 'var p = null;';
+
+  return `ObjC.import('CoreGraphics');
+ObjC.import('Foundation');
+${pointBlock}
+var FIELD_CONTINUOUS = (typeof $.kCGScrollWheelEventIsContinuous === 'undefined') ? 88 : $.kCGScrollWheelEventIsContinuous;
+var FIELD_PHASE = (typeof $.kCGScrollWheelEventScrollPhase === 'undefined') ? 99 : $.kCGScrollWheelEventScrollPhase;
+var PHASE_BEGAN = (typeof $.kCGScrollPhaseBegan === 'undefined') ? 1 : $.kCGScrollPhaseBegan;
+var PHASE_CHANGED = (typeof $.kCGScrollPhaseChanged === 'undefined') ? 2 : $.kCGScrollPhaseChanged;
+var PHASE_ENDED = (typeof $.kCGScrollPhaseEnded === 'undefined') ? 4 : $.kCGScrollPhaseEnded;
+var deltasY = ${JSON.stringify(deltasY)};
+var deltasX = ${JSON.stringify(deltasX)};
+function postWheel(dy, dx, phase) {
+  var e = $.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitPixel, 2, Math.round(dy), Math.round(dx));
+  if (p) $.CGEventSetLocation(e, p);
+  $.CGEventSetIntegerValueField(e, FIELD_CONTINUOUS, 1);
+  $.CGEventSetIntegerValueField(e, FIELD_PHASE, phase);
+  $.CGEventPost($.kCGHIDEventTap, e);
+}
+postWheel(0, 0, PHASE_BEGAN);
+$.NSThread.sleepForTimeInterval(${wait});
+for (var i = 0; i < deltasY.length; i++) {
+  postWheel(deltasY[i], deltasX[i] || 0, PHASE_CHANGED);
+  $.NSThread.sleepForTimeInterval(${wait});
+}
+postWheel(0, 0, PHASE_ENDED);`;
+}
+
 /** 点击全局点坐标。 */
 export async function clickAtPoint(x, y, opts = {}) {
   await runOsa(buildClickScript(x, y, opts), { lang: 'JavaScript' });
@@ -130,6 +196,36 @@ export async function clickAtPoint(x, y, opts = {}) {
 /** 滚动（点像素）。 */
 export async function scrollByPixels(deltaY, deltaX = 0) {
   await runOsa(buildScrollScript(deltaY, deltaX), { lang: 'JavaScript' });
+}
+
+/** 触控板式上滑，失败时降级为普通滚轮下翻。 */
+export async function swipeUpLikeTrackpad({
+  distancePx = 900,
+  steps = 9,
+  intervalMs = 16,
+  x = null,
+  y = null,
+} = {}) {
+  const distance = Math.max(120, Math.abs(Math.round(Number(distancePx) || 900)));
+  try {
+    await runOsa(buildTrackpadSwipeScript({
+      deltaY: -distance,
+      deltaX: 0,
+      steps,
+      intervalMs,
+      x,
+      y,
+    }), { lang: 'JavaScript', timeout: 6000 });
+    return { method: 'trackpad_swipe' };
+  } catch (primaryError) {
+    try {
+      await scrollByPixels(-distance, 0);
+      return { method: 'wheel_scroll', fallbackFrom: primaryError.message };
+    } catch (fallbackError) {
+      fallbackError.message = `触控板式上滑失败，滚轮兜底也失败: ${fallbackError.message}; 原始上滑错误: ${primaryError.message}`;
+      throw fallbackError;
+    }
+  }
 }
 
 /** 激活微信窗口（中英文名都试）。 */
@@ -198,6 +294,21 @@ export class MacInputSession {
   }
 
   async scroll(deltaY, deltaX = 0) { await scrollByPixels(deltaY, deltaX); await sleep(250); }
+  async swipeUp(opts = {}) {
+    const imgW = this.lastShot?.width || 0;
+    const imgH = this.lastShot?.height || 0;
+    const pointW = this.pointWidth || imgW;
+    const defaultPoint = imgW > 0 && imgH > 0
+      ? imagePxToPoint({ x: imgW / 2, y: imgH * 0.56 }, imgW, pointW)
+      : null;
+    const result = await swipeUpLikeTrackpad({
+      ...opts,
+      x: opts.x ?? defaultPoint?.x ?? null,
+      y: opts.y ?? defaultPoint?.y ?? null,
+    });
+    await sleep(opts.afterMs ?? 700);
+    return result;
+  }
   async pressEscape() { await keyCode(53); await sleep(200); }
   async closeTab() { await keyCode(13, 'command down'); await sleep(300); } // Cmd+W
   async copy() { await keyCode(8, 'command down'); await sleep(200); }       // Cmd+C

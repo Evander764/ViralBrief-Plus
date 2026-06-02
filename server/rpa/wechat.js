@@ -13,7 +13,8 @@
  * 导航规格（来自用户）：
  *   视频号：朋友圈下方视频号入口 → 右上小人 → 赞和收藏 → 关注 → 逐个关注博主
  *     → 首进先关掉自动播放的第一个视频 → 跳置顶 → 开第一条 → 读数入库
- *     → 点右侧下箭头翻页 → 默认每博主 maxVideosPerCreator 条 → 关标签回关注总览。
+ *     → 触控板式双指上滑翻页（失败时滚轮兜底）→ 默认每博主 maxVideosPerCreator 条
+ *     → 关标签回关注总览。
  *   公众号：左上搜索 → 搜博主 → 进主页（没进就点右上小人）→ 跳置顶/付费
  *     → 按时限开文章 → 读精确发布时间 → 评分 → 达标尝试复制正文 → 入库。
  *
@@ -174,6 +175,33 @@ async function captureCurrentDetail(session, acc, platform, progress) {
   return { result, detail, score };
 }
 
+function detailSignature(detail) {
+  const title = String(detail?.title || '').replace(/\s+/g, ' ').trim();
+  const publish = String(detail?.publish_time || '').replace(/\s+/g, ' ').trim();
+  if (!title && !publish) return null;
+  return `${title}|${publish}`;
+}
+
+async function swipeChannelsToNextVideo(session, progress) {
+  try {
+    const result = await session.swipeUp({
+      distancePx: 960,
+      steps: 10,
+      intervalMs: 14,
+      afterMs: 1800,
+    });
+    if (result.method === 'wheel_scroll') {
+      progress('  触控板式上滑不可用，已改用滚轮向下翻页');
+    } else {
+      progress('  已模拟触控板双指上滑翻到下一条');
+    }
+    return true;
+  } catch (e) {
+    progress(`  上滑翻页失败: ${e.message}`);
+    return false;
+  }
+}
+
 /** 视频号：巡检单个关注博主，最多 maxVideos 条。 */
 async function patrolChannelsCreator(session, acc, progress, { maxVideos, shouldStop }) {
   const items = { newItems: 0, duplicates: 0 };
@@ -186,11 +214,18 @@ async function patrolChannelsCreator(session, acc, progress, { maxVideos, should
   await session.sleep(600);
 
   let captured = 0;
+  const seenDetails = new Set();
   while (captured < maxVideos) {
     if (shouldStop?.()) break;
     // 第一条之前：跳过置顶。读当前详情时若识别为置顶，跳过但不计入条数。
     const got = await captureCurrentDetail(session, acc, 'wechat_channels', progress);
     if (got) {
+      const signature = detailSignature(got.detail);
+      if (signature && seenDetails.has(signature)) {
+        progress('  上滑后仍是同一条视频，结束该博主');
+        break;
+      }
+      if (signature) seenDetails.add(signature);
       if (got.detail.is_pinned) {
         progress('  当前为置顶内容，跳过，不计入条数');
       } else {
@@ -199,9 +234,8 @@ async function patrolChannelsCreator(session, acc, progress, { maxVideos, should
       }
     }
     if (captured >= maxVideos) break;
-    // 右侧下箭头翻到下一条
-    const next = await tap(session, '详情页右侧向下的「下一个视频」箭头按钮', progress, { afterMs: 1800 });
-    if (!next) { progress('  没有下一个按钮，结束该博主'); break; }
+    const next = await swipeChannelsToNextVideo(session, progress);
+    if (!next) { progress('  无法翻到下一条，结束该博主'); break; }
   }
   // 关闭当前视频号详情，回到关注总览
   await session.pressEscape();

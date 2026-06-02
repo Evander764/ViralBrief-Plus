@@ -66,6 +66,7 @@ test('desktop WeChat patrol enters following overview once, opens nickname, and 
   assert.equal(result.maxVideosPerAccount, 3);
   assert.deepEqual(runner.calls.map((c) => c.step), [
     'assert_accessibility',
+    'activate_channels_dock_icon',
     'activate_existing_channels',
     'open_profile_entry',
     'open_overview',
@@ -77,6 +78,7 @@ test('desktop WeChat patrol enters following overview once, opens nickname, and 
     'close_channels_tabs',
   ]);
   assert.equal(runner.calls.find((c) => c.step === 'cleanup_autoplay_tabs').payload.keepTabTitle, '关注');
+  assert.equal(runner.calls.find((c) => c.step === 'activate_channels_dock_icon').payload.nickname, undefined);
   assert.equal(runner.calls.find((c) => c.step === 'activate_existing_channels').payload.nickname, undefined);
   assert.equal(runner.calls.find((c) => c.step === 'open_creator').payload.nickname, '目标视频号');
   assert.equal(runner.calls.find((c) => c.step === 'collect_latest_videos').payload.count, 3);
@@ -123,6 +125,7 @@ test('desktop WeChat patrol records fixed-coordinate and protected-tab evidence'
   const runner = fakeRunner({
     methods: {
       activate_existing_channels: 'manual_channels_window',
+      activate_channels_dock_icon: 'dock_icon',
       cleanup_autoplay_tabs: 'protect_following_tab',
       open_following_overview: 'left_sidebar_only',
     },
@@ -138,6 +141,7 @@ test('desktop WeChat patrol records fixed-coordinate and protected-tab evidence'
   const item = get('SELECT * FROM contents WHERE account_id = ? AND platform = ?', [acc.id, 'wechat_channels']);
   const evidence = JSON.parse(item.metrics_evidence_json);
   assert.match(evidence.navigation.method, /manual_channels_window/);
+  assert.match(evidence.navigation.method, /dock_icon/);
   assert.match(evidence.navigation.method, /protect_following_tab/);
   assert.match(evidence.navigation.method, /left_sidebar_only/);
 });
@@ -218,17 +222,26 @@ test('desktop WeChat parser accepts structured JSON result with long text delimi
   assert.equal(parsed.detail, '文案里有 | 也能保留');
 });
 
-test('desktop WeChat AppleScript requires a manually opened channels window before profile-first following', () => {
+test('desktop WeChat AppleScript clicks the channels Dock icon before profile-first following', () => {
   const accessibilityScript = __wechatDesktopInternals.appleScriptForStep('assert_accessibility');
   assert.match(accessibilityScript, /请先手动打开微信视频号/);
   assert.doesNotMatch(accessibilityScript, /vbp_recover_blank_wechat_window/);
   assert.doesNotMatch(accessibilityScript, /Dock 微信图标中心/);
 
+  const dockScript = __wechatDesktopInternals.appleScriptForStep('activate_channels_dock_icon');
+  assert.match(dockScript, /vbp_click_channels_dock_icon/);
+  assert.match(dockScript, /CLICKED\|/);
+  assert.match(dockScript, /WeChatAppEx/);
+  assert.match(dockScript, /wechatCount > 1/);
+  assert.match(dockScript, /rightmostWechat/);
+  assert.doesNotMatch(dockScript, /open_channels_home/);
+  assert.doesNotMatch(dockScript, /vbp_click_channels_sidebar_fixed/);
+
   const channelsScript = __wechatDesktopInternals.appleScriptForStep('activate_existing_channels');
   assert.match(channelsScript, /vbp_window_looks_channels/);
   assert.match(channelsScript, /manual_channels_window/);
   assert.match(channelsScript, /已接管当前手动打开的视频号窗口/);
-  assert.match(channelsScript, /请先手动打开微信视频号窗口/);
+  assert.match(channelsScript, /请先手动打开微信视频号窗口|当前窗口不是视频号/);
   assert.doesNotMatch(channelsScript, /vbp_click_channels_sidebar_fixed/);
   assert.doesNotMatch(channelsScript, /vbp_click_wechat_dock_icon_center/);
   assert.doesNotMatch(channelsScript, /dock_center/);

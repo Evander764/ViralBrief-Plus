@@ -138,6 +138,7 @@ async function patrolWechatDesktopAccount(acc, { index, total, progress, scriptR
 export async function prepareWechatChannelsFollowing({ scriptRunner = defaultWechatScriptRunner, progress = () => {} } = {}) {
   const steps = [
     ['assert_accessibility', {}],
+    ['activate_channels_dock_icon', {}],
     ['activate_existing_channels', {}],
     ['open_profile_entry', {}],
     ['open_overview', {}],
@@ -411,7 +412,10 @@ function friendlyWechatDesktopError(e) {
     return '桌面微信未登录或视频号窗口不可用，请先手动登录微信';
   }
   if (e?.code === 'channels_window_required' || /请先手动打开微信视频号|当前窗口不是视频号/.test(message)) {
-    return '请先手动打开微信视频号窗口，停留在任意视频或视频号页面后再重试；本轮不会再从微信首页自动点击视频号入口';
+    return '请先确认程序坞里有微信视频号独立窗口图标，然后重试；本轮会点击该图标接管视频号窗口，不会从微信首页自动点击视频号入口';
+  }
+  if (e?.code === 'channels_dock_icon' || /未找到微信视频号程序坞图标/.test(message)) {
+    return '没有找到微信视频号的程序坞图标：请先手动打开一次微信视频号，让底部程序坞出现绿色的视频号独立窗口图标后再重试';
   }
   if (e?.code === 'profile_entry' || /未找到视频号右上角人物头像/.test(message)) {
     return '没有找到视频号右上角的小人入口：请确认你已经手动打开视频号窗口，且窗口右上角能看到小人图标';
@@ -839,6 +843,7 @@ function appleScriptForStep(step, payload = {}) {
   const keepTabTitle = appleString(payload.keepTabTitle || '关注');
   const knownSteps = new Set([
     'assert_accessibility',
+    'activate_channels_dock_icon',
     'activate_existing_channels',
     'open_profile_entry',
     'open_overview',
@@ -856,11 +861,13 @@ on run
   tell application "System Events"
     if UI elements enabled is false then return my vbp_result(false, "accessibility", "ax", "辅助功能权限未开启")
   end tell
-  tell application id "com.tencent.xinWeChat"
-    activate
-    reopen
-  end tell
-  delay 0.6
+  if "${step}" is "assert_accessibility" then
+    tell application id "com.tencent.xinWeChat"
+      activate
+      reopen
+    end tell
+    delay 0.6
+  end if
   tell application "System Events"
     set targetProcess to my vbp_process("${step}")
     if targetProcess is missing value then return my vbp_result(false, "not_logged_in", "ax", "未找到桌面微信进程")
@@ -876,6 +883,21 @@ on run
         return my vbp_result(false, "accessibility", "ax", errMsg)
       end try
       return my vbp_result(true, "assert_accessibility", "ax", "辅助功能权限可用，已验证可读取微信窗口")
+    else if "${step}" is "activate_channels_dock_icon" then
+      set dockResult to my vbp_click_channels_dock_icon()
+      if dockResult does not contain "CLICKED|" then
+        if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_channels_dock_icon", "already_visible", "当前视频号窗口已可见")
+        return my vbp_result(false, "channels_dock_icon", "dock_icon", "未找到微信视频号程序坞图标")
+      end if
+      delay 1.0
+      set targetProcess to my vbp_process("${step}")
+      if targetProcess is not missing value then
+        set visible of targetProcess to true
+        set frontmost of targetProcess to true
+        my vbp_raise_window(targetProcess)
+        if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_channels_dock_icon", "dock_icon", "已点击程序坞微信视频号图标并接管窗口")
+      end if
+      return my vbp_result(true, "activate_channels_dock_icon", "dock_icon", "已点击程序坞微信视频号图标，继续尝试接管窗口")
     else if "${step}" is "activate_existing_channels" then
       if my vbp_window_looks_preferences(targetProcess) then
         return my vbp_result(false, "channels_window_required", "manual_channels_window", "当前窗口是微信设置页；请先手动打开微信视频号窗口")
@@ -941,6 +963,65 @@ on vbp_raise_window(targetProcessRef)
     delay 0.4
   end tell
 end vbp_raise_window
+
+on vbp_click_channels_dock_icon()
+  tell application "System Events"
+    try
+      tell process "Dock"
+        set exactCandidate to missing value
+        set exactLabel to ""
+        set wechatCount to 0
+        set rightmostWechat to missing value
+        set rightmostWechatX to -1
+        repeat with dockItem in UI elements of list 1
+          set labelText to my vbp_dock_label(dockItem)
+          set xValue to -1
+          try
+            set p to position of dockItem
+            set xValue to item 1 of p
+          end try
+          if labelText contains "视频号" or labelText contains "Channels" or labelText contains "WeChatAppEx" then
+            set exactCandidate to dockItem
+            set exactLabel to labelText
+          else if labelText is "微信" or labelText is "WeChat" then
+            set wechatCount to wechatCount + 1
+            if xValue > rightmostWechatX then
+              set rightmostWechatX to xValue
+              set rightmostWechat to dockItem
+            end if
+          end if
+        end repeat
+        if exactCandidate is not missing value then return my vbp_click_dock_item_center(exactCandidate, exactLabel)
+        if wechatCount > 1 and rightmostWechat is not missing value then return my vbp_click_dock_item_center(rightmostWechat, "微信")
+      end tell
+    end try
+  end tell
+  return "NO_MATCH"
+end vbp_click_channels_dock_icon
+
+on vbp_dock_label(dockItem)
+  set parts to {}
+  try
+    set end of parts to name of dockItem as text
+  end try
+  try
+    set end of parts to description of dockItem as text
+  end try
+  return parts as text
+end vbp_dock_label
+
+on vbp_click_dock_item_center(dockItem, labelText)
+  try
+    set p to position of dockItem
+    set s to size of dockItem
+    set centerX to (item 1 of p) + ((item 1 of s) / 2)
+    set centerY to (item 2 of p) + ((item 2 of s) / 2)
+    click at {centerX, centerY}
+    delay 0.8
+    return "CLICKED|" & labelText
+  end try
+  return "NO_CLICK|" & labelText
+end vbp_click_dock_item_center
 
 on vbp_window_looks_preferences(targetProcessRef)
   try

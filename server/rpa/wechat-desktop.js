@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { all } from '../db.js';
@@ -12,6 +12,7 @@ import { sortPatrolAccounts } from './patrol.js';
 const execFileAsync = promisify(execFile);
 const PLATFORM = 'wechat_channels';
 export const DEFAULT_WECHAT_VIDEOS_PER_ACCOUNT = 3;
+const WECHAT_SCREENSHOT_STANDARD_ATTEMPTS = 3;
 
 export class WechatDesktopPatrolError extends Error {
   constructor(code, message) {
@@ -455,28 +456,230 @@ async function captureWechatDesktopScreenshot(label) {
     const safe = String(label || 'wechat').replace(/[^\p{L}\p{N}_-]+/gu, '_').slice(0, 50) || 'wechat';
     const filename = `rpa_wechat_channels_home_${safe}_${Date.now()}.png`;
     const filepath = join(SCREENSHOTS_DIR, filename);
-    const region = await getWechatScreenshotRegion();
-    const attempts = [];
-    if (region) attempts.push({ method: 'screen_region', args: ['-x', '-R', `${region.x},${region.y},${region.width},${region.height}`, filepath] });
-    attempts.push({ method: 'full_screen', args: ['-x', filepath] });
-    let lastError = null;
-    for (const attempt of attempts) {
-      try {
-        await execFileAsync('screencapture', attempt.args, { timeout: 10_000 });
-        return `screenshots/${filename}`;
-      } catch (e) {
-        lastError = e;
-        log.warn(`[RPA] 微信视频号${attempt.method === 'screen_region' ? '区域' : '整屏'}截图失败: ${screenshotErrorMessage(e)}`);
-      }
-    }
-    throw lastError || new Error('screencapture 执行失败');
+    if (await captureWechatStandardScreenshot(filepath)) return `screenshots/${filename}`;
+    if (await captureWechatShortcutScreenshot(filepath)) return `screenshots/${filename}`;
+    return null;
   } catch (e) {
     log.warn(`[RPA] 微信视频号首页截图失败: ${screenshotErrorMessage(e)}`);
     return null;
   }
 }
 
-async function getWechatScreenshotRegion() {
+async function captureWechatStandardScreenshot(filepath) {
+  let lastError = null;
+  for (let attemptNo = 1; attemptNo <= WECHAT_SCREENSHOT_STANDARD_ATTEMPTS; attemptNo++) {
+    const state = await getWechatScreenshotState();
+    const attempts = [];
+    if (state?.region) attempts.push({ method: 'screen_region', args: ['-x', '-R', `${state.region.x},${state.region.y},${state.region.width},${state.region.height}`, filepath] });
+    attempts.push({ method: 'full_screen', args: ['-x', filepath] });
+    for (const attempt of attempts) {
+      try {
+        await execFileAsync('screencapture', attempt.args, { timeout: 10_000 });
+        if (hasUsableScreenshotFile(filepath) && wechatScreenshotStateLooksVisible(state)) return true;
+        log.warn(`[RPA] 微信视频号第 ${attemptNo}/${WECHAT_SCREENSHOT_STANDARD_ATTEMPTS} 次截图未确认显示微信主界面: ${state?.detail || '未知窗口状态'}`);
+        break;
+      } catch (e) {
+        lastError = e;
+        log.warn(`[RPA] 微信视频号${attempt.method === 'screen_region' ? '区域' : '整屏'}截图失败: ${screenshotErrorMessage(e)}`);
+      }
+    }
+    await sleep(350);
+  }
+  if (lastError) log.warn(`[RPA] 微信视频号标准截图 3 次后仍失败: ${screenshotErrorMessage(lastError)}`);
+  return false;
+}
+
+async function captureWechatShortcutScreenshot(filepath) {
+  try {
+    const state = await getWechatScreenshotState();
+    await execFileAsync('osascript', ['-e', wechatScreenshotShortcutStartScript()], { timeout: 8_000 });
+    if (state?.region) {
+      try {
+        const points = wechatScreenshotSelectionPoints(state.region);
+        await execFileAsync('swift', ['-e', wechatScreenshotSelectionSwiftScript(), '--', points.x1, points.y1, points.x2, points.y2].map(String), { timeout: 8_000 });
+      } catch (e) {
+        log.warn(`[RPA] 微信视频号快捷键截图选区失败: ${screenshotErrorMessage(e)}`);
+      }
+    } else {
+      await sleep(1200);
+    }
+    const { stdout, stderr } = await execFileAsync('osascript', ['-e', wechatScreenshotClipboardSaveScript(filepath)], { timeout: 8_000 });
+    const text = String(stdout || stderr || '').trim();
+    if (/^OK\|/.test(text) && hasUsableScreenshotFile(filepath)) {
+      log.info('[RPA] 微信视频号已使用微信快捷键 Ctrl+Command+A 截图兜底');
+      return true;
+    }
+    log.warn(`[RPA] 微信视频号快捷键截图兜底失败: ${text || '未返回截图数据'}`);
+  } catch (e) {
+    log.warn(`[RPA] 微信视频号快捷键截图兜底失败: ${screenshotErrorMessage(e)}`);
+  }
+  return false;
+}
+
+function wechatScreenshotShortcutScript(filepath) {
+  const targetPath = appleString(filepath);
+  return `
+on run
+  my vbp_start_wechat_screenshot()
+  delay 1.5
+  return my vbp_save_screenshot_clipboard()
+end run
+
+on vbp_start_wechat_screenshot()
+  try
+    set the clipboard to ""
+  end try
+  tell application id "com.tencent.xinWeChat"
+    activate
+    reopen
+  end tell
+  delay 0.4
+  tell application "System Events"
+    keystroke "a" using {control down, command down}
+  end tell
+end vbp_start_wechat_screenshot
+
+on vbp_save_screenshot_clipboard()
+  try
+    set pngData to the clipboard as «class PNGf»
+    set outFile to open for access POSIX file ${targetPath} with write permission
+    set eof of outFile to 0
+    write pngData to outFile
+    close access outFile
+    return "OK|wechat_shortcut|saved"
+  on error errMsg
+    try
+      close access POSIX file ${targetPath}
+    end try
+    return "ERR|wechat_shortcut|" & errMsg
+  end try
+end vbp_save_screenshot_clipboard
+`;
+}
+
+function wechatScreenshotShortcutStartScript() {
+  return `
+on run
+  try
+    set the clipboard to ""
+  end try
+  tell application id "com.tencent.xinWeChat"
+    activate
+    reopen
+  end tell
+  delay 0.4
+  tell application "System Events"
+    keystroke "a" using {control down, command down}
+  end tell
+  return "OK|wechat_shortcut|started"
+end run
+`;
+}
+
+function wechatScreenshotClipboardSaveScript(filepath) {
+  const targetPath = appleString(filepath);
+  return `
+on run
+  try
+    set pngData to the clipboard as «class PNGf»
+    set outFile to open for access POSIX file ${targetPath} with write permission
+    set eof of outFile to 0
+    write pngData to outFile
+    close access outFile
+    return "OK|wechat_shortcut|saved"
+  on error errMsg
+    try
+      close access POSIX file ${targetPath}
+    end try
+    return "ERR|wechat_shortcut|" & errMsg
+  end try
+end run
+`;
+}
+
+function wechatScreenshotSelectionPoints(region) {
+  const inset = 18;
+  return {
+    x1: Math.round(region.x + inset),
+    y1: Math.round(region.y + inset),
+    x2: Math.round(region.x + region.width - inset),
+    y2: Math.round(region.y + region.height - inset),
+  };
+}
+
+function wechatScreenshotSelectionSwiftScript() {
+  return `
+import CoreGraphics
+import Darwin
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count >= 5,
+      let x1 = Double(args[1]),
+      let y1 = Double(args[2]),
+      let x2 = Double(args[3]),
+      let y2 = Double(args[4]) else {
+  exit(2)
+}
+
+let source = CGEventSource(stateID: .hidSystemState)
+func postMouse(_ type: CGEventType, _ x: Double, _ y: Double) {
+  let point = CGPoint(x: x, y: y)
+  guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
+  event.post(tap: .cghidEventTap)
+}
+
+postMouse(.mouseMoved, x1, y1)
+usleep(120_000)
+postMouse(.leftMouseDown, x1, y1)
+for step in 1...18 {
+  let t = Double(step) / 18.0
+  postMouse(.leftMouseDragged, x1 + ((x2 - x1) * t), y1 + ((y2 - y1) * t))
+  usleep(18_000)
+}
+postMouse(.leftMouseUp, x2, y2)
+usleep(240_000)
+if let down = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true) {
+  down.post(tap: .cghidEventTap)
+}
+usleep(40_000)
+if let up = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) {
+  up.post(tap: .cghidEventTap)
+}
+`;
+}
+
+function hasUsableScreenshotFile(filepath) {
+  try {
+    return statSync(filepath).size > 1024;
+  } catch {
+    return false;
+  }
+}
+
+function wechatScreenshotStateLooksVisible(state) {
+  if (!state) return false;
+  if (!state.region) return false;
+  if (state.preferencesWindow) return false;
+  if (state.protectedLargeWindow) return false;
+  return !!state.uiReady;
+}
+
+async function getWechatScreenshotState() {
+  const axState = await getWechatAccessibilityScreenshotState();
+  const cgState = await getWechatCoreGraphicsScreenshotState();
+  return {
+    ...axState,
+    ...cgState,
+    detail: [
+      axState?.detail,
+      cgState?.protectedLargeWindow ? '存在不可捕捉的微信主窗口' : '',
+      cgState?.sharedLargeWindow ? '存在可捕捉的微信窗口' : '',
+    ].filter(Boolean).join('；'),
+  };
+}
+
+async function getWechatAccessibilityScreenshotState() {
   const script = `
 on run
   tell application "System Events"
@@ -492,24 +695,106 @@ on run
           set yValue to (item 2 of posValue) as integer
           set widthValue to (item 1 of sizeValue) as integer
           set heightValue to (item 2 of sizeValue) as integer
-          if widthValue > 100 and heightValue > 100 then return (xValue as text) & "," & (yValue as text) & "," & (widthValue as text) & "," & (heightValue as text)
+          if widthValue > 100 and heightValue > 100 then
+            set dumpText to my vbp_visible_text_dump(p)
+            set uiReady to "0"
+            set preferencesWindow to "0"
+            if dumpText contains "视频号" or dumpText contains "关注" or dumpText contains "点赞" or dumpText contains "评论" or dumpText contains "收藏" or dumpText contains "展开" or dumpText contains "赞和收藏" then set uiReady to "1"
+            if (dumpText contains "账号与存储" and dumpText contains "快捷键") or (dumpText contains "恢复默认设置" and dumpText contains "截图") then set preferencesWindow to "1"
+            return (xValue as text) & "|" & (yValue as text) & "|" & (widthValue as text) & "|" & (heightValue as text) & "|" & uiReady & "|" & preferencesWindow
+          end if
         end if
       end try
     end repeat
   end tell
   return ""
 end run
+
+on vbp_visible_text_dump(targetProcessRef)
+  tell application "System Events"
+    set out to ""
+    try
+      repeat with el in entire contents of targetProcessRef
+        set label to my vbp_text(el)
+        if label is not "" then
+          if out does not contain label then set out to out & label & linefeed
+        end if
+        if length of out > 5000 then exit repeat
+      end repeat
+    end try
+    return out
+  end tell
+end vbp_visible_text_dump
+
+on vbp_text(el)
+  tell application "System Events"
+    set parts to {}
+    try
+      set end of parts to name of el
+    end try
+    try
+      set end of parts to description of el
+    end try
+    try
+      set v to value of el
+      if v is not missing value then set end of parts to v as text
+    end try
+    return parts as text
+  end tell
+end vbp_text
 `;
   try {
     const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 8_000 });
-    const parts = String(stdout || '').trim().split(',').map((part) => Number(part.trim()));
-    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null;
+    const [xRaw, yRaw, widthRaw, heightRaw, uiReadyRaw, preferencesRaw] = String(stdout || '').trim().split('|');
+    const parts = [xRaw, yRaw, widthRaw, heightRaw].map((part) => Number(part));
+    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return {};
     const [x, y, width, height] = parts.map((n) => Math.round(n));
-    if (width <= 100 || height <= 100) return null;
-    return { x, y, width, height };
+    if (width <= 100 || height <= 100) return {};
+    return {
+      region: { x, y, width, height },
+      uiReady: uiReadyRaw === '1',
+      preferencesWindow: preferencesRaw === '1',
+      detail: `AX窗口 ${x},${y},${width},${height} uiReady=${uiReadyRaw === '1'} preferences=${preferencesRaw === '1'}`,
+    };
   } catch (e) {
     log.warn(`[RPA] 微信视频号截图区域读取失败: ${screenshotErrorMessage(e)}`);
-    return null;
+    return {};
+  }
+}
+
+async function getWechatCoreGraphicsScreenshotState() {
+  const script = `
+import CoreGraphics
+let list = (CGWindowListCopyWindowInfo(CGWindowListOption(arrayLiteral: .optionAll), kCGNullWindowID) as? [[String: Any]]) ?? []
+var protectedLarge = false
+var sharedLarge = false
+for window in list {
+  let owner = (window[kCGWindowOwnerName as String] as? String) ?? ""
+  if !(owner.localizedCaseInsensitiveContains("wechat") || owner.contains("微信")) { continue }
+  let layer = (window[kCGWindowLayer as String] as? Int) ?? 0
+  if layer != 0 { continue }
+  let sharing = (window[kCGWindowSharingState as String] as? Int) ?? -1
+  let bounds = (window[kCGWindowBounds as String] as? [String: Any]) ?? [:]
+  let x = (bounds["X"] as? Double) ?? 0
+  let y = (bounds["Y"] as? Double) ?? 0
+  let width = (bounds["Width"] as? Double) ?? 0
+  let height = (bounds["Height"] as? Double) ?? 0
+  if x >= 0 && y >= 0 && width >= 500 && height >= 350 {
+    if sharing == 0 { protectedLarge = true }
+    if sharing == 1 { sharedLarge = true }
+  }
+}
+print("\\(protectedLarge ? 1 : 0)|\\(sharedLarge ? 1 : 0)")
+`;
+  try {
+    const { stdout } = await execFileAsync('swift', ['-e', script], { timeout: 8_000 });
+    const [protectedRaw, sharedRaw] = String(stdout || '').trim().split('|');
+    return {
+      protectedLargeWindow: protectedRaw === '1',
+      sharedLargeWindow: sharedRaw === '1',
+    };
+  } catch {
+    return {};
   }
 }
 
@@ -1182,4 +1467,7 @@ export const __wechatDesktopInternals = {
   friendlyWechatDesktopError,
   parseScriptResult,
   normalizeWechatVideoCount,
+  wechatScreenshotShortcutScript,
+  wechatScreenshotSelectionSwiftScript,
+  WECHAT_SCREENSHOT_STANDARD_ATTEMPTS,
 };

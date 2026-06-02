@@ -262,6 +262,17 @@ test('desktop WeChat AppleScript collection skips pinned, expands text, maps met
   assert.match(script, /\\"comment\\"/);
 });
 
+test('desktop WeChat screenshot fallback uses WeChat full screenshot shortcut only after three standard attempts', () => {
+  assert.equal(__wechatDesktopInternals.WECHAT_SCREENSHOT_STANDARD_ATTEMPTS, 3);
+  const script = __wechatDesktopInternals.wechatScreenshotShortcutScript('/tmp/vbp-wechat-shortcut.png');
+  const selectionScript = __wechatDesktopInternals.wechatScreenshotSelectionSwiftScript();
+  assert.match(script, /keystroke "a" using \{control down, command down\}/);
+  assert.match(script, /the clipboard as «class PNGf»/);
+  assert.match(script, /write pngData to outFile/);
+  assert.match(selectionScript, /leftMouseDragged/);
+  assert.match(selectionScript, /virtualKey: 36/);
+});
+
 test('desktop WeChat friendly errors distinguish left-sidebar following from top following', () => {
   const msg = __wechatDesktopInternals.friendlyWechatDesktopError(
     Object.assign(new Error('未找到左侧关注，避免误点顶部关注'), { code: 'open_following_overview' }),

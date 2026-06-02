@@ -25,7 +25,7 @@ import { clickRectLikeHuman, executeHumanActions } from './human-actions.js';
 import { looksLikeRealProfile, platformSearchUrl } from '../lib/platform-links.js';
 import { normalizeWindowType, windowStartISO as computeWindowStartISO } from '../filter.js';
 
-const DEFAULT_PLATFORMS = ['xiaohongshu', 'douyin', 'wechat_channels'];
+const DEFAULT_PLATFORMS = ['xiaohongshu', 'douyin'];
 const DEFAULT_MAX_CANDIDATES = 8;
 const DEFAULT_MAX_TABS_PER_BATCH = 6;
 const MAX_TABS_PER_BATCH = 10;
@@ -50,8 +50,6 @@ export async function discoverFollowedCreators(client, opts = {}) {
         creators = await discoverXiaohongshuCreators(client, onProgress);
       } else if (platform === 'douyin') {
         creators = await discoverDouyinCreators(client, onProgress);
-      } else if (platform === 'wechat_channels') {
-        creators = await discoverWechatChannelsCreators(client, onProgress);
       } else {
         onProgress(`${platform} 暂不支持关注发现，已跳过`);
       }
@@ -76,6 +74,9 @@ export async function runPatrol(client, opts = {}) {
     includePatrolledToday = false,
   } = opts;
   const orderedPlatforms = orderPlatforms(platforms);
+  if (orderedPlatforms.includes('wechat_channels')) {
+    throw new Error('视频号使用桌面微信 runner；Chrome CDP 巡检不再支持网页版视频号');
+  }
   const normalizedWindowType = normalizeWindowType(opts.windowType || 'last_1_days');
   const patrolWindowStartISO = opts.windowStartISO || computeWindowStartISO(normalizedWindowType);
   const requestedMaxTabsPerBatch = normalizeMaxTabs(
@@ -372,7 +373,7 @@ async function openPatrolSession(worker, acc, progress, { index, total }) {
   }
 
   progress(`(${index + 1}/${total}) 打开标签页巡检 ${label}`);
-  const waitMs = acc.platform === 'xiaohongshu' ? 5000 : (acc.platform === 'wechat_channels' ? 6500 : 4500);
+  const waitMs = acc.platform === 'xiaohongshu' ? 5000 : 4500;
   const homepage = await openAccountHomepage(worker, acc, acc.platform, accountProgress, { waitMs });
   if (!homepage) {
     return { worker, acc, index, outcome: errorOutcome(acc, `未能打开${platformName(acc.platform)}主页`) };
@@ -401,16 +402,6 @@ async function patrolOpenSession(session, progress, { total, maxCandidates, wind
     if (result.stopped) {
       return stoppedOutcome(acc, items, result.skipReasons);
     }
-    if (items.length === 0 && result.skipReasons.length === 0) {
-      return errorOutcome(acc, '未能提取到新增内容');
-    }
-    markAccountPatrolledFromItems(acc.id, items);
-    return okOutcome(acc, items, result.skipReasons);
-  }
-
-  if (acc.platform === 'wechat_channels') {
-    const result = await collectWechatChannelsItems(worker, acc, homepage, accountProgress, { maxCandidates, windowStartISO, shouldStop });
-    const items = result.items || [];
     if (items.length === 0 && result.skipReasons.length === 0) {
       return errorOutcome(acc, '未能提取到新增内容');
     }
@@ -506,17 +497,6 @@ async function patrolAccount(client, acc, progress, { index, total, maxCandidate
       return okOutcome(acc, items, result.skipReasons);
     }
 
-    if (acc.platform === 'wechat_channels') {
-      const result = await patrolWechatChannels(client, acc, accountProgress, { maxCandidates, windowStartISO, shouldStop });
-      if (!result?.items?.length && !result?.skipReasons?.length) {
-        return { accountId: acc.id, nickname: acc.nickname, platform: acc.platform, status: 'error', error: '未能提取到新增内容', item: null };
-      }
-
-      const items = result.items || [];
-      markAccountPatrolledFromItems(acc.id, items);
-      return okOutcome(acc, items, result.skipReasons);
-    }
-
     return errorOutcome(acc, `暂不支持的平台: ${acc.platform}`);
   } catch (e) {
     markAccountPatrolled(acc.id);
@@ -564,53 +544,10 @@ async function discoverDouyinCreators(client, progress) {
   return creators;
 }
 
-async function discoverWechatChannelsCreators(client, progress) {
-  progress('视频号: 打开主页并进入右上角个人入口');
-  await client.goto('https://channels.weixin.qq.com/');
-  await client.sleep(6500);
-  await assertNotBlocked(client, 'wechat_channels');
-  const clickedProfile = await clickWechatChannelsProfileEntry(client, progress);
-  if (clickedProfile) await client.sleep(3500);
-  await clickWechatChannelsOverviewTab(client, progress);
-  await scrollPage(client, 2);
-  const creators = await client.evaluate(followLinksScript('wechat_channels'));
-  progress(`视频号: 发现 ${creators.length} 个关注账号`);
-  return creators;
-}
-
 async function patrolDouyin(client, acc, progress, { maxCandidates, windowStartISO, shouldStop }) {
   const homepage = await openAccountHomepage(client, acc, 'douyin', progress, { waitMs: 4500 });
   if (!homepage) return { items: [], skipReasons: [{ reason: 'homepage_unavailable', detail: '未能打开抖音主页' }] };
   return collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO, shouldStop, homepage });
-}
-
-async function patrolWechatChannels(client, acc, progress, { maxCandidates, windowStartISO, shouldStop }) {
-  const homepage = await openAccountHomepage(client, acc, 'wechat_channels', progress, { waitMs: 6500 });
-  if (!homepage) return { items: [], skipReasons: [{ reason: 'homepage_unavailable', detail: '未能打开视频号主页' }] };
-  return collectWechatChannelsItems(client, acc, homepage, progress, { maxCandidates, windowStartISO, shouldStop });
-}
-
-async function collectWechatChannelsItems(client, acc, homepage, progress, { maxCandidates, windowStartISO, shouldStop }) {
-  const skipReasons = [];
-  let postCandidates = await waitForPostCandidates(client, 'wechat_channels');
-  if (postCandidates.length === 0) {
-    await scrollPage(client, 1);
-    await client.sleep(1500);
-    postCandidates = await waitForPostCandidates(client, 'wechat_channels', 3000);
-  }
-  if (postCandidates.length === 0) {
-    progress('  未找到视频号最新内容链接');
-    return { items: [], skipReasons };
-  }
-  const items = await patrolCandidateUrls(client, acc, 'wechat_channels', postCandidates, progress, {
-    maxCandidates,
-    waitMs: 6500,
-    homepage,
-    windowStartISO,
-    skipReasons,
-    shouldStop,
-  });
-  return { items, skipReasons };
 }
 
 async function collectDouyinItems(client, acc, progress, { maxCandidates, windowStartISO, shouldStop, homepage = null }) {
@@ -831,12 +768,6 @@ async function searchAndOpenAccountHomepage(client, acc, platform, progress, { w
   const searchUrl = platformSearchUrl(platform, nickname);
   if (!searchUrl) return null;
 
-  if (platform === 'wechat_channels') {
-    const fromOverview = await openWechatChannelsCreatorFromOverview(client, acc, progress, { waitMs });
-    if (fromOverview) return fromOverview;
-    progress('  视频号总览未找到匹配账号，改用网页搜索兜底');
-  }
-
   progress(`  搜索${platformName(platform)}账号: ${nickname}`);
   let usedHomeSearch = false;
   if (platform === 'xiaohongshu') {
@@ -946,81 +877,6 @@ async function searchXiaohongshuFromHome(client, nickname, progress) {
   }
 }
 
-async function openWechatChannelsCreatorFromOverview(client, acc, progress, { waitMs }) {
-  const nickname = String(acc.nickname || '').trim();
-  if (!nickname) return null;
-
-  progress('  打开视频号主页，准备进入右上角个人入口');
-  await client.goto('https://channels.weixin.qq.com/');
-  await client.sleep(waitMs);
-  await assertNotBlocked(client, 'wechat_channels');
-
-  const clickedProfile = await clickWechatChannelsProfileEntry(client, progress);
-  if (clickedProfile) {
-    progress('  已点击视频号右上角个人入口');
-    await client.sleep(3500);
-  } else {
-    progress('  未找到右上角个人入口，尝试直接在当前页识别总览');
-  }
-  await assertNotBlocked(client, 'wechat_channels');
-
-  await clickWechatChannelsOverviewTab(client, progress);
-  let hit = await findWechatChannelsCreatorHit(client, nickname);
-  if (!hit) {
-    await scrollPage(client, 1);
-    await client.sleep(1500);
-    hit = await findWechatChannelsCreatorHit(client, nickname);
-  }
-  if (!hit) {
-    progress('  视频号总览里未找到匹配博主');
-    return null;
-  }
-
-  progress(`  找到视频号博主入口: ${hit.text || hit.url || nickname}`);
-  if (hit.url) {
-    await client.goto(hit.url);
-  } else if (hit.rect) {
-    await clickRectLikeHuman(client, hit.rect);
-  }
-  await client.sleep(waitMs);
-
-  const currentUrl = await safeCurrentUrl(client);
-  const finalUrl = cleanProfileUrl('wechat_channels', currentUrl) || cleanProfileUrl('wechat_channels', hit.url);
-  if (!finalUrl || await currentPageUnavailable(client)) {
-    progress('  视频号博主入口打开后不可用');
-    return null;
-  }
-  upsertAccount({
-    id: acc.id,
-    platform: acc.platform,
-    nickname: acc.nickname,
-    homepage_url: finalUrl,
-    platform_user_id: creatorIdFromUrl('wechat_channels', finalUrl) || acc.platform_user_id,
-    category: acc.category,
-    priority: acc.priority,
-    monitor_enabled: !!acc.monitor_enabled,
-    discovery_source: acc.discovery_source || 'wechat_overview',
-  });
-  return finalUrl;
-}
-
-async function clickWechatChannelsProfileEntry(client, progress) {
-  const rect = await findWechatChannelsProfileEntryRect(client);
-  if (!rect) return false;
-  await clickRectLikeHuman(client, rect);
-  await client.sleep(800);
-  return true;
-}
-
-async function clickWechatChannelsOverviewTab(client, progress) {
-  const rect = await findWechatChannelsOverviewTabRect(client);
-  if (!rect) return false;
-  progress('  进入视频号博主总览/关注区域');
-  await clickRectLikeHuman(client, rect);
-  await client.sleep(1800);
-  return true;
-}
-
 async function waitForSearchBoxRect(client, timeoutMs = 8000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -1122,170 +978,6 @@ async function findSearchButtonRect(client) {
   `);
 }
 
-async function findWechatChannelsProfileEntryRect(client) {
-  return client.evaluate(`
-    (() => {
-      // vbp-wechat-profile-entry
-      const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
-      const visibleRect = (el) => {
-        if (!el || typeof el.getBoundingClientRect !== 'function') return null;
-        const r = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        if (r.width < 12 || r.height < 12 || style.display === 'none' || style.visibility === 'hidden') return null;
-        if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return null;
-        if (Number(style.opacity || 1) <= 0.05 || el.getAttribute('aria-hidden') === 'true') return null;
-        return { left: r.left, top: r.top, width: r.width, height: r.height, viewport: { width: innerWidth, height: innerHeight } };
-      };
-      const textFor = (el) => clean([
-        el.getAttribute?.('aria-label'),
-        el.getAttribute?.('title'),
-        el.getAttribute?.('alt'),
-        el.innerText || el.textContent,
-        el.querySelector?.('img')?.getAttribute('alt'),
-      ].filter(Boolean).join(' '));
-      const clickable = (el) => {
-        const style = getComputedStyle(el);
-        return el.tagName === 'A'
-          || el.tagName === 'BUTTON'
-          || el.getAttribute('role') === 'button'
-          || el.onclick
-          || style.cursor === 'pointer';
-      };
-      const candidates = [];
-      for (const el of document.querySelectorAll('button, a, [role="button"], [tabindex], img, svg, canvas, [class*="avatar"], [class*="profile"], [class*="user"]')) {
-        const rect = visibleRect(el);
-        if (!rect) continue;
-        if (rect.top > Math.max(180, innerHeight * 0.24) || rect.left < innerWidth * 0.48) continue;
-        if (rect.width > 180 || rect.height > 180) continue;
-        const text = textFor(el);
-        let score = 0;
-        if (/我的|个人|头像|账号|用户|主页|profile|user|avatar/i.test(text)) score += 120;
-        if (/登录|扫码|发布|上传|搜索|通知|消息|客服|帮助|设置/.test(text)) score -= 80;
-        if (clickable(el)) score += 30;
-        if (['IMG', 'SVG', 'CANVAS'].includes(el.tagName)) score += 25;
-        score += Math.round((rect.left / Math.max(1, innerWidth)) * 40);
-        score += Math.max(0, 50 - Math.round(rect.top / 3));
-        if (score >= 45) candidates.push({ ...rect, score, text });
-      }
-      candidates.sort((a, b) => b.score - a.score);
-      return candidates[0] || null;
-    })()
-  `);
-}
-
-async function findWechatChannelsOverviewTabRect(client) {
-  return client.evaluate(`
-    (() => {
-      // vbp-wechat-overview-tab
-      const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
-      const visibleRect = (el) => {
-        if (!el || typeof el.getBoundingClientRect !== 'function') return null;
-        const r = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        if (r.width < 18 || r.height < 12 || style.display === 'none' || style.visibility === 'hidden') return null;
-        if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return null;
-        return { left: r.left, top: r.top, width: r.width, height: r.height, viewport: { width: innerWidth, height: innerHeight } };
-      };
-      const candidates = [];
-      for (const el of document.querySelectorAll('button, a, [role="button"], [role="tab"], div, span')) {
-        const text = clean([el.getAttribute?.('aria-label'), el.getAttribute?.('title'), el.innerText || el.textContent].filter(Boolean).join(' '));
-        if (!text || text.length > 80) continue;
-        if (!/(我的关注|关注|博主|账号|创作者|视频号|主页|总览)/.test(text)) continue;
-        if (/取消关注|已关注|粉丝|评论|点赞|收藏|发布|上传|登录/.test(text)) continue;
-        const rect = visibleRect(el);
-        if (!rect) continue;
-        if (rect.top > Math.max(320, innerHeight * 0.42) || rect.width > 360) continue;
-        let score = 60;
-        if (/我的关注|关注|博主|创作者|账号/.test(text)) score += 70;
-        if (/总览|主页/.test(text)) score += 35;
-        if (el.getAttribute('role') === 'tab' || el.tagName === 'BUTTON' || el.tagName === 'A') score += 25;
-        score += Math.max(0, 40 - Math.round(rect.top / 8));
-        candidates.push({ ...rect, score, text });
-      }
-      candidates.sort((a, b) => b.score - a.score);
-      return candidates[0] || null;
-    })()
-  `);
-}
-
-async function findWechatChannelsCreatorHit(client, nickname) {
-  return client.evaluate(`
-    (() => {
-      // vbp-wechat-creator-hit
-      const nickname = ${JSON.stringify(nickname)};
-      const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
-      const toAbs = (href) => {
-        try { return new URL(href, location.href).href; } catch { return null; }
-      };
-      const isWechatHost = (url) => {
-        try {
-          const host = new URL(url).hostname.toLowerCase();
-          return host === 'channels.weixin.qq.com'
-            || host.endsWith('.channels.weixin.qq.com')
-            || host === 'weixin.qq.com'
-            || host.endsWith('.weixin.qq.com');
-        } catch {
-          return false;
-        }
-      };
-      const isProfile = (url) => {
-        if (!url || !isWechatHost(url)) return false;
-        try {
-          const u = new URL(url);
-          const text = \`\${u.pathname}\${u.search}\`;
-          return /finder(username)?=|profile|creator|author|user|channels|finder/i.test(text)
-            && !/feed_id=|object_id=|objectId=|exportkey=|\\/feed\\b|\\/video\\b/i.test(text);
-        } catch {
-          return false;
-        }
-      };
-      const visibleRect = (el) => {
-        if (!el || typeof el.getBoundingClientRect !== 'function') return null;
-        const r = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        if (r.width < 8 || r.height < 8 || style.display === 'none' || style.visibility === 'hidden') return null;
-        if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return null;
-        return { left: r.left, top: r.top, width: r.width, height: r.height, viewport: { width: innerWidth, height: innerHeight } };
-      };
-      const textFor = (el) => clean([
-        el.getAttribute?.('aria-label'),
-        el.getAttribute?.('title'),
-        el.querySelector?.('img')?.getAttribute('alt'),
-        el.innerText || el.textContent,
-      ].filter(Boolean).join(' '));
-      const candidates = [];
-      const push = (el, url, text, baseScore = 0) => {
-        if (!text || !text.includes(nickname)) return;
-        const rect = visibleRect(el);
-        if (!rect && !url) return;
-        const firstLine = clean(text.split(/\\n/)[0]);
-        let score = baseScore;
-        if (url && isProfile(url)) score += 90;
-        if (firstLine === nickname) score += 100;
-        else if (firstLine.includes(nickname)) score += 70;
-        if (/视频号|关注|粉丝|作品|认证|博主|创作者/.test(text)) score += 25;
-        if (/搜索|广告|文章|公众号/.test(text)) score -= 20;
-        if (rect) score += 10;
-        candidates.push({ url: isProfile(url) ? url : '', text: text.slice(0, 220), score, rect });
-      };
-      for (const a of document.querySelectorAll('a[href]')) {
-        const url = toAbs(a.getAttribute('href') || a.href);
-        push(a, url, textFor(a), 20);
-      }
-      for (const el of document.querySelectorAll('button, [role="button"], [tabindex], [class*="card"], [class*="item"], [class*="creator"], [class*="author"], [class*="user"], li, section')) {
-        const text = textFor(el);
-        if (!text || !text.includes(nickname) || text.length > 600) continue;
-        const link = el.querySelector?.('a[href]');
-        const url = link ? toAbs(link.getAttribute('href') || link.href) : '';
-        push(el, url, text, 0);
-      }
-      candidates.sort((a, b) => b.score - a.score);
-      const best = candidates[0];
-      return best ? { url: best.url || '', text: best.text, score: best.score, rect: best.rect } : null;
-    })()
-  `);
-}
-
 async function findAccountSearchHit(client, platform, nickname) {
   return client.evaluate(`
     (() => {
@@ -1301,13 +993,6 @@ async function findAccountSearchHit(client, platform, nickname) {
         try {
           const u = new URL(url);
           if (platform === 'douyin') return /^\\/user\\/(?!self$)[^/?#]+$/i.test(u.pathname.replace(/\\/+$/, ''));
-          if (platform === 'wechat_channels') {
-            const host = u.hostname.toLowerCase();
-            if (!(host === 'channels.weixin.qq.com' || host.endsWith('.channels.weixin.qq.com') || host === 'weixin.qq.com' || host.endsWith('.weixin.qq.com'))) return false;
-            const text = \`\${u.pathname}\${u.search}\`;
-            return /finder(username)?=|profile|creator|author|user|channels|finder/i.test(text)
-              && !/feed_id=|object_id=|objectId=|exportkey=|\\/feed\\b|\\/video\\b/i.test(text);
-          }
           return /^\\/user\\/profile\\/[^/?#]+$/i.test(u.pathname.replace(/\\/+$/, ''));
         } catch { return false; }
       };
@@ -1342,24 +1027,6 @@ async function findAccountSearchHit(client, platform, nickname) {
 }
 
 function cleanProfileUrl(platform, url) {
-  if (platform === 'wechat_channels') {
-    try {
-      const u = new URL(String(url || '').trim());
-      const host = u.hostname.toLowerCase();
-      const isWechatHost = host === 'channels.weixin.qq.com'
-        || host.endsWith('.channels.weixin.qq.com')
-        || host === 'weixin.qq.com'
-        || host.endsWith('.weixin.qq.com');
-      if (!isWechatHost || !['https:', 'http:'].includes(u.protocol)) return '';
-      const text = `${u.pathname}${u.search}`;
-      if (/feed_id=|object_id=|objectId=|exportkey=|\/feed\b|\/video\b/i.test(text)) return '';
-      if (!(/finder(username)?=|profile|creator|author|user|channels|finder/i.test(text) || u.pathname.replace(/\/+$/, '').length >= 8)) return '';
-      u.hash = '';
-      return u.href;
-    } catch {
-      return '';
-    }
-  }
   if (!looksLikeRealProfile(platform, url)) return '';
   try {
     const u = new URL(String(url).trim());
@@ -1380,14 +1047,6 @@ function cleanProfileUrl(platform, url) {
 
 function creatorIdFromUrl(platform, url) {
   try {
-    if (platform === 'wechat_channels') {
-      const u = new URL(url);
-      return u.searchParams.get('finderusername')
-        || u.searchParams.get('finderUsername')
-        || u.searchParams.get('finder_username')
-        || u.pathname.match(/\/(?:profile|user|creator|finder)\/([^/?#]+)/i)?.[1]
-        || null;
-    }
     const path = new URL(url).pathname.replace(/\/+$/, '');
     const m = platform === 'douyin'
       ? path.match(/^\/user\/(?!self$)([^/?#]+)$/i)
@@ -2787,13 +2446,6 @@ function followLinksScript(platform) {
       const creatorId = (url) => {
         try {
           const u = new URL(url);
-          if (platform === 'wechat_channels') {
-            return u.searchParams.get('finderusername')
-              || u.searchParams.get('finderUsername')
-              || u.searchParams.get('finder_username')
-              || u.pathname.match(/\\/(?:profile|user|creator|finder)\\/([^/?#]+)/i)?.[1]
-              || null;
-          }
           const m = platform === 'douyin'
             ? u.pathname.match(/\\/user\\/([^/?#]+)/)
             : u.pathname.match(/\\/user\\/profile\\/([^/?#]+)/);
@@ -2805,13 +2457,6 @@ function followLinksScript(platform) {
         try {
           const u = new URL(url);
           if (platform === 'douyin') return /\\/user\\/[^/?#]+/.test(u.pathname);
-          if (platform === 'wechat_channels') {
-            const host = u.hostname.toLowerCase();
-            if (!(host === 'channels.weixin.qq.com' || host.endsWith('.channels.weixin.qq.com') || host === 'weixin.qq.com' || host.endsWith('.weixin.qq.com'))) return false;
-            const text = \`\${u.pathname}\${u.search}\`;
-            return /finder(username)?=|profile|creator|author|user|channels|finder/i.test(text)
-              && !/feed_id=|object_id=|objectId=|exportkey=|\\/feed\\b|\\/video\\b/i.test(text);
-          }
           return /\\/user\\/profile\\/[^/?#]+/.test(u.pathname);
         } catch { return false; }
       };
@@ -2895,7 +2540,6 @@ function postLinksScript(platform, targetUrl = null) {
           const u = new URL(href, location.href);
           u.hash = '';
           if (platform === 'xiaohongshu') return u.origin + u.pathname.replace(/\\/+$/, '');
-          if (platform === 'wechat_channels') return u.href;
           return u.href;
         } catch {
           return null;
@@ -2922,12 +2566,6 @@ function postLinksScript(platform, targetUrl = null) {
           const u = new URL(url);
           if (platform === 'douyin') return /\\/video\\/[^/?#]+/.test(u.pathname);
           if (platform === 'xiaohongshu') return /\\/explore\\/[^/?#]+/.test(u.pathname) || /\\/discovery\\/item\\/[^/?#]+/.test(u.pathname);
-          if (platform === 'wechat_channels') {
-            const host = u.hostname.toLowerCase();
-            if (!(host === 'channels.weixin.qq.com' || host.endsWith('.channels.weixin.qq.com') || host === 'weixin.qq.com' || host.endsWith('.weixin.qq.com'))) return false;
-            const text = \`\${u.pathname}\${u.search}\`;
-            return /feed_id=|object_id=|objectId=|exportkey=|\\/web\\/pages\\/(?:feed|video)\\b|\\/feed\\b|\\/video\\b/i.test(text);
-          }
         } catch {}
         return false;
       };
@@ -3517,47 +3155,6 @@ async function extractPageRaw(client, platform) {
           durationText: getText(['[class*="duration"]', '[data-e2e*="duration"]']) || readableVideoDuration(),
         };
       }
-      if (platform === 'wechat_channels') {
-        const title = getText([
-          '[class*="title"]',
-          '[class*="desc"]',
-          '[class*="caption"]',
-          'h1',
-        ]) || meta('og:title') || document.title;
-        const bodyText = collectText([
-          '[class*="desc"]',
-          '[class*="caption"]',
-          '[class*="content"]',
-          '[class*="video"]',
-          'article',
-        ]) || cleanBlock(meta('og:description'));
-        const coverUrl = meta('og:image')
-          || document.querySelector('video')?.poster
-          || firstAttr(['img[src*="weixin"]', 'img[src]', 'picture img'], 'src');
-        const publishText = getText([
-          'time',
-          '[datetime]',
-          '[class*="publish"]',
-          '[class*="time"]',
-          '[class*="date"]',
-        ]) || document.querySelector('time')?.dateTime || null;
-        return {
-          ...common,
-          domTexts: {
-            like: getText(['[aria-label*="点赞"]', '[aria-label*="喜欢"]', '[class*="like"]', '[class*="digg"]']),
-            share: getText(['[aria-label*="分享"]', '[aria-label*="转发"]', '[class*="share"]', '[class*="forward"]']),
-            comment: getText(['[aria-label*="评论"]', '[class*="comment"]']),
-            favorite: getText(['[aria-label*="收藏"]', '[class*="collect"]', '[class*="favorite"]']),
-          },
-          title,
-          bodyText,
-          hashtags: extractHashtags([bodyText, title, fullPageText].filter(Boolean).join('\\n')),
-          pubTime: publishTimeTextFrom(publishText) || publishText,
-          contentType: 'video',
-          coverUrl,
-          durationText: getText(['[class*="duration"]', '[class*="video-time"]']) || readableVideoDuration(),
-        };
-      }
       const title = getText(['#detail-title', '.note-title', '[class*="title"]', 'h1']) || meta('og:title') || document.title;
       const bodyText = collectText([
         '#detail-desc',
@@ -3617,12 +3214,6 @@ function isDetailUrl(platform, url) {
     if (platform === 'douyin') return /\/video\/[^/?#]+/.test(u.pathname);
     if (platform === 'xiaohongshu') {
       return /\/explore\/[^/?#]+/.test(u.pathname) || /\/discovery\/item\/[^/?#]+/.test(u.pathname);
-    }
-    if (platform === 'wechat_channels') {
-      const host = u.hostname.toLowerCase();
-      if (!(host === 'channels.weixin.qq.com' || host.endsWith('.channels.weixin.qq.com') || host === 'weixin.qq.com' || host.endsWith('.weixin.qq.com'))) return false;
-      const text = `${u.pathname}${u.search}`;
-      return /feed_id=|object_id=|objectId=|exportkey=|\/web\/pages\/(?:feed|video)\b|\/feed\b|\/video\b/i.test(text);
     }
   } catch {
     return false;

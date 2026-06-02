@@ -18,10 +18,8 @@ export function detectPlatform(url) {
   try { host = new URL(url).hostname.toLowerCase(); } catch { return 'other'; }
   if (host.includes('douyin.com') || host.includes('iesdouyin.com')) return 'douyin';
   if (host.includes('xiaohongshu.com') || host.includes('xhslink')) return 'xiaohongshu';
-  if (host.includes('channels.weixin') || host.includes('weixin.qq.com')) {
-    return host.includes('channels') ? 'wechat_channels' : 'wechat_article';
-  }
   if (host.includes('mp.weixin.qq.com')) return 'wechat_article';
+  if (host.includes('weixin.qq.com')) return 'wechat_article';
   return 'other';
 }
 
@@ -57,7 +55,7 @@ const stripTags = (html) => html
  */
 export function extractFromHtml(html, url) {
   const platform = detectPlatform(url);
-  const content_type = (platform === 'douyin' || platform === 'wechat_channels') ? 'video' : 'article';
+  const content_type = platform === 'douyin' ? 'video' : 'article';
 
   const title = metaContent(html, 'og:title') || tag(html, /<title[^>]*>([^<]+)<\/title>/i) || '';
   const author = metaContent(html, 'og:author') || metaContent(html, 'author')

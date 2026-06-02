@@ -2,7 +2,7 @@
 name: rpa-report
 description: |
   RPA 驱动的全链路爆款选题日报生成。
-  通过 Chrome DevTools Protocol 控制真实浏览器，逐账号跳转主页提取最新内容数据并截图，
+  通过 Chrome DevTools Protocol 控制小红书/抖音真实浏览器，并通过 macOS System Events 控制桌面微信视频号，
   然后自动调用 AI 做定性摘录和内容归类，最终输出包含母题/标题/建议的完整日报。
 ---
 
@@ -12,8 +12,8 @@ description: |
 
 本 Skill 封装了「爆款选题雷达 Local」的核心工作流：
 
-1. **启动 RPA 浏览器** → 自动拉起带有调试端口的独立 Chrome 实例
-2. **逐账号采集** → 按评级排序后分平台跳转主页，按顺序打开候选并提取发布时间和互动指标
+1. **启动 RPA** → 自动拉起带有调试端口的独立 Chrome 实例，并在视频号阶段激活桌面微信
+2. **逐账号采集** → 小红书/抖音跳转主页并采集详情；视频号在桌面微信里按昵称打开博主并生成待复核记录
 3. **截图存档** → 对每个详情页自动截图，存入 `data/screenshots/`
 4. **数据入库** → 采集的数据通过去重机制写入本地 SQLite 数据库
 5. **确定性筛选** → 巡检全部结束后按窗口、账号池、确认状态和平台必需指标筛出达标内容
@@ -23,7 +23,8 @@ description: |
 ## 前置条件
 
 - **Node.js ≥ 22.5**（使用内置 `node:sqlite` 和全局 `fetch`）
-- **Google Chrome** 已安装
+- **Google Chrome** 已安装（小红书/抖音）
+- **macOS 微信客户端** 已登录且允许辅助功能控制（视频号）
 - **API Key** 已在设置中配置（支持 OpenAI / DeepSeek / 小米 MiMo / Anthropic 等）
 - **账号池** 中至少有 1 个开启了 `monitor_enabled` 的账号
 
@@ -37,7 +38,7 @@ description: |
    - 回溯天数使用「设置」里的默认回溯天数
    - 勾选 ✅「先自动采集（RPA）」
    - 点击「立即生成日报」
-4. 系统会自动完成 小红书巡检 API → 抖音巡检 API → 候选/内容库刷新 → AI 摘录/归类 → 日报输出 的全流程
+4. 系统会自动完成 小红书巡检 API → 抖音巡检 API → 桌面微信视频号巡检 API → 候选/内容库刷新 → AI 摘录/归类 → 日报输出 的全流程
 
 ### 方式二：API 调用
 
@@ -65,7 +66,7 @@ curl -X POST http://127.0.0.1:8787/api/patrol/stop \
   -H "x-vb-token: YOUR_PAIRING_TOKEN"
 ```
 
-说明：网页 UI 的主路径是先分两次调用 `/api/patrol/run`（小红书 → 抖音），再用 `skipRpa:true` 调 `/api/reports/generate` 出报；`/api/reports/generate` 不带 `skipRpa` 仍保留为脚本/兼容调用，会在服务端 pipeline 内按小红书、抖音两个阶段自跑 RPA。
+说明：网页 UI 的主路径是先分三次调用 `/api/patrol/run`（小红书 → 抖音 → 视频号），再用 `skipRpa:true` 调 `/api/reports/generate` 出报；`/api/reports/generate` 不带 `skipRpa` 仍保留为脚本/兼容调用，会在服务端 pipeline 内按小红书、抖音 Chrome 阶段和桌面微信视频号阶段自跑 RPA。
 
 ### 方式三：命令行
 
@@ -85,15 +86,19 @@ npm run patrol
 |------|------|------|
 | CDP 客户端 | `server/rpa/cdp.js` | 零依赖 WebSocket 封装，提供 `goto / evaluate / screenshot / waitForSelector` |
 | Chrome 启动器 | `server/rpa/chrome-launcher.js` | 管理 Chrome 进程生命周期：启动、端口就绪检测、关闭 |
-| 巡检模块 | `server/rpa/patrol.js` | 平台级采集逻辑（抖音/小红书），返回结构化结果 |
+| 巡检模块 | `server/rpa/patrol.js` | Chrome 平台级采集逻辑（抖音/小红书），返回结构化结果 |
+| 桌面微信视频号 | `server/rpa/wechat-desktop.js` | 通过 macOS System Events 操作桌面微信视频号，生成待复核记录 |
 | Pipeline | `server/pipeline.js` | 编排全流程：RPA → 筛选 → AI 摘录/归类 → 渲染 → 导出 |
 
 ### 数据流向
 
 ```
-Chrome (真实浏览器)
+Chrome (小红书/抖音)
   ↓ CDP WebSocket
 CDPClient.evaluate() → 注入 JS 提取 DOM 数据
+桌面微信 (视频号)
+  ↓ osascript / System Events
+按昵称打开博主 → 生成待复核记录
   ↓
 patrol.saveData() → upsertCapture() → SQLite contents 表
   ↓
@@ -113,7 +118,7 @@ renderMarkdown/Html/Csv → data/exports/
 3. **截图作为证据链** — 每次采集自动截图，存入 `data/screenshots/`，与内容记录关联
 4. **采集结果按证据强度入库** — 稳定 RPA 证据可直接 `confirmed`，弱证据/缺数仍进「今日候选」等待人工确认
 5. **置顶内容绝不进入详情页** — 小红书左上角红色“置顶”、抖音左上角黄色“置顶”必须由 DOM 位置和颜色规则先过滤；不要让 AI/API 模型判断，也不要点进详情页后再补救
-6. **巡检按排序和平台阶段执行** — 前端先跑小红书 API，再跑抖音 API；每个阶段内评级越高越先，同评级按添加时间
+6. **巡检按排序和平台阶段执行** — 前端先跑小红书 API，再跑抖音 API，最后跑桌面微信视频号 API；每个阶段内评级越高越先，同评级按添加时间
 7. **并发范围固定** — 默认每批 6 个账号标签，允许 1-10；内存保护可降到 1；上一批标签确认关闭后才开下一批
 8. **巡检阶段不做入选判断** — 详情时间未知、超窗口、标题不匹配、未达阈值都先保存；是否入日报只在巡检后的筛选阶段决定
 9. **小红书详情采集口径** — 详情页必须读取标题、作者、封面、视频时长、正文、发布时间、点赞/红心、收藏、评论；可采详情一律截图入库
@@ -129,9 +134,9 @@ renderMarkdown/Html/Csv → data/exports/
 
 ### 巡检前
 
-1. 读取账号池中 `monitor_enabled = true` 的小红书和抖音账号。
+1. 读取账号池中 `monitor_enabled = true` 的小红书、抖音和视频号账号。
 2. 默认跳过北京时间当天已经巡检过的账号，除非调用方显式要求包含。
-3. 排序：小红书阶段整体先于抖音阶段；每个阶段内评级高优先，同评级添加更早优先；缺添加时间随机。
+3. 排序：小红书阶段整体先于抖音阶段，抖音完成后再跑桌面微信视频号；每个阶段内评级高优先，同评级添加更早优先；缺添加时间随机。
 4. 读取设置中的 `rpa.maxTabsPerBatch`，默认 6，范围 1-10，并按可用内存下调。
 
 ### 小红书
@@ -157,6 +162,13 @@ renderMarkdown/Html/Csv → data/exports/
 6. 发布时间缺失或超窗口都保存；标题不匹配和互动未达标也不阻断保存。
 7. 只要详情可采就截图、入库；点赞、收藏和转发是否达标留给巡检后的筛选阶段。
 8. 账号实际处理完成后标记当日已巡检，标签页立即关闭；已在跑的账号继续收尾，不再额外开新标签，停止前未处理完成则不标记。
+
+### 视频号
+
+1. 视频号只指 macOS 微信客户端内的视频号，不打开或识别任何网页视频号链接。
+2. 系统激活桌面微信，点击“视频号”入口和右上角人物头像，进入关注/博主区域后按账号池昵称打开对应博主。
+3. 默认不使用 Python、不使用 AI 视觉识别；优先点击 Accessibility 元素，找不到头像时用窗口右上角坐标兜底。
+4. 成功打开博主后写入 `wechat-desktop://content/<account-id>/<date>` 待复核记录，互动指标保持未知，等待人工确认或后续桌面视觉补录。
 
 ### 巡检后
 

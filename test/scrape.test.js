@@ -5,7 +5,8 @@ import { extractFromHtml, detectPlatform } from '../server/ingest/scrape.js';
 test('detectPlatform 按域名识别', () => {
   assert.equal(detectPlatform('https://www.douyin.com/video/123'), 'douyin');
   assert.equal(detectPlatform('https://www.xiaohongshu.com/explore/abc?xsec_token=x'), 'xiaohongshu');
-  assert.equal(detectPlatform('https://channels.weixin.qq.com/xx'), 'wechat_channels');
+  assert.equal(detectPlatform('https://mp.weixin.qq.com/s/abc'), 'wechat_article');
+  assert.equal(detectPlatform('https://example.com/xx'), 'other');
   assert.equal(detectPlatform('https://example.com/x'), 'other');
   assert.equal(detectPlatform('not a url'), 'other');
 });

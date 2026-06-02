@@ -14,10 +14,9 @@ function gatherRaw() {
   let platform = 'other';
   if (host.includes('douyin.com')) platform = 'douyin';
   else if (host.includes('xiaohongshu.com') || host.includes('xhslink')) platform = 'xiaohongshu';
-  else if (host.includes('channels.weixin') || location.href.includes('weixin.qq.com/channels')) platform = 'wechat_channels';
   else if (host.includes('mp.weixin.qq.com')) platform = 'wechat_article';
 
-  const content_type = (platform === 'douyin' || platform === 'wechat_channels') ? 'video' : 'article';
+  const content_type = platform === 'douyin' ? 'video' : 'article';
   const text = (sel) => { try { const el = document.querySelector(sel); return el ? (el.textContent || '').trim() : null; } catch { return null; } };
   const meta = (name) => { const el = document.querySelector(`meta[property="${name}"],meta[name="${name}"]`); return el ? el.content : null; };
 

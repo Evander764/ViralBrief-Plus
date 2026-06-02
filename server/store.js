@@ -332,7 +332,7 @@ function normalizePlatformInput(v) {
   const s = String(v || '').trim().toLowerCase();
   if (['douyin', '抖音', 'dy'].includes(s)) return 'douyin';
   if (['xiaohongshu', '小红书', 'xhs', 'red'].includes(s)) return 'xiaohongshu';
-  if (['wechat_channels', '视频号', '微信视频号', 'channels'].includes(s)) return 'wechat_channels';
+  if (['wechat_channels', '视频号', '微信视频号'].includes(s)) return 'wechat_channels';
   if (['wechat_article', '公众号', '公众号文章'].includes(s)) return 'wechat_article';
   return s || 'other';
 }

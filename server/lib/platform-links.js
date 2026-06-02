@@ -5,12 +5,11 @@
  * 含不可猜测的用户 ID，如 douyin.com/user/MS4wLjABAAAA...）。让 AI 填主页链接，
  * 结果要么编造一个打不开的死链（用户反馈的「主页链接经常失效」），要么留空。
  *
- * 正确做法：用昵称在代码里拼出各平台的「搜索链接」——它一定能打开，
- * 落到该平台搜索结果页，用户一键就能找到并进入真实主页。
- * 同时校验 AI 给的链接是否像真实主页，是才保留，否则丢弃换成搜索链接。
+ * 正确做法：抖音/小红书用昵称拼出平台搜索链接；视频号只走桌面微信 App，
+ * 不生成或接受网页视频号链接。
  */
 
-/** 各平台「按关键词搜索」的 URL 模板（公开搜索页，稳定可用）。 */
+/** 各平台「按关键词搜索」的 URL 模板；视频号不使用网页搜索。 */
 export function platformSearchUrl(platform, nickname) {
   const q = encodeURIComponent(String(nickname || '').trim());
   if (!q) return '';
@@ -20,8 +19,7 @@ export function platformSearchUrl(platform, nickname) {
     case 'xiaohongshu':
       return `https://www.xiaohongshu.com/search_result?keyword=${q}`;
     case 'wechat_channels':
-      // 视频号没有稳定的网页搜索入口，退而用通用搜索帮用户定位
-      return `https://www.google.com/search?q=${q}+微信视频号`;
+      return '';
     default:
       return `https://www.google.com/search?q=${q}`;
   }
@@ -30,13 +28,12 @@ export function platformSearchUrl(platform, nickname) {
 const HOST_OK = {
   douyin: ['douyin.com'],
   xiaohongshu: ['xiaohongshu.com', 'xhslink.com'],
-  wechat_channels: ['weixin.qq.com', 'channels.weixin.qq.com'],
 };
 
 /**
  * 判断 AI 给的链接是否像「该平台的真实主页/内容链接」。
- * 只有 host 命中且看起来像个人主页（带 user/profile/finder 等路径或较长 ID）才认。
- * 拿不准一律返回 false，交给搜索链接兜底——宁可给可用搜索页，也不给死链。
+ * 只有 host 命中且看起来像个人主页才认。视频号固定返回 false，
+ * 因为它由桌面微信 App 巡检，不保存网页主页。
  */
 export function looksLikeRealProfile(platform, url) {
   if (!url || typeof url !== 'string') return false;
@@ -59,19 +56,14 @@ export function looksLikeRealProfile(platform, url) {
       || /^\/explore\/[^/?#]+$/i.test(path)
       || /^\/discovery\/item\/[^/?#]+$/i.test(path);
   }
-  if (platform === 'wechat_channels') {
-    const text = `${u.pathname}${u.search}`;
-    if (/feed_id=|object_id=|objectId=|exportkey=|\/feed\b|\/video\b/i.test(text)) return false;
-    return /finder(username)?=|profile|creator|author|user|channels|finder/i.test(text)
-      || path.length >= 8;
-  }
-  return /(finder|channels|u)\//i.test(url) || path.length >= 8;
+  if (platform === 'wechat_channels') return false;
+  return /\/u\//i.test(url) || path.length >= 8;
 }
 
 /**
  * 给一条 AI 建议补上「可用链接」：
  *  - AI 链接像真实主页 → 保留为 homepage_url；
- *  - 否则 → homepage_url 留空，但给出 search_url（一定能打开）。
+ *  - 否则 → homepage_url 留空；抖音/小红书给 search_url，视频号 search_url 为空。
  * 返回新对象，不改原对象。
  */
 export function withUsableLink(suggestion) {

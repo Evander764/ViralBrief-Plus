@@ -16,6 +16,8 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { CDPClient } from './rpa/cdp.js';
 import { runPatrol, discoverFollowedCreators } from './rpa/patrol.js';
+import { combinePatrolResults } from './rpa/patrol-results.js';
+import { runWechatDesktopPatrol } from './rpa/wechat-desktop.js';
 import { launchChrome, killChrome } from './rpa/chrome-launcher.js';
 import { beginPatrolRun, endPatrolRun, requestPatrolStop, getPatrolRunState } from './rpa/control.js';
 
@@ -274,29 +276,40 @@ async function handleApi(req, res, url, segs) {
       const includePatrolledToday = body.includePatrolledToday === true;
       const platforms = body.platform ? [body.platform] : (Array.isArray(body.platforms) && body.platforms.length ? body.platforms : ['xiaohongshu', 'douyin', 'wechat_channels']);
       runCtrl = beginPatrolRun({ source: 'api', platforms });
-      log.info(`正在执行 Node.js CDP 自动巡检（${platforms.join(', ')}）...`);
-      const client = new CDPClient();
-      const chrome = await launchChrome({ port: 9222, waitMs: 15000 });
-      let result;
-      try {
-        await client.connect(chrome.port);
-        result = await runPatrol(client, {
+      log.info(`正在执行自动巡检（${platforms.join(', ')}）...`);
+      const stageResults = [];
+      const chromePlatforms = platforms.filter((platform) => platform !== 'wechat_channels');
+      if (chromePlatforms.length > 0) {
+        const client = new CDPClient();
+        const chrome = await launchChrome({ port: 9222, waitMs: 15000 });
+        try {
+          await client.connect(chrome.port);
+          stageResults.push(await runPatrol(client, {
+            onProgress: (msg) => log.info(`[RPA] ${msg}`),
+            windowType,
+            platforms: chromePlatforms,
+            maxTabsPerBatch,
+            includePatrolledToday,
+            shouldStop: runCtrl.shouldStop,
+            clientFactory: async () => {
+              const c = new CDPClient();
+              await c.connect(chrome.port);
+              return c;
+            },
+          }));
+        } finally {
+          await client.close();
+          if (chrome.closeOnDone && chrome.child) killChrome(chrome.child);
+        }
+      }
+      if (platforms.includes('wechat_channels') && !runCtrl.shouldStop()) {
+        stageResults.push(await runWechatDesktopPatrol({
           onProgress: (msg) => log.info(`[RPA] ${msg}`),
-          windowType,
-          platforms,
-          maxTabsPerBatch,
           includePatrolledToday,
           shouldStop: runCtrl.shouldStop,
-          clientFactory: async () => {
-            const c = new CDPClient();
-            await c.connect(chrome.port);
-            return c;
-          },
-        });
-      } finally {
-        await client.close();
-        if (chrome.closeOnDone && chrome.child) killChrome(chrome.child);
+        }));
       }
+      const result = combinePatrolResults(stageResults);
       return sendJson(res, 200, {
         success: true,
         message: result.stopped ? '自动巡检已停止。' : '自动巡检完成。',
@@ -308,7 +321,7 @@ async function handleApi(req, res, url, segs) {
       if (e.code === 'VBP_PATROL_ACTIVE') {
         return sendJson(res, 409, { error: e.message, active: e.active });
       }
-      log.error('桌面 Agent (Node CDP) 运行失败: ' + e.message);
+      log.error('自动巡检运行失败: ' + e.message);
       return sendJson(res, 500, { error: '桌面 Agent 运行失败: ' + e.message });
     } finally {
       if (runCtrl) endPatrolRun(runCtrl.id);

@@ -27,6 +27,7 @@ import { EXPORTS_DIR } from './lib/paths.js';
 import { log } from './lib/log.js';
 import { CDPClient } from './rpa/cdp.js';
 import { runPatrol } from './rpa/patrol.js';
+import { runWechatDesktopPatrol } from './rpa/wechat-desktop.js';
 import { launchChrome, killChrome } from './rpa/chrome-launcher.js';
 
 function combinePatrolResults(results = []) {
@@ -90,25 +91,23 @@ export async function runDailyReport({
   let rpaError = null;
 
   if (!skipRpa) {
-    progress('rpa', '正在启动浏览器...');
+    progress('rpa', '正在启动自动巡检...');
     let chromeChild = null;
     let client = null;
 
     try {
-      // 启动或连接 Chrome
+      // 小红书/抖音使用 Chrome CDP；视频号只使用桌面微信客户端。
       const chrome = await launchChrome({ port: 9222, waitMs: 15000 });
       chromeChild = chrome.closeOnDone ? chrome.child : null;
 
-      // 连接 CDP
       progress('rpa', '正在连接浏览器...');
       client = new CDPClient();
       await client.connect(chrome.port);
 
-      // 执行巡检：按平台阶段分别跑，便于前端/外部调用观察每个阶段完成状态。
       const stageResults = [];
-      for (const platform of ['xiaohongshu', 'douyin', 'wechat_channels']) {
+      for (const platform of ['xiaohongshu', 'douyin']) {
         if (shouldStop()) break;
-        const label = platform === 'xiaohongshu' ? '小红书' : (platform === 'douyin' ? '抖音' : '视频号');
+        const label = platform === 'xiaohongshu' ? '小红书' : '抖音';
         progress('rpa', `开始${label}阶段巡检...`);
         stageResults.push(await runPatrol(client, {
           onProgress: (msg) => progress('rpa', msg),
@@ -122,6 +121,13 @@ export async function runDailyReport({
             await c.connect(chrome.port);
             return c;
           },
+        }));
+      }
+      if (!shouldStop()) {
+        progress('rpa', '开始桌面微信视频号阶段巡检...');
+        stageResults.push(await runWechatDesktopPatrol({
+          onProgress: (msg) => progress('rpa', msg),
+          shouldStop,
         }));
       }
       patrolResult = combinePatrolResults(stageResults);

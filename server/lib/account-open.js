@@ -6,10 +6,6 @@ const OPEN_PLATFORM_ALIASES = new Map([
   ['douyin', 'douyin'],
   ['抖音', 'douyin'],
   ['dy', 'douyin'],
-  ['wechat_channels', 'wechat_channels'],
-  ['视频号', 'wechat_channels'],
-  ['微信视频号', 'wechat_channels'],
-  ['channels', 'wechat_channels'],
 ]);
 
 export function normalizeOpenPlatform(platform) {
@@ -31,16 +27,6 @@ export function isPlatformHomepageUrl(platform, rawUrl) {
   if (normalizedPlatform === 'douyin') {
     return (host === 'douyin.com' || host.endsWith('.douyin.com'))
       && /^\/user\/(?!self$)[^/?#]+$/i.test(path);
-  }
-  if (normalizedPlatform === 'wechat_channels') {
-    const isWechatHost = host === 'channels.weixin.qq.com'
-      || host.endsWith('.channels.weixin.qq.com')
-      || host === 'weixin.qq.com'
-      || host.endsWith('.weixin.qq.com');
-    const text = `${u.pathname}${u.search}`;
-    return isWechatHost
-      && (/finder(username)?=|profile|creator|author|user|channels|finder/i.test(text) || path.length >= 8)
-      && !/feed_id=|object_id=|objectId=|exportkey=|\/feed\b|\/video\b/i.test(text);
   }
   return false;
 }

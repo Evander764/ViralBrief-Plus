@@ -16,7 +16,7 @@ const STATUS_LABEL = {
 };
 let accountsCache = [];
 let accountSuggestionCache = [];
-const ACCOUNT_SEARCH_PLATFORMS = ['xiaohongshu', 'douyin', 'wechat_channels'];
+const ACCOUNT_SEARCH_PLATFORMS = ['xiaohongshu', 'douyin'];
 let patrolRunning = false;
 
 async function api(path, opts = {}) {
@@ -486,7 +486,7 @@ $('#candRunRpa').addEventListener('click', async (e) => {
   btn.textContent = '巡检中...';
   try {
     setPatrolRunning(true, btn);
-    toast('正在启动已登录 Chrome，依次发起小红书、抖音、视频号巡检 API...', 'ok');
+    toast('正在启动自动巡检：小红书/抖音使用 Chrome，视频号使用桌面微信...', 'ok');
     const res = await runPatrolStages(null, { includePatrolledToday: true });
     const tabInfo = res.maxTabsPerBatch ? `，每轮 ${res.maxTabsPerBatch} 个账号标签` : '';
     toast(`${res.stopped ? '自动巡检已停止' : '自动巡检完成'}：巡检账号 ${res.total || 0} 个，新增 ${res.newItems || 0} 条，今日跳过 ${res.skippedToday || 0} 个${tabInfo}`, res.stopped ? '' : 'ok');
@@ -725,7 +725,6 @@ function platformSearchUrl(platform, nickname) {
   switch (platform) {
     case 'douyin': return `https://www.douyin.com/search/${q}?type=user`;
     case 'xiaohongshu': return `https://www.xiaohongshu.com/search_result?keyword=${q}`;
-    case 'wechat_channels': return `https://www.google.com/search?q=${q}+%E5%BE%AE%E4%BF%A1%E8%A7%86%E9%A2%91%E5%8F%B7`;
     default: return `https://www.google.com/search?q=${q}`;
   }
 }

@@ -22,8 +22,8 @@
 8. **RPA 只负责顺序采集，不负责入选判断**。每读完一条详情内容，先记录/规范化发布时间和指标，再截图入库；未知时间、超窗口、未达阈值都要进入内容库。巡检阶段不因时间窗口或标题匹配判断而丢弃已打开详情；小红书/抖音非置顶详情若已确认早于窗口，保存本条后可结束当前博主巡检。正式日报只在巡检结束后的 `recomputeAll()` / `getEligible()` 阶段筛选。
 
 ## 巡检流程（当前唯一口径）
-- 巡检前先排序：前端/API 实际按平台阶段执行，小红书阶段整体先于抖音阶段，抖音阶段完成后再跑视频号阶段；每个阶段内部评级越高越前，同评级按 `created_at` 更早优先；缺少时间时随机打散。`sortPatrolAccounts()` 仍保留混合列表的同评级小红书优先规则。
-- API 阶段拆开：前端依次调用 `/api/patrol/run` 跑 `{ platform: "xiaohongshu" }`、`{ platform: "douyin" }`、`{ platform: "wechat_channels" }`；`/api/reports/generate` 在前端阶段巡检后只负责生成日报。服务端 pipeline 自跑 RPA 时也按小红书、抖音、视频号三个阶段。
+- 巡检前先排序：前端/API 实际按平台阶段执行，小红书阶段整体先于抖音阶段，抖音阶段完成后再跑桌面微信视频号阶段；每个阶段内部评级越高越前，同评级按 `created_at` 更早优先；缺少时间时随机打散。`sortPatrolAccounts()` 仍保留混合列表的同评级小红书优先规则。
+- API 阶段拆开：前端依次调用 `/api/patrol/run` 跑 `{ platform: "xiaohongshu" }`、`{ platform: "douyin" }`、`{ platform: "wechat_channels" }`；小红书/抖音由 Chrome CDP 巡检，`wechat_channels` 只操作 macOS 微信客户端内的视频号，不打开网页版视频号；`/api/reports/generate` 在前端阶段巡检后只负责生成日报。
 - 单活跃巡检：同一时间只允许一个巡检运行；已有巡检时，新的 `/api/patrol/run` 或含 RPA 的 `/api/reports/generate` 必须返回 409，并保留原巡检的停止控制。
 - 并发标签：`rpa.maxTabsPerBatch` 默认 6，允许 1-10；内存不足可自动下调。多标签模式每个账号标签使用独立 CDP client，账号跑完立即关标签。
 - 停止控制：`POST /api/patrol/stop` 设置当前巡检 stop flag；长循环、批次和详情采集都要检查 `shouldStop` 并收尾关闭标签；尚未实际处理完成的账号不得写 `last_patrolled_at`。
@@ -48,10 +48,10 @@
 - 全部账号完成或剩余账号正在跑时不再额外开新标签；单个账号跑完立即关闭自己的标签。
 
 ### 视频号阶段
-- 抖音阶段结束后再发起视频号巡检 API；视频号可保存到内容库和候选池，但第一版不进入正式日报筛选。
-- 账号有真实视频号主页 URL 则直接打开；无 URL 时打开 `https://channels.weixin.qq.com/`，自动点击右上角个人/小人入口进入个人页，再进入总览/关注区域查找昵称匹配的博主入口。
-- 找到博主入口后保存其真实主页 URL 到账号池；未找到时才退回网页搜索兜底。
-- 在博主页读取可识别的视频详情链接，进入详情后读取标题、正文、发布时间、点赞、收藏、转发、评论；可采内容一律截图并入库，是否入选仍交给巡检后的确定性筛选。
+- 抖音阶段结束后再发起视频号巡检 API；视频号在本项目中只指 macOS 微信客户端内的视频号，可保存到内容库和候选池，但第一版不进入正式日报筛选。
+- 视频号巡检由 `server/rpa/wechat-desktop.js` 调用 `osascript` / System Events 操作桌面微信：激活微信 → 点击“视频号”入口 → 点击右上角人物头像 → 进入个人/总览页 → 打开关注/博主区域 → 按账号池昵称匹配博主。
+- 默认不使用 Python、不使用 AI 视觉识别、不打开网页版视频号；优先通过 Accessibility 元素点击，找不到头像时使用窗口右上角相对坐标兜底，并在证据里记录方法。
+- 成功打开博主后写入 `wechat-desktop://content/<account-id>/<date>` 待复核记录；不保存网页主页 URL，互动指标保持 `null` 等待人工复核或后续桌面视觉补录。
 
 ## 数据流
 - 采集（三条入口，殊途同归到 `store.upsertCapture()`）：
@@ -60,8 +60,8 @@
   - **粘贴链接服务端抓取** `POST /api/ingest`：`ingest/scrape.js` 用 `fetch` 拉 HTML → `extractFromHtml`（复用 `extension/extract-core.js`，从 `__INITIAL_STATE__`/`RENDER_DATA`/og 解析）→ `metrics_source='scraped'` → needs_review。纯 HTTP 抓取「尽力而为」：常只拿到 JS 外壳/验证页，抓不到数字属正常，缺的进待补录。**不做反爬绕过/验证码/签名伪造**。
   - 共同：`upsertCapture()` 标准化指标、算 url_key/fingerprint、去重合并、账号池自动关联、`computeDataStatus`、落库；截图存 `data/screenshots/`。
 - 确认：仪表盘候选池 → `POST /api/contents/:id/confirm` → `store.confirmContent()`：重算指标、强制 `metrics_source='manual'` + `user_confirmed=1`、重算状态。
-- 账号池打开：`POST /api/accounts/open-platform` 从当前 DB 筛选有效平台主页（小红书 `/user/profile/<id>`、抖音 `/user/<id>`、视频号真实主页/账号链接），一次性交给 Chrome 打开为多个标签页；`POST /api/browser/open` 保留单 URL 兼容并支持 `{ urls: [...] }`。
-- 出报：`pipeline.runDailyReport({windowType})`：可选先跑小红书、抖音、视频号 RPA 阶段 → `recomputeAll(窗口)` → `getEligible(窗口起点)`（小红书/抖音 + 账号池 + confirmed + 平台必需指标都达标；视频号第一版不入正式日报）→ 逐条 `analyzeContent`（按 content_id 缓存）→ `generateReportData`（校验编号）→ `render*` → 落 `daily_reports` + 写 `data/exports/`（MD/HTML/CSV/ZIP）。0 达标则用 `fallbackReportData` 跳过 AI。
+- 账号池打开：`POST /api/accounts/open-platform` 只筛选小红书 `/user/profile/<id>` 和抖音 `/user/<id>` 主页并交给 Chrome 打开；视频号不走浏览器打开，必须通过桌面微信巡检。
+- 出报：`pipeline.runDailyReport({windowType})`：可选先跑小红书、抖音 Chrome RPA 阶段，再跑桌面微信视频号阶段 → `recomputeAll(窗口)` → `getEligible(窗口起点)`（小红书/抖音 + 账号池 + confirmed + 平台必需指标都达标；视频号第一版不入正式日报）→ 逐条 `analyzeContent`（按 content_id 缓存）→ `generateReportData`（校验编号）→ `render*` → 落 `daily_reports` + 写 `data/exports/`（MD/HTML/CSV/ZIP）。0 达标则用 `fallbackReportData` 跳过 AI。
 - 自动：`scheduler.startScheduler()`，setTimeout 到点跑；用 `meta.last_auto_run_date` 防重复；可补跑。设置变更后调 `restartScheduler()`。
 
 ## Token 策略（既省又准）
@@ -85,7 +85,7 @@
 - 每次完成修改后，直接提交并推送到 `main` 分支；除非用户明确要求走其它分支或只做本地验证。
 
 ## 已知边界 / 待办
-- 插件页面指标识别是「尽力而为」，平台改版会失效；**人工修正是主路径**（设计如此）。视频号网页端指标基本靠手填。
+- 插件页面指标识别是「尽力而为」，平台改版会失效；**人工修正是主路径**（设计如此）。视频号桌面端第一版只负责打开博主并生成待复核记录。
 - PDF：当前出 Markdown/HTML/CSV，HTML 可浏览器「打印为 PDF」；如需服务端直出 PDF，可选接 puppeteer（会引入大依赖，与「零依赖」目标权衡）。
 - 桌面安装包：可用 Tauri/Electron 包壳，内嵌本服务 + `web/`。
 - 增强：OS 钥匙串存 Key；浏览器上下滑动控制 API。

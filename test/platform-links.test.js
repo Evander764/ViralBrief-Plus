@@ -5,7 +5,7 @@ import { platformSearchUrl, looksLikeRealProfile, withUsableLink } from '../serv
 test('platformSearchUrl：各平台生成可用搜索链接（昵称已编码）', () => {
   assert.equal(platformSearchUrl('douyin', '数字生命卡兹克'), 'https://www.douyin.com/search/%E6%95%B0%E5%AD%97%E7%94%9F%E5%91%BD%E5%8D%A1%E5%85%B9%E5%85%8B?type=user');
   assert.equal(platformSearchUrl('xiaohongshu', '老王'), 'https://www.xiaohongshu.com/search_result?keyword=%E8%80%81%E7%8E%8B');
-  assert.match(platformSearchUrl('wechat_channels', '老张'), /google\.com\/search/);
+  assert.equal(platformSearchUrl('wechat_channels', '老张'), '');
   assert.equal(platformSearchUrl('douyin', ''), '');
 });
 
@@ -13,8 +13,7 @@ test('looksLikeRealProfile：真实主页通过，编造/裸域名/异平台不�
   // 真实样式：带 user/profile 路径或长 ID
   assert.equal(looksLikeRealProfile('douyin', 'https://www.douyin.com/user/MS4wLjABAAAAxyz123'), true);
   assert.equal(looksLikeRealProfile('xiaohongshu', 'https://www.xiaohongshu.com/user/profile/abcd1234'), true);
-  assert.equal(looksLikeRealProfile('wechat_channels', 'https://channels.weixin.qq.com/platform/profile?finderusername=creator123'), true);
-  assert.equal(looksLikeRealProfile('wechat_channels', 'https://channels.weixin.qq.com/web/pages/feed?feed_id=feed123'), false);
+  assert.equal(looksLikeRealProfile('wechat_channels', 'https://example.com/profile/creator123'), false);
   // 裸域名（没有具体路径）→ 不认
   assert.equal(looksLikeRealProfile('douyin', 'https://www.douyin.com'), false);
   assert.equal(looksLikeRealProfile('douyin', 'https://www.douyin.com/user/self'), false);
@@ -47,4 +46,11 @@ test('withUsableLink：AI 给空/死链 → 清空 homepage，补搜索链接', 
   assert.equal(fake.homepage_url, '', '编造的示例链接被丢弃');
   assert.equal(fake.link_verified, false);
   assert.ok(fake.search_url, '总是有可用搜索链接兜底');
+});
+
+test('withUsableLink：视频号只保留昵称，不生成网页链接', () => {
+  const r = withUsableLink({ platform: 'wechat_channels', nickname: '桌面视频号', homepage_url: 'https://example.com/profile/creator123' });
+  assert.equal(r.homepage_url, '');
+  assert.equal(r.search_url, '');
+  assert.equal(r.link_verified, false);
 });

@@ -138,8 +138,7 @@ async function patrolWechatDesktopAccount(acc, { index, total, progress, scriptR
 export async function prepareWechatChannelsFollowing({ scriptRunner = defaultWechatScriptRunner, progress = () => {} } = {}) {
   const steps = [
     ['assert_accessibility', {}],
-    ['activate_wechat', {}],
-    ['open_channels_home', {}],
+    ['activate_existing_channels', {}],
     ['open_profile_entry', {}],
     ['open_overview', {}],
     ['open_following_overview', {}],
@@ -411,17 +410,17 @@ function friendlyWechatDesktopError(e) {
   if (e?.code === 'not_logged_in' || /登录|login/i.test(message)) {
     return '桌面微信未登录或视频号窗口不可用，请先手动登录微信';
   }
-  if (e?.code === 'open_channels_home' || /未找到桌面微信视频号入口|未找到视频号入口/.test(message)) {
-    return '没有找到桌面微信的视频号入口：请确认微信主窗口可见，左侧栏能看到“视频号”小图标，然后重试';
+  if (e?.code === 'channels_window_required' || /请先手动打开微信视频号|当前窗口不是视频号/.test(message)) {
+    return '请先手动打开微信视频号窗口，停留在任意视频或视频号页面后再重试；本轮不会再从微信首页自动点击视频号入口';
   }
   if (e?.code === 'profile_entry' || /未找到视频号右上角人物头像/.test(message)) {
-    return '没有找到视频号右上角的小人入口：请确认当前已进入视频号窗口，而不是微信聊天窗口';
+    return '没有找到视频号右上角的小人入口：请确认你已经手动打开视频号窗口，且窗口右上角能看到小人图标';
   }
   if (e?.code === 'open_following_overview' || /未找到左侧关注/.test(message)) {
     return '没有找到右上角小人入口后的左侧“关注”：请确认已进入赞和收藏/个人总览页，而不是顶部视频流“关注”页';
   }
   if (e?.code === 'wechat_window_empty' || /微信主窗口是空白窗口|没有暴露可操作控件/.test(message)) {
-    return '桌面微信主窗口当前是空白窗口，没有暴露聊天列表或左侧栏控件；请先重启微信或重新登录微信，确认能看到左侧栏“视频号”后再重试';
+    return '桌面微信当前没有暴露可操作控件；请先手动打开微信视频号窗口，停留在任意视频或视频号页面后再重试';
   }
   return message || '桌面微信视频号自动化失败';
 }
@@ -840,8 +839,7 @@ function appleScriptForStep(step, payload = {}) {
   const keepTabTitle = appleString(payload.keepTabTitle || '关注');
   const knownSteps = new Set([
     'assert_accessibility',
-    'activate_wechat',
-    'open_channels_home',
+    'activate_existing_channels',
     'open_profile_entry',
     'open_overview',
     'open_following_overview',
@@ -872,43 +870,21 @@ on run
     if "${step}" is "assert_accessibility" then
       try
         set windowCount to count of windows of targetProcess
-        if windowCount < 1 then
-          set recoveredBy to my vbp_recover_blank_wechat_window()
-          delay 1.0
-          set targetProcess to my vbp_process("${step}")
-          if targetProcess is missing value then return my vbp_result(false, "not_logged_in", "ax", "桌面微信没有可用窗口；已尝试恢复：" & recoveredBy)
-          set windowCount to count of windows of targetProcess
-        end if
-        if windowCount < 1 then return my vbp_result(false, "not_logged_in", "ax", "桌面微信没有可用窗口；已尝试从 Dock 微信图标中心和重启微信恢复")
+        if windowCount < 1 then return my vbp_result(false, "not_logged_in", "ax", "桌面微信或视频号没有可用窗口；请先手动打开微信视频号")
         set ignored to name of window 1 of targetProcess
       on error errMsg
         return my vbp_result(false, "accessibility", "ax", errMsg)
       end try
       return my vbp_result(true, "assert_accessibility", "ax", "辅助功能权限可用，已验证可读取微信窗口")
-    else if "${step}" is "activate_wechat" then
-      return my vbp_result(true, "activate_wechat", "ax", "已激活并置前桌面微信")
-    else if "${step}" is "open_channels_home" then
+    else if "${step}" is "activate_existing_channels" then
       if my vbp_window_looks_preferences(targetProcess) then
-        my vbp_close_preferences_window(targetProcess)
-        delay 0.6
-        set targetProcess to my vbp_process("${step}")
+        return my vbp_result(false, "channels_window_required", "manual_channels_window", "当前窗口是微信设置页；请先手动打开微信视频号窗口")
       end if
       if (my vbp_accessible_content_count(targetProcess)) < 1 then
-        my vbp_restore_wechat_window(targetProcess)
-        delay 0.6
-        set targetProcess to my vbp_process("${step}")
+        return my vbp_result(false, "wechat_window_empty", "manual_channels_window", "当前微信窗口没有暴露可操作控件；请先手动打开微信视频号窗口")
       end if
-      if targetProcess is not missing value and (my vbp_accessible_content_count(targetProcess)) < 1 then
-        set recoveredBy to my vbp_recover_blank_wechat_window()
-        delay 1.0
-        set targetProcess to my vbp_process("${step}")
-      end if
-      if targetProcess is missing value or (my vbp_accessible_content_count(targetProcess)) < 1 then
-        return my vbp_result(false, "wechat_window_empty", "ax", "桌面微信主窗口是空白窗口，没有暴露可操作控件；已尝试从窗口菜单、Dock 微信图标中心和重启微信恢复")
-      end if
-      if my vbp_click_named(targetProcess, {"视频号", "Channels"}, false) then return my vbp_result(true, "open_channels_home", "ax", "已点击视频号入口")
-      if my vbp_click_channels_sidebar_fixed(targetProcess) then return my vbp_result(true, "open_channels_home", "fixed_coordinate", "已精准点击左侧视频号小图标中心")
-      return my vbp_result(false, "open_channels_home", "fixed_coordinate", "未找到桌面微信视频号入口")
+      if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_existing_channels", "manual_channels_window", "已接管当前手动打开的视频号窗口")
+      return my vbp_result(false, "channels_window_required", "manual_channels_window", "当前窗口不是视频号；请先手动打开微信视频号窗口，停留在任意视频或视频号页面")
     else if "${step}" is "open_profile_entry" then
       if my vbp_click_profile_entry(targetProcess) then return my vbp_result(true, "open_profile_entry", "profile_icon", "已点击右上角小人入口")
       return my vbp_result(false, "profile_entry", "profile_icon", "未找到视频号右上角人物头像")
@@ -939,9 +915,6 @@ end run
 on vbp_process(stepName)
   tell application "System Events"
     set preferredBids to {"com.tencent.flue.WeChatAppEx", "com.tencent.xinWeChat"}
-    if stepName is "assert_accessibility" or stepName is "activate_wechat" or stepName is "open_channels_home" then
-      set preferredBids to {"com.tencent.xinWeChat", "com.tencent.flue.WeChatAppEx"}
-    end if
     repeat with bid in preferredBids
       try
         set p to first process whose bundle identifier is bid
@@ -969,83 +942,6 @@ on vbp_raise_window(targetProcessRef)
   end tell
 end vbp_raise_window
 
-on vbp_restore_wechat_window(targetProcessRef)
-  tell application "System Events"
-    try
-      tell process "WeChat"
-        try
-          click menu item "聊天" of menu 1 of menu bar item "窗口" of menu bar 1
-          delay 0.4
-        end try
-        try
-          click menu item "微信" of menu 1 of menu bar item "窗口" of menu bar 1
-          delay 0.4
-        end try
-        try
-          click menu item "前置全部窗口" of menu 1 of menu bar item "窗口" of menu bar 1
-        end try
-      end tell
-    end try
-    my vbp_raise_window(targetProcessRef)
-  end tell
-end vbp_restore_wechat_window
-
-on vbp_recover_blank_wechat_window()
-  set actionsText to ""
-  try
-    tell application id "com.tencent.xinWeChat"
-      activate
-      reopen
-    end tell
-    set actionsText to actionsText & "reopen"
-    delay 1.0
-  end try
-  try
-    set dockResult to my vbp_click_wechat_dock_icon_center()
-    if dockResult is not "" then set actionsText to actionsText & "+dock_center"
-    delay 1.2
-  end try
-  tell application "System Events"
-    try
-      set p to first process whose bundle identifier is "com.tencent.xinWeChat"
-      if (count of windows of p) > 0 and (my vbp_accessible_content_count(p)) > 1 then return actionsText
-    end try
-  end tell
-  try
-    tell application id "com.tencent.xinWeChat" to quit
-    delay 2.0
-    tell application id "com.tencent.xinWeChat" to activate
-    set actionsText to actionsText & "+relaunch"
-    delay 4.0
-  end try
-  return actionsText
-end vbp_recover_blank_wechat_window
-
-on vbp_click_wechat_dock_icon_center()
-  tell application "System Events"
-    try
-      tell process "Dock"
-        repeat with dockItem in UI elements of list 1
-          set labelText to ""
-          try
-            set labelText to name of dockItem as text
-          end try
-          if labelText contains "微信" or labelText contains "WeChat" then
-            set p to position of dockItem
-            set s to size of dockItem
-            set centerX to (item 1 of p) + ((item 1 of s) / 2)
-            set centerY to (item 2 of p) + ((item 2 of s) / 2)
-            click at {centerX, centerY}
-            delay 1.0
-            return "dock_center"
-          end if
-        end repeat
-      end tell
-    end try
-  end tell
-  return ""
-end vbp_click_wechat_dock_icon_center
-
 on vbp_window_looks_preferences(targetProcessRef)
   try
     set dumpText to my vbp_visible_text_dump(targetProcessRef)
@@ -1056,22 +952,6 @@ on vbp_window_looks_preferences(targetProcessRef)
   return false
 end vbp_window_looks_preferences
 
-on vbp_close_preferences_window(targetProcessRef)
-  tell application "System Events"
-    try
-      click button 1 of window 1 of targetProcessRef
-      delay 0.5
-    end try
-  end tell
-  try
-    tell application id "com.tencent.xinWeChat"
-      activate
-      reopen
-    end tell
-    delay 0.8
-  end try
-end vbp_close_preferences_window
-
 on vbp_accessible_content_count(targetProcessRef)
   tell application "System Events"
     try
@@ -1080,6 +960,21 @@ on vbp_accessible_content_count(targetProcessRef)
   end tell
   return 0
 end vbp_accessible_content_count
+
+on vbp_window_looks_channels(targetProcessRef)
+  try
+    set bidText to bundle identifier of targetProcessRef as text
+    if bidText is "com.tencent.flue.WeChatAppEx" then return true
+  end try
+  try
+    set dumpText to my vbp_visible_text_dump(targetProcessRef)
+    if dumpText contains "视频号" then return true
+    if dumpText contains "赞和收藏" or dumpText contains "浏览记录" or dumpText contains "我的视频号" then return true
+    if dumpText contains "直播" and dumpText contains "朋友" and dumpText contains "推荐" then return true
+    if dumpText contains "展开" and (dumpText contains "评论" or dumpText contains "收藏" or dumpText contains "点赞") then return true
+  end try
+  return false
+end vbp_window_looks_channels
 
 on vbp_text(el)
   tell application "System Events"
@@ -1125,22 +1020,6 @@ on vbp_click_named(targetProcessRef, terms, rightSideOnly)
   end tell
   return false
 end vbp_click_named
-
-on vbp_click_channels_sidebar_fixed(targetProcessRef)
-  tell application "System Events"
-    try
-      set w to window 1 of targetProcessRef
-      set p to position of w
-      set s to size of w
-      set targetX to (item 1 of p) + 55
-      set targetY to (item 2 of p) + ((item 2 of s) * 0.45)
-      click at {targetX, targetY}
-      delay 1.1
-      return true
-    end try
-  end tell
-  return false
-end vbp_click_channels_sidebar_fixed
 
 on vbp_click_profile_entry(targetProcessRef)
   tell application "System Events"

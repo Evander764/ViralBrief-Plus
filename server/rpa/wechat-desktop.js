@@ -411,20 +411,20 @@ function friendlyWechatDesktopError(e) {
   if (e?.code === 'not_logged_in' || /登录|login/i.test(message)) {
     return '桌面微信未登录或视频号窗口不可用，请先手动登录微信';
   }
-  if (e?.code === 'channels_window_required' || /请先手动打开微信视频号|当前窗口不是视频号/.test(message)) {
+  if (e?.code === 'channels_window_required' || /当前窗口不是视频号/.test(message)) {
     return '请先确认程序坞里有微信视频号独立窗口图标，然后重试；本轮会点击该图标接管视频号窗口，不会从微信首页自动点击视频号入口';
   }
   if (e?.code === 'channels_dock_icon' || /未找到微信视频号程序坞图标/.test(message)) {
     return '没有找到微信视频号的程序坞图标：请先手动打开一次微信视频号，让底部程序坞出现绿色的视频号独立窗口图标后再重试';
   }
   if (e?.code === 'profile_entry' || /未找到视频号右上角人物头像/.test(message)) {
-    return '没有找到视频号右上角的小人入口：请确认你已经手动打开视频号窗口，且窗口右上角能看到小人图标';
+    return '没有找到视频号右上角的小人入口：请确认程序坞里的绿色视频号独立窗口图标已打开，且视频号窗口右上角能看到小人图标';
   }
   if (e?.code === 'open_following_overview' || /未找到左侧关注/.test(message)) {
     return '没有找到右上角小人入口后的左侧“关注”：请确认已进入赞和收藏/个人总览页，而不是顶部视频流“关注”页';
   }
   if (e?.code === 'wechat_window_empty' || /微信主窗口是空白窗口|没有暴露可操作控件/.test(message)) {
-    return '桌面微信当前没有暴露可操作控件；请先手动打开微信视频号窗口，停留在任意视频或视频号页面后再重试';
+    return '桌面微信当前没有暴露可操作控件；请先手动打开一次微信视频号，让程序坞出现绿色的视频号独立窗口图标后再重试';
   }
   return message || '桌面微信视频号自动化失败';
 }
@@ -877,7 +877,7 @@ on run
     if "${step}" is "assert_accessibility" then
       try
         set windowCount to count of windows of targetProcess
-        if windowCount < 1 then return my vbp_result(false, "not_logged_in", "ax", "桌面微信或视频号没有可用窗口；请先手动打开微信视频号")
+        if windowCount < 1 then return my vbp_result(false, "not_logged_in", "ax", "桌面微信或视频号没有可用窗口；请先手动打开一次微信视频号，让程序坞出现绿色的视频号独立窗口图标")
         set ignored to name of window 1 of targetProcess
       on error errMsg
         return my vbp_result(false, "accessibility", "ax", errMsg)
@@ -900,13 +900,13 @@ on run
       return my vbp_result(true, "activate_channels_dock_icon", "dock_icon", "已点击程序坞微信视频号图标，继续尝试接管窗口")
     else if "${step}" is "activate_existing_channels" then
       if my vbp_window_looks_preferences(targetProcess) then
-        return my vbp_result(false, "channels_window_required", "manual_channels_window", "当前窗口是微信设置页；请先手动打开微信视频号窗口")
+        return my vbp_result(false, "channels_window_required", "channels_dock_window", "当前窗口是微信设置页；请先让程序坞出现绿色的视频号独立窗口图标")
       end if
       if (my vbp_accessible_content_count(targetProcess)) < 1 then
-        return my vbp_result(false, "wechat_window_empty", "manual_channels_window", "当前微信窗口没有暴露可操作控件；请先手动打开微信视频号窗口")
+        return my vbp_result(false, "wechat_window_empty", "channels_dock_window", "当前微信窗口没有暴露可操作控件；请先让程序坞出现绿色的视频号独立窗口图标")
       end if
-      if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_existing_channels", "manual_channels_window", "已接管当前手动打开的视频号窗口")
-      return my vbp_result(false, "channels_window_required", "manual_channels_window", "当前窗口不是视频号；请先手动打开微信视频号窗口，停留在任意视频或视频号页面")
+      if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_existing_channels", "channels_dock_window", "已接管程序坞视频号独立窗口")
+      return my vbp_result(false, "channels_window_required", "channels_dock_window", "当前窗口不是视频号；请先点击程序坞里的绿色视频号独立窗口图标")
     else if "${step}" is "open_profile_entry" then
       if my vbp_click_profile_entry(targetProcess) then return my vbp_result(true, "open_profile_entry", "profile_icon", "已点击右上角小人入口")
       return my vbp_result(false, "profile_entry", "profile_icon", "未找到视频号右上角人物头像")

@@ -101,7 +101,7 @@ test('desktop WeChat patrol enters following overview once, opens nickname, and 
   assert.equal(evidence.share.label, '转发');
   assert.equal(evidence.favorite.label, '收藏/红心');
   assert.equal(evidence.favorite.position, 'right-bottom-favorite');
-  assert.match(evidence.navigation.method, /manual_channels_window|ax/);
+  assert.match(evidence.navigation.method, /channels_dock_window|ax/);
 });
 
 test('desktop WeChat patrol respects custom maxVideosPerAccount clamp', async () => {
@@ -124,7 +124,7 @@ test('desktop WeChat patrol records fixed-coordinate and protected-tab evidence'
   const acc = upsertAccount({ platform: 'wechat_channels', nickname: '坐标号', monitor_enabled: true });
   const runner = fakeRunner({
     methods: {
-      activate_existing_channels: 'manual_channels_window',
+      activate_existing_channels: 'channels_dock_window',
       activate_channels_dock_icon: 'dock_icon',
       cleanup_autoplay_tabs: 'protect_following_tab',
       open_following_overview: 'left_sidebar_only',
@@ -140,7 +140,7 @@ test('desktop WeChat patrol records fixed-coordinate and protected-tab evidence'
   assert.equal(result.success, 1);
   const item = get('SELECT * FROM contents WHERE account_id = ? AND platform = ?', [acc.id, 'wechat_channels']);
   const evidence = JSON.parse(item.metrics_evidence_json);
-  assert.match(evidence.navigation.method, /manual_channels_window/);
+  assert.match(evidence.navigation.method, /channels_dock_window/);
   assert.match(evidence.navigation.method, /dock_icon/);
   assert.match(evidence.navigation.method, /protect_following_tab/);
   assert.match(evidence.navigation.method, /left_sidebar_only/);
@@ -224,7 +224,7 @@ test('desktop WeChat parser accepts structured JSON result with long text delimi
 
 test('desktop WeChat AppleScript clicks the channels Dock icon before profile-first following', () => {
   const accessibilityScript = __wechatDesktopInternals.appleScriptForStep('assert_accessibility');
-  assert.match(accessibilityScript, /请先手动打开微信视频号/);
+  assert.match(accessibilityScript, /绿色的视频号独立窗口图标/);
   assert.doesNotMatch(accessibilityScript, /vbp_recover_blank_wechat_window/);
   assert.doesNotMatch(accessibilityScript, /Dock 微信图标中心/);
 
@@ -239,9 +239,10 @@ test('desktop WeChat AppleScript clicks the channels Dock icon before profile-fi
 
   const channelsScript = __wechatDesktopInternals.appleScriptForStep('activate_existing_channels');
   assert.match(channelsScript, /vbp_window_looks_channels/);
-  assert.match(channelsScript, /manual_channels_window/);
-  assert.match(channelsScript, /已接管当前手动打开的视频号窗口/);
-  assert.match(channelsScript, /请先手动打开微信视频号窗口|当前窗口不是视频号/);
+  assert.match(channelsScript, /channels_dock_window/);
+  assert.match(channelsScript, /已接管程序坞视频号独立窗口/);
+  assert.match(channelsScript, /绿色的视频号独立窗口图标|当前窗口不是视频号/);
+  assert.doesNotMatch(channelsScript, /停留在任意视频或视频号页面/);
   assert.doesNotMatch(channelsScript, /vbp_click_channels_sidebar_fixed/);
   assert.doesNotMatch(channelsScript, /vbp_click_wechat_dock_icon_center/);
   assert.doesNotMatch(channelsScript, /dock_center/);
@@ -262,6 +263,24 @@ test('desktop WeChat AppleScript clicks the channels Dock icon before profile-fi
   assert.match(cleanupScript, /protect_following_tab/);
   assert.match(cleanupScript, /keepTitle/);
   assert.match(cleanupScript, /label is not "关闭"/);
+});
+
+test('desktop WeChat friendly errors point to the Channels Dock icon', () => {
+  const { friendlyWechatDesktopError } = __wechatDesktopInternals;
+
+  const profileMessage = friendlyWechatDesktopError(
+    Object.assign(new Error('未找到视频号右上角人物头像'), { code: 'profile_entry' }),
+  );
+  assert.match(profileMessage, /程序坞/);
+  assert.match(profileMessage, /绿色视频号独立窗口图标/);
+  assert.doesNotMatch(profileMessage, /停留在任意视频/);
+
+  const emptyMessage = friendlyWechatDesktopError(
+    Object.assign(new Error('当前微信窗口没有暴露可操作控件'), { code: 'wechat_window_empty' }),
+  );
+  assert.match(emptyMessage, /程序坞/);
+  assert.match(emptyMessage, /绿色的视频号独立窗口图标/);
+  assert.doesNotMatch(emptyMessage, /停留在任意视频/);
 });
 
 test('desktop WeChat AppleScript collection skips pinned, expands text, maps metrics, and uses next arrow', () => {

@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, test } from 'node:test';
@@ -9,6 +9,13 @@ process.env.VBP_DATA_DIR = mkdtempSync(join(tmpdir(), 'vbp-desktop-video-'));
 const { upsertAccount } = await import('../server/store.js');
 const { get, run } = await import('../server/db.js');
 const { runWechatDesktopPatrol, __wechatDesktopInternals } = await import('../server/rpa/wechat-desktop.js');
+const {
+  parseTrafficLightOutput,
+  leftRailRegionFromAnchors,
+  locateChannelsIconByCode,
+  validateVisionLocatorPoint,
+  validateVisionLocatorResult,
+} = await import('../server/rpa/wechat-locator.js');
 
 beforeEach(() => {
   run('DELETE FROM contents');
@@ -265,6 +272,64 @@ test('desktop WeChat parser accepts structured JSON result with long text delimi
   assert.equal(parsed.detail, '文案里有 | 也能保留');
 });
 
+test('desktop WeChat locator reads traffic-light anchors by role and targets the butterfly Channels icon', async () => {
+  const anchors = parseTrafficLightOutput([
+    'WINDOW|微信|257|62|1201|768|0',
+    'BUTTON|zoom|全屏幕按钮|297|69|18|18',
+    'BUTTON|close|关闭按钮|261|69|18|18',
+    'BUTTON|minimize|最小化按钮|279|69|18|18',
+  ].join('\n'));
+
+  assert.equal(anchors.ok, true);
+  assert.equal(Math.round(anchors.buttons.close.centerX), 270);
+  assert.equal(Math.round(anchors.buttons.minimize.centerX), 288);
+  assert.equal(Math.round(anchors.buttons.zoom.centerX), 306);
+
+  const region = leftRailRegionFromAnchors(anchors);
+  assert.equal(region.x, 257);
+  assert.equal(region.y, 62);
+  assert.ok(region.width >= 108 && region.width <= 142);
+
+  const located = await locateChannelsIconByCode({
+    anchors,
+    clusters: [
+      { centerX: 60, centerY: 215, width: 44, height: 38 },
+      { centerX: 61, centerY: 326, width: 43, height: 44 },
+      { centerX: 60, centerY: 438, width: 45, height: 45 },
+      { centerX: 60, centerY: 550, width: 48, height: 48 },
+      { centerX: 60, centerY: 662, width: 52, height: 46 },
+      { centerX: 60, centerY: 773, width: 46, height: 46 },
+    ],
+  });
+
+  assert.equal(located.ok, true);
+  assert.equal(located.method, 'traffic_light_left_rail');
+  assert.equal(located.x, 317);
+  assert.equal(located.y, 612);
+  assert.ok(located.confidence >= 0.72);
+  assert.match(located.diagnostics, /蝴蝶形视频号图标/);
+});
+
+test('desktop WeChat locator refuses invalid or low-information vision coordinates', () => {
+  assert.equal(validateVisionLocatorResult({ x: 10, y: 20, confidence: 0.8 }), null);
+  assert.match(validateVisionLocatorResult({ x: 'left', y: 20, confidence: 0.8 }), /x 必须是数字/);
+  assert.match(validateVisionLocatorResult({ x: 10, y: 20, confidence: 'high' }), /confidence 必须是数字/);
+  assert.equal(validateVisionLocatorPoint({
+    px: 58,
+    py: 700,
+    imageWidth: 248,
+    imageHeight: 1536,
+    region: { width: 124, height: 768 },
+  }), null);
+  assert.match(validateVisionLocatorPoint({
+    px: 124,
+    py: 700,
+    imageWidth: 248,
+    imageHeight: 1536,
+    region: { width: 124, height: 768 },
+  }), /不在左侧图标列/);
+});
+
 test('desktop WeChat AppleScript opens Channels from the main WeChat page before Dock fallback', () => {
   const accessibilityScript = __wechatDesktopInternals.appleScriptForStep('assert_accessibility');
   assert.match(accessibilityScript, /桌面微信没有可用窗口/);
@@ -274,12 +339,16 @@ test('desktop WeChat AppleScript opens Channels from the main WeChat page before
   const mainScript = __wechatDesktopInternals.appleScriptForStep('activate_wechat_main_window');
   assert.match(mainScript, /com\.tencent\.xinWeChat/);
   assert.match(mainScript, /已激活微信主窗口并确认主页面可读取/);
+  assert.match(mainScript, /vbp_has_traffic_light_buttons/);
+  assert.match(mainScript, /红黄绿窗口按钮可读/);
   assert.match(mainScript, /wechat_main/);
 
   const mainEntryScript = __wechatDesktopInternals.appleScriptForStep('open_channels_from_main');
   assert.match(mainEntryScript, /vbp_click_main_channels_entry/);
   assert.match(mainEntryScript, /已从微信主页面进入视频号/);
   assert.match(mainEntryScript, /wechat_main_sidebar/);
+  assert.doesNotMatch(mainEntryScript, /\{210, 250, 290, 330\}/);
+  assert.doesNotMatch(mainEntryScript, /\+ 34, \(item 2 of wp\) \+ yOffset/);
   assert.doesNotMatch(mainEntryScript, /channels\.weixin/);
 
   const dockScript = __wechatDesktopInternals.appleScriptForStep('activate_channels_dock_icon');
@@ -344,7 +413,14 @@ test('desktop WeChat friendly errors prefer the main page and keep the Dock fall
     Object.assign(new Error('当前微信窗口没有暴露可操作控件'), { code: 'wechat_window_empty' }),
   );
   assert.match(emptyMessage, /微信主窗口已登录/);
+  assert.doesNotMatch(emptyMessage, /无法控制桌面微信/);
   assert.doesNotMatch(emptyMessage, /停留在任意视频/);
+
+  const emptyWithPermissionHint = friendlyWechatDesktopError(
+    Object.assign(new Error('微信主窗口没有暴露可操作控件；请确认微信主窗口已登录、可见，并允许本应用使用辅助功能'), { code: 'wechat_window_empty' }),
+  );
+  assert.match(emptyWithPermissionHint, /微信主窗口已登录/);
+  assert.doesNotMatch(emptyWithPermissionHint, /无法控制桌面微信/);
 
   const mainEntryMessage = friendlyWechatDesktopError(
     Object.assign(new Error('未在微信主页面找到视频号入口'), { code: 'main_channels_entry' }),
@@ -371,15 +447,14 @@ test('desktop WeChat AppleScript collection skips pinned, expands text, maps met
   assert.match(script, /\\"comment\\"/);
 });
 
-test('desktop WeChat screenshot fallback uses WeChat full screenshot shortcut only after three standard attempts', () => {
+test('desktop WeChat screenshots use only the system screenshot path', () => {
   assert.equal(__wechatDesktopInternals.WECHAT_SCREENSHOT_STANDARD_ATTEMPTS, 3);
-  const script = __wechatDesktopInternals.wechatScreenshotShortcutScript('/tmp/vbp-wechat-shortcut.png');
-  const selectionScript = __wechatDesktopInternals.wechatScreenshotSelectionSwiftScript();
-  assert.match(script, /keystroke "a" using \{control down, command down\}/);
-  assert.match(script, /the clipboard as «class PNGf»/);
-  assert.match(script, /write pngData to outFile/);
-  assert.match(selectionScript, /leftMouseDragged/);
-  assert.match(selectionScript, /virtualKey: 36/);
+  assert.equal(Object.hasOwn(__wechatDesktopInternals, ['wechatScreenshot', 'ShortcutScript'].join('')), false);
+  assert.equal(Object.hasOwn(__wechatDesktopInternals, ['wechatScreenshot', 'SelectionSwiftScript'].join('')), false);
+  const source = readFileSync(new URL('../server/rpa/wechat-desktop.js', import.meta.url), 'utf8');
+  assert.match(source, /screencapture/);
+  assert.doesNotMatch(source, new RegExp(['control', 'command'].join('.+')));
+  assert.doesNotMatch(source, new RegExp(['clip', 'board'].join('')));
 });
 
 test('desktop WeChat friendly errors distinguish left-sidebar following from top following', () => {

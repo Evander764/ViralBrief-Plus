@@ -8,6 +8,10 @@ import { loadConfig } from '../config.js';
 import { log } from '../lib/log.js';
 import { SCREENSHOTS_DIR } from '../lib/paths.js';
 import { sortPatrolAccounts } from './patrol.js';
+import {
+  clickWechatChannelsFromMainByLocator,
+  detectWechatChannelsVisibleByScreenshot,
+} from './wechat-locator.js';
 
 const execFileAsync = promisify(execFile);
 const PLATFORM = 'wechat_channels';
@@ -438,10 +442,10 @@ function beijingDateKey(now) {
 
 function friendlyWechatDesktopError(e) {
   const message = String(e?.message || e || '');
-  if (e?.code === 'accessibility' || /辅助功能|not allowed|not authorized|assistive access|accessibility/i.test(message)) {
+  if (e?.code === 'accessibility' || /辅助功能权限未开启|not allowed|not authorized|assistive access|accessibility/i.test(message)) {
     return '无法控制桌面微信：请在系统设置 > 隐私与安全性 > 辅助功能 中允许 Viral Brief Plus、node 或当前终端控制电脑';
   }
-  if (e?.code === 'not_logged_in' || /登录|login/i.test(message)) {
+  if (e?.code === 'not_logged_in' || /未登录|login/i.test(message)) {
     return '桌面微信未登录或视频号窗口不可用，请先手动登录微信';
   }
   if (e?.code === 'wechat_main_window') {
@@ -484,6 +488,25 @@ async function defaultWechatScriptRunner(step, payload = {}) {
   try {
     const { stdout, stderr } = await execFileAsync('osascript', ['-e', script], { timeout: 60_000 });
     const parsed = parseScriptResult(stdout, stderr);
+    if (step === 'open_channels_from_main' && !parsed.ok && parsed.code === 'main_channels_entry') {
+      const located = await clickWechatChannelsFromMainByLocator({ runner: execFileAsync });
+      if (located.ok) return located;
+      parsed.message = [parsed.message, located.message].filter(Boolean).join('；');
+      parsed.method = located.method || parsed.method;
+    }
+    if (step === 'activate_existing_channels' && !parsed.ok && ['channels_window_required', 'wechat_window_empty'].includes(parsed.code)) {
+      const visible = await detectWechatChannelsVisibleByScreenshot({ runner: execFileAsync });
+      if (visible.ok) {
+        return {
+          ok: true,
+          code: 'activate_existing_channels',
+          method: visible.method,
+          detail: visible.detail,
+        };
+      }
+      parsed.message = [parsed.message, visible.reason].filter(Boolean).join('；');
+      parsed.method = visible.method || parsed.method;
+    }
     if (step === 'activate_wechat_main_window' && parsed.ok) {
       const screenshotPath = await captureWechatDesktopScreenshot('wechat_main', {
         preferredBundleIds: ['com.tencent.xinWeChat', 'com.tencent.flue.WeChatAppEx'],
@@ -522,7 +545,6 @@ async function captureWechatDesktopScreenshot(label, options = {}) {
     const filename = `rpa_wechat_channels_home_${safe}_${Date.now()}.png`;
     const filepath = join(SCREENSHOTS_DIR, filename);
     if (await captureWechatStandardScreenshot(filepath, options)) return `screenshots/${filename}`;
-    if (await captureWechatShortcutScreenshot(filepath, options)) return `screenshots/${filename}`;
     return null;
   } catch (e) {
     log.warn(`[RPA] 微信视频号首页截图失败: ${screenshotErrorMessage(e)}`);
@@ -554,166 +576,6 @@ async function captureWechatStandardScreenshot(filepath, options = {}) {
   return false;
 }
 
-async function captureWechatShortcutScreenshot(filepath, options = {}) {
-  try {
-    const state = await getWechatScreenshotState(options);
-    await execFileAsync('osascript', ['-e', wechatScreenshotShortcutStartScript()], { timeout: 8_000 });
-    if (state?.region) {
-      try {
-        const points = wechatScreenshotSelectionPoints(state.region);
-        await execFileAsync('swift', ['-e', wechatScreenshotSelectionSwiftScript(), '--', points.x1, points.y1, points.x2, points.y2].map(String), { timeout: 8_000 });
-      } catch (e) {
-        log.warn(`[RPA] 微信视频号快捷键截图选区失败: ${screenshotErrorMessage(e)}`);
-      }
-    } else {
-      await sleep(1200);
-    }
-    const { stdout, stderr } = await execFileAsync('osascript', ['-e', wechatScreenshotClipboardSaveScript(filepath)], { timeout: 8_000 });
-    const text = String(stdout || stderr || '').trim();
-    if (/^OK\|/.test(text) && hasUsableScreenshotFile(filepath)) {
-      log.info('[RPA] 微信视频号已使用微信快捷键 Ctrl+Command+A 截图兜底');
-      return true;
-    }
-    log.warn(`[RPA] 微信视频号快捷键截图兜底失败: ${text || '未返回截图数据'}`);
-  } catch (e) {
-    log.warn(`[RPA] 微信视频号快捷键截图兜底失败: ${screenshotErrorMessage(e)}`);
-  }
-  return false;
-}
-
-function wechatScreenshotShortcutScript(filepath) {
-  const targetPath = appleString(filepath);
-  return `
-on run
-  my vbp_start_wechat_screenshot()
-  delay 1.5
-  return my vbp_save_screenshot_clipboard()
-end run
-
-on vbp_start_wechat_screenshot()
-  try
-    set the clipboard to ""
-  end try
-  tell application id "com.tencent.xinWeChat"
-    activate
-    reopen
-  end tell
-  delay 0.4
-  tell application "System Events"
-    keystroke "a" using {control down, command down}
-  end tell
-end vbp_start_wechat_screenshot
-
-on vbp_save_screenshot_clipboard()
-  try
-    set pngData to the clipboard as «class PNGf»
-    set outFile to open for access POSIX file ${targetPath} with write permission
-    set eof of outFile to 0
-    write pngData to outFile
-    close access outFile
-    return "OK|wechat_shortcut|saved"
-  on error errMsg
-    try
-      close access POSIX file ${targetPath}
-    end try
-    return "ERR|wechat_shortcut|" & errMsg
-  end try
-end vbp_save_screenshot_clipboard
-`;
-}
-
-function wechatScreenshotShortcutStartScript() {
-  return `
-on run
-  try
-    set the clipboard to ""
-  end try
-  tell application id "com.tencent.xinWeChat"
-    activate
-    reopen
-  end tell
-  delay 0.4
-  tell application "System Events"
-    keystroke "a" using {control down, command down}
-  end tell
-  return "OK|wechat_shortcut|started"
-end run
-`;
-}
-
-function wechatScreenshotClipboardSaveScript(filepath) {
-  const targetPath = appleString(filepath);
-  return `
-on run
-  try
-    set pngData to the clipboard as «class PNGf»
-    set outFile to open for access POSIX file ${targetPath} with write permission
-    set eof of outFile to 0
-    write pngData to outFile
-    close access outFile
-    return "OK|wechat_shortcut|saved"
-  on error errMsg
-    try
-      close access POSIX file ${targetPath}
-    end try
-    return "ERR|wechat_shortcut|" & errMsg
-  end try
-end run
-`;
-}
-
-function wechatScreenshotSelectionPoints(region) {
-  const inset = 18;
-  return {
-    x1: Math.round(region.x + inset),
-    y1: Math.round(region.y + inset),
-    x2: Math.round(region.x + region.width - inset),
-    y2: Math.round(region.y + region.height - inset),
-  };
-}
-
-function wechatScreenshotSelectionSwiftScript() {
-  return `
-import CoreGraphics
-import Darwin
-import Foundation
-
-let args = CommandLine.arguments
-guard args.count >= 5,
-      let x1 = Double(args[1]),
-      let y1 = Double(args[2]),
-      let x2 = Double(args[3]),
-      let y2 = Double(args[4]) else {
-  exit(2)
-}
-
-let source = CGEventSource(stateID: .hidSystemState)
-func postMouse(_ type: CGEventType, _ x: Double, _ y: Double) {
-  let point = CGPoint(x: x, y: y)
-  guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
-  event.post(tap: .cghidEventTap)
-}
-
-postMouse(.mouseMoved, x1, y1)
-usleep(120_000)
-postMouse(.leftMouseDown, x1, y1)
-for step in 1...18 {
-  let t = Double(step) / 18.0
-  postMouse(.leftMouseDragged, x1 + ((x2 - x1) * t), y1 + ((y2 - y1) * t))
-  usleep(18_000)
-}
-postMouse(.leftMouseUp, x2, y2)
-usleep(240_000)
-if let down = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true) {
-  down.post(tap: .cghidEventTap)
-}
-usleep(40_000)
-if let up = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) {
-  up.post(tap: .cghidEventTap)
-}
-`;
-}
-
 function hasUsableScreenshotFile(filepath) {
   try {
     return statSync(filepath).size > 1024;
@@ -727,7 +589,7 @@ function wechatScreenshotStateLooksVisible(state) {
   if (!state.region) return false;
   if (state.preferencesWindow) return false;
   if (state.protectedLargeWindow) return false;
-  return !!state.uiReady;
+  return !!(state.uiReady || state.sharedLargeWindow);
 }
 
 async function getWechatScreenshotState(options = {}) {
@@ -764,6 +626,11 @@ on run
           set widthValue to (item 1 of sizeValue) as integer
           set heightValue to (item 2 of sizeValue) as integer
           if widthValue > 100 and heightValue > 100 then
+            set contentCount to 0
+            try
+              set contentCount to count of entire contents of p
+            end try
+            if contentCount < 1 then return (xValue as text) & "|" & (yValue as text) & "|" & (widthValue as text) & "|" & (heightValue as text) & "|0|0"
             set dumpText to my vbp_visible_text_dump(p)
             set uiReady to "0"
             set preferencesWindow to "0"
@@ -966,7 +833,10 @@ on run
       set frontmost of targetProcess to true
       my vbp_raise_window(targetProcess)
       if my vbp_window_looks_preferences(targetProcess) then return my vbp_result(false, "wechat_main_window", "wechat_main", "当前窗口是微信设置页，请切回微信主页面；" & my vbp_context_diagnostics(targetProcess))
-      if (my vbp_accessible_content_count(targetProcess)) < 1 then return my vbp_result(false, "wechat_window_empty", "wechat_main", "微信主窗口没有暴露可操作控件；" & my vbp_context_diagnostics(targetProcess))
+      if (my vbp_accessible_content_count(targetProcess)) < 1 then
+        if my vbp_has_traffic_light_buttons(targetProcess) then return my vbp_result(true, "activate_wechat_main_window", "wechat_main_traffic_lights", "微信正文控件不可读，但红黄绿窗口按钮可读，继续使用左侧栏定位器；" & my vbp_context_diagnostics(targetProcess))
+        return my vbp_result(false, "wechat_window_empty", "wechat_main", "微信主窗口没有暴露可操作控件；" & my vbp_context_diagnostics(targetProcess))
+      end if
       return my vbp_result(true, "activate_wechat_main_window", "wechat_main", "已激活微信主窗口并确认主页面可读取")
     else if "${step}" is "open_channels_from_main" then
       if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "open_channels_from_main", "already_channels", "当前窗口已在视频号界面")
@@ -1089,6 +959,27 @@ on vbp_raise_window(targetProcessRef)
   end tell
 end vbp_raise_window
 
+on vbp_has_traffic_light_buttons(targetProcessRef)
+  tell application "System Events"
+    try
+      set foundClose to false
+      set foundMinimize to false
+      set foundZoom to false
+      set w to window 1 of targetProcessRef
+      repeat with i from 1 to 12
+        try
+          set descText to description of button i of w as text
+          if descText contains "关闭" or descText contains "close" then set foundClose to true
+          if descText contains "最小" or descText contains "minimize" then set foundMinimize to true
+          if descText contains "全屏" or descText contains "缩放" or descText contains "zoom" or descText contains "full" then set foundZoom to true
+        end try
+      end repeat
+      return foundClose and foundMinimize and foundZoom
+    end try
+  end tell
+  return false
+end vbp_has_traffic_light_buttons
+
 on vbp_click_channels_dock_icon()
   tell application "System Events"
     try
@@ -1168,25 +1059,6 @@ end vbp_click_dock_item_center
 on vbp_click_main_channels_entry(targetProcessRef)
   tell application "System Events"
     if my vbp_click_named_left_sidebar(targetProcessRef, {"视频号", "Channels"}) then return true
-    try
-      set w to window 1 of targetProcessRef
-      set wp to position of w
-      set ws to size of w
-      repeat with yOffset in {210, 250, 290, 330}
-        click at {(item 1 of wp) + 34, (item 2 of wp) + yOffset}
-        delay 0.7
-        set channelsProcess to my vbp_process("activate_existing_channels")
-        if channelsProcess is not missing value then
-          set visible of channelsProcess to true
-          set frontmost of channelsProcess to true
-          my vbp_raise_window(channelsProcess)
-          if my vbp_window_looks_channels(channelsProcess) then return true
-        end if
-        set visible of targetProcessRef to true
-        set frontmost of targetProcessRef to true
-        my vbp_raise_window(targetProcessRef)
-      end repeat
-    end try
   end tell
   return false
 end vbp_click_main_channels_entry
@@ -1743,12 +1615,14 @@ function appleString(value) {
   return `"${String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export const __wechatDesktopInternals = {
   appleScriptForStep,
   friendlyWechatDesktopError,
   parseScriptResult,
   normalizeWechatVideoCount,
-  wechatScreenshotShortcutScript,
-  wechatScreenshotSelectionSwiftScript,
   WECHAT_SCREENSHOT_STANDARD_ATTEMPTS,
 };

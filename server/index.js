@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { CDPClient } from './rpa/cdp.js';
 import { runPatrol, discoverFollowedCreators } from './rpa/patrol.js';
-import { combinePatrolResults } from './rpa/patrol-results.js';
+import { classifyPatrolResult, combinePatrolResults, patrolStatusMessage } from './rpa/patrol-results.js';
 import { runWechatDesktopPatrol } from './rpa/wechat-desktop.js';
 import { launchChrome, killChrome } from './rpa/chrome-launcher.js';
 import { beginPatrolRun, endPatrolRun, requestPatrolStop, getPatrolRunState } from './rpa/control.js';
@@ -312,12 +312,14 @@ async function handleApi(req, res, url, segs) {
         }));
       }
       const result = combinePatrolResults(stageResults);
+      const patrolStatus = classifyPatrolResult(result);
       return sendJson(res, 200, {
-        success: true,
-        message: result.stopped ? '自动巡检已停止。' : '自动巡检完成。',
-        platformComplete: !result.stopped,
+        ...result,
+        ok: patrolStatus === 'success',
+        patrolStatus,
+        message: patrolStatusMessage(patrolStatus),
+        platformComplete: patrolStatus === 'success',
         platforms,
-        ...result
       });
     } catch (e) {
       if (e.code === 'VBP_PATROL_ACTIVE') {

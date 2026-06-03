@@ -234,13 +234,18 @@ test('desktop WeChat AppleScript clicks the channels Dock icon before profile-fi
   assert.match(dockScript, /WeChatAppEx/);
   assert.match(dockScript, /wechatCount > 1/);
   assert.match(dockScript, /rightmostWechat/);
+  assert.match(dockScript, /vbp_dock_diagnostics/);
+  assert.match(dockScript, /当前微信窗口已验证为视频号界面/);
+  assert.match(dockScript, /当前窗口仍未验证为视频号/);
+  assert.doesNotMatch(dockScript, /继续尝试接管窗口/);
   assert.doesNotMatch(dockScript, /open_channels_home/);
   assert.doesNotMatch(dockScript, /vbp_click_channels_sidebar_fixed/);
 
   const channelsScript = __wechatDesktopInternals.appleScriptForStep('activate_existing_channels');
   assert.match(channelsScript, /vbp_window_looks_channels/);
+  assert.match(channelsScript, /vbp_context_diagnostics/);
   assert.match(channelsScript, /channels_dock_window/);
-  assert.match(channelsScript, /已接管程序坞视频号独立窗口/);
+  assert.match(channelsScript, /已接管并验证微信视频号窗口/);
   assert.match(channelsScript, /绿色的视频号独立窗口图标|当前窗口不是视频号/);
   assert.doesNotMatch(channelsScript, /停留在任意视频或视频号页面/);
   assert.doesNotMatch(channelsScript, /vbp_click_channels_sidebar_fixed/);
@@ -251,12 +256,21 @@ test('desktop WeChat AppleScript clicks the channels Dock icon before profile-fi
 
   const profileScript = __wechatDesktopInternals.appleScriptForStep('open_profile_entry');
   assert.match(profileScript, /vbp_click_profile_entry/);
+  assert.match(profileScript, /vbp_profile_entry_opened/);
+  assert.match(profileScript, /没有看到赞和收藏\/个人总览入口/);
   assert.match(profileScript, /右上角小人入口/);
+
+  const overviewScript = __wechatDesktopInternals.appleScriptForStep('open_overview');
+  assert.match(overviewScript, /vbp_window_looks_profile_overview/);
+  assert.match(overviewScript, /vbp_left_following_candidate_count/);
+  assert.match(overviewScript, /未找到赞和收藏\/个人总览入口/);
+  assert.doesNotMatch(overviewScript, /未发现需要额外点击的总览入口，继续查找左侧关注/);
 
   const followingScript = __wechatDesktopInternals.appleScriptForStep('open_following_overview');
   assert.match(followingScript, /vbp_click_left_following/);
+  assert.match(followingScript, /vbp_following_diagnostics/);
   assert.match(followingScript, /避免误点顶部关注/);
-  assert.match(followingScript, /0\.28/);
+  assert.match(followingScript, /0\.42/);
 
   const cleanupScript = __wechatDesktopInternals.appleScriptForStep('cleanup_autoplay_tabs', { keepTabTitle: '关注' });
   assert.match(cleanupScript, /vbp_cleanup_autoplay_tabs/);
@@ -281,6 +295,12 @@ test('desktop WeChat friendly errors point to the Channels Dock icon', () => {
   assert.match(emptyMessage, /程序坞/);
   assert.match(emptyMessage, /绿色的视频号独立窗口图标/);
   assert.doesNotMatch(emptyMessage, /停留在任意视频/);
+
+  const diagnosticMessage = friendlyWechatDesktopError(
+    Object.assign(new Error('未找到微信视频号程序坞图标；Dock候选=微信 / Safari；窗口诊断=bundle com.tencent.xinWeChat，窗口 微信'), { code: 'channels_dock_icon' }),
+  );
+  assert.match(diagnosticMessage, /Dock候选=微信 \/ Safari/);
+  assert.match(diagnosticMessage, /窗口诊断=bundle com\.tencent\.xinWeChat/);
 });
 
 test('desktop WeChat AppleScript collection skips pinned, expands text, maps metrics, and uses next arrow', () => {

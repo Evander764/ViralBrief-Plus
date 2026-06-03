@@ -209,9 +209,19 @@ $('#ovRunWechatPatrol').addEventListener('click', async (e) => {
       includePatrolledToday: true,
       stages: [WECHAT_PATROL_STAGE],
     });
-    const detail = `巡检账号 ${res.total || 0} 个，新增 ${res.newItems || 0} 条，今日跳过 ${res.skippedToday || 0} 个`;
-    $('#ovWechatMsg').textContent = `${res.stopped ? '已停止' : '完成'}：${detail}`;
-    toast(`${res.stopped ? '微信视频号巡检已停止' : '微信视频号巡检完成'}：${detail}`, res.stopped ? '' : 'ok');
+    const status = classifyPatrolSummary(res);
+    const detail = `巡检账号 ${res.total || 0} 个，成功 ${res.success || 0} 个，失败 ${res.failed || 0} 个，新增 ${res.newItems || 0} 条，今日跳过 ${res.skippedToday || 0} 个`;
+    const failureDetail = patrolFailureDetails(res);
+    if (status === 'failed') {
+      $('#ovWechatMsg').textContent = `巡检失败：${detail}${failureDetail ? `；${failureDetail}` : ''}`;
+      toast(`微信视频号巡检失败：${failureDetail || detail}`, 'bad');
+    } else if (status === 'partial') {
+      $('#ovWechatMsg').textContent = `部分失败：${detail}${failureDetail ? `；${failureDetail}` : ''}`;
+      toast(`微信视频号巡检部分失败：${failureDetail || detail}`, 'bad');
+    } else {
+      $('#ovWechatMsg').textContent = `${status === 'stopped' ? '已停止' : '完成'}：${detail}`;
+      toast(`${status === 'stopped' ? '微信视频号巡检已停止' : '微信视频号巡检完成'}：${detail}`, status === 'stopped' ? '' : 'ok');
+    }
     loadCandidates();
     loadOverview();
   } catch (err) {
@@ -262,13 +272,50 @@ function mergePatrolSummary(summary, res) {
   }
   summary.stopped ||= !!res?.stopped;
   summary.maxTabsPerBatch ||= res?.maxTabsPerBatch || res?.maxTabsPerPlatform || 0;
+  summary.details.push(...(res?.details || []));
+  summary.stages.push(res);
+  summary.patrolStatus = classifyPatrolSummary(summary);
   return summary;
+}
+
+function classifyPatrolSummary(res = {}) {
+  if (res.stopped) return 'stopped';
+  const failed = Number(res.failed || 0);
+  const success = Number(res.success || 0);
+  if (failed > 0 && success === 0) return 'failed';
+  if (failed > 0) return 'partial';
+  return 'success';
+}
+
+function patrolFailureDetails(res = {}) {
+  const detailRows = (res.details || [])
+    .filter((row) => row && (row.status === 'error' || row.error))
+    .map((row) => {
+      const label = row.nickname || row.accountId || PLATFORM_LABEL[row.platform] || '账号';
+      return `${label}：${row.error || '巡检失败'}`;
+    });
+  const unique = [...new Set(detailRows)];
+  if (!unique.length && res.message) unique.push(res.message);
+  return unique.slice(0, 3).join('；');
 }
 
 async function runPatrolStages(progressText = null, options = {}) {
   const includePatrolledToday = options.includePatrolledToday === true;
   const stages = Array.isArray(options.stages) && options.stages.length ? options.stages : WEB_PATROL_STAGES;
-  const summary = { total: 0, success: 0, failed: 0, newItems: 0, duplicates: 0, discovered: 0, skippedToday: 0, stopped: false, maxTabsPerBatch: 0 };
+  const summary = {
+    total: 0,
+    success: 0,
+    failed: 0,
+    newItems: 0,
+    duplicates: 0,
+    discovered: 0,
+    skippedToday: 0,
+    stopped: false,
+    maxTabsPerBatch: 0,
+    details: [],
+    stages: [],
+    patrolStatus: 'success',
+  };
   const cfg = await api('/settings');
   const wechatVideosPerAccount = cfg.rpa?.wechatVideosPerAccount || 3;
   for (const stage of stages) {
@@ -314,6 +361,12 @@ async function generateReport(win, msgEl, skipRpa = false, options = {}) {
         msgEl.textContent = '已停止巡检，未生成日报。';
         return;
       }
+      const patrolStatus = classifyPatrolSummary(patrolSummary);
+      if (patrolStatus === 'failed') {
+        msgEl.textContent = `巡检失败，未生成${reportLabel}：${patrolFailureDetails(patrolSummary) || '所有账号均未巡检成功'}`;
+        toast(msgEl.textContent, 'bad');
+        return;
+      }
       if (progressText) progressText.textContent = `巡检完成，正在调用模型生成${reportLabel}...`;
     }
     const r = await api('/reports/generate', {
@@ -330,9 +383,11 @@ async function generateReport(win, msgEl, skipRpa = false, options = {}) {
 
     let detail = `${reportType === 'wechat' ? '内容' : '达标'} ${r.eligibleCount} 条`;
     if (patrolSummary) {
-      detail += ` | 巡检账号 ${patrolSummary.total}, 新增 ${patrolSummary.newItems}, 去重 ${patrolSummary.duplicates}, 今日跳过 ${patrolSummary.skippedToday}`;
+      detail += ` | 巡检账号 ${patrolSummary.total}, 成功 ${patrolSummary.success}, 失败 ${patrolSummary.failed}, 新增 ${patrolSummary.newItems}, 去重 ${patrolSummary.duplicates}, 今日跳过 ${patrolSummary.skippedToday}`;
+      const failureDetail = patrolFailureDetails(patrolSummary);
+      if (failureDetail) detail += ` | 失败原因：${failureDetail}`;
     } else if (r.patrolResult) {
-      detail += ` | 巡检账号 ${r.patrolResult.total || 0}, 采集新增 ${r.patrolResult.newItems}, 去重 ${r.patrolResult.duplicates}`;
+      detail += ` | 巡检账号 ${r.patrolResult.total || 0}, 成功 ${r.patrolResult.success || 0}, 失败 ${r.patrolResult.failed || 0}, 采集新增 ${r.patrolResult.newItems}, 去重 ${r.patrolResult.duplicates}`;
     } else if (r.rpaError) {
       detail += ` | RPA 未完成：${r.rpaError}`;
     }

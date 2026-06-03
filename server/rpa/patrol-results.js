@@ -27,3 +27,19 @@ export function combinePatrolResults(results = []) {
 
   return out;
 }
+
+export function classifyPatrolResult(result = {}) {
+  if (result.stopped) return 'stopped';
+  const failed = Number(result.failed || 0);
+  const success = Number(result.success || 0);
+  if (failed > 0 && success === 0) return 'failed';
+  if (failed > 0) return 'partial';
+  return 'success';
+}
+
+export function patrolStatusMessage(status) {
+  if (status === 'stopped') return '自动巡检已停止。';
+  if (status === 'failed') return '自动巡检失败。';
+  if (status === 'partial') return '自动巡检部分失败。';
+  return '自动巡检完成。';
+}

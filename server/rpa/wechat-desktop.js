@@ -412,21 +412,32 @@ function friendlyWechatDesktopError(e) {
     return '桌面微信未登录或视频号窗口不可用，请先手动登录微信';
   }
   if (e?.code === 'channels_window_required' || /当前窗口不是视频号/.test(message)) {
-    return '请先确认程序坞里有微信视频号独立窗口图标，然后重试；本轮会点击该图标接管视频号窗口，不会从微信首页自动点击视频号入口';
+    return appendWechatDiagnostics('请先确认程序坞里有微信视频号独立窗口图标，或把当前微信窗口手动切到视频号页面后重试；本轮会点击该图标接管视频号窗口，不会从微信首页自动点击视频号入口', message);
   }
   if (e?.code === 'channels_dock_icon' || /未找到微信视频号程序坞图标/.test(message)) {
-    return '没有找到微信视频号的程序坞图标：请先手动打开一次微信视频号，让底部程序坞出现绿色的视频号独立窗口图标后再重试';
+    return appendWechatDiagnostics('没有找到微信视频号的程序坞图标：请先手动打开一次微信视频号，让底部程序坞出现绿色的视频号独立窗口图标后再重试', message);
   }
   if (e?.code === 'profile_entry' || /未找到视频号右上角人物头像/.test(message)) {
-    return '没有找到视频号右上角的小人入口：请确认程序坞里的绿色视频号独立窗口图标已打开，且视频号窗口右上角能看到小人图标';
+    return appendWechatDiagnostics('没有确认打开视频号右上角的小人入口：请确认程序坞里的绿色视频号独立窗口图标已打开，且视频号窗口右上角能看到小人图标', message);
   }
   if (e?.code === 'open_following_overview' || /未找到左侧关注/.test(message)) {
-    return '没有找到右上角小人入口后的左侧“关注”：请确认已进入赞和收藏/个人总览页，而不是顶部视频流“关注”页';
+    return appendWechatDiagnostics('没有找到右上角小人入口后的左侧“关注”：请确认已进入赞和收藏/个人总览页，而不是顶部视频流“关注”页', message);
+  }
+  if (e?.code === 'open_overview' || /总览入口/.test(message)) {
+    return appendWechatDiagnostics('没有确认进入视频号个人总览页：请确认右上角小人入口打开后能看到“赞和收藏”或“我的视频号”等入口', message);
   }
   if (e?.code === 'wechat_window_empty' || /微信主窗口是空白窗口|没有暴露可操作控件/.test(message)) {
-    return '桌面微信当前没有暴露可操作控件；请先手动打开一次微信视频号，让程序坞出现绿色的视频号独立窗口图标后再重试';
+    return appendWechatDiagnostics('桌面微信当前没有暴露可操作控件；请先手动打开一次微信视频号，让程序坞出现绿色的视频号独立窗口图标后再重试', message);
   }
   return message || '桌面微信视频号自动化失败';
+}
+
+function appendWechatDiagnostics(base, message) {
+  const diagnostics = String(message || '')
+    .split('；')
+    .map((part) => part.trim())
+    .filter((part) => /Dock候选|窗口诊断|关注候选/.test(part));
+  return diagnostics.length ? `${base}；${diagnostics.join('；')}` : base;
 }
 
 async function defaultWechatScriptRunner(step, payload = {}) {
@@ -886,8 +897,8 @@ on run
     else if "${step}" is "activate_channels_dock_icon" then
       set dockResult to my vbp_click_channels_dock_icon()
       if dockResult does not contain "CLICKED|" then
-        if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_channels_dock_icon", "already_visible", "当前视频号窗口已可见")
-        return my vbp_result(false, "channels_dock_icon", "dock_icon", "未找到微信视频号程序坞图标")
+        if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_channels_dock_icon", "already_visible", "当前微信窗口已验证为视频号界面")
+        return my vbp_result(false, "channels_dock_icon", "dock_icon", "未找到微信视频号程序坞图标；" & my vbp_dock_diagnostics() & "；" & my vbp_context_diagnostics(targetProcess))
       end if
       delay 1.0
       set targetProcess to my vbp_process("${step}")
@@ -896,26 +907,34 @@ on run
         set frontmost of targetProcess to true
         my vbp_raise_window(targetProcess)
         if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_channels_dock_icon", "dock_icon", "已点击程序坞微信视频号图标并接管窗口")
+        return my vbp_result(false, "channels_window_required", "dock_icon", "已点击程序坞微信视频号图标，但当前窗口仍未验证为视频号；" & my vbp_context_diagnostics(targetProcess))
       end if
-      return my vbp_result(true, "activate_channels_dock_icon", "dock_icon", "已点击程序坞微信视频号图标，继续尝试接管窗口")
+      return my vbp_result(false, "channels_window_required", "dock_icon", "已点击程序坞微信视频号图标，但没有找到可接管的微信窗口；" & my vbp_dock_diagnostics())
     else if "${step}" is "activate_existing_channels" then
       if my vbp_window_looks_preferences(targetProcess) then
-        return my vbp_result(false, "channels_window_required", "channels_dock_window", "当前窗口是微信设置页；请先让程序坞出现绿色的视频号独立窗口图标")
+        return my vbp_result(false, "channels_window_required", "channels_dock_window", "当前窗口是微信设置页；请先让程序坞出现绿色的视频号独立窗口图标；" & my vbp_context_diagnostics(targetProcess))
       end if
       if (my vbp_accessible_content_count(targetProcess)) < 1 then
-        return my vbp_result(false, "wechat_window_empty", "channels_dock_window", "当前微信窗口没有暴露可操作控件；请先让程序坞出现绿色的视频号独立窗口图标")
+        return my vbp_result(false, "wechat_window_empty", "channels_dock_window", "当前微信窗口没有暴露可操作控件；请先让程序坞出现绿色的视频号独立窗口图标；" & my vbp_context_diagnostics(targetProcess))
       end if
-      if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_existing_channels", "channels_dock_window", "已接管程序坞视频号独立窗口")
-      return my vbp_result(false, "channels_window_required", "channels_dock_window", "当前窗口不是视频号；请先点击程序坞里的绿色视频号独立窗口图标")
+      if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_existing_channels", "channels_dock_window", "已接管并验证微信视频号窗口")
+      return my vbp_result(false, "channels_window_required", "channels_dock_window", "当前窗口不是视频号；请先点击程序坞里的绿色视频号独立窗口图标；" & my vbp_context_diagnostics(targetProcess))
     else if "${step}" is "open_profile_entry" then
-      if my vbp_click_profile_entry(targetProcess) then return my vbp_result(true, "open_profile_entry", "profile_icon", "已点击右上角小人入口")
-      return my vbp_result(false, "profile_entry", "profile_icon", "未找到视频号右上角人物头像")
+      if my vbp_click_profile_entry(targetProcess) then
+        if my vbp_profile_entry_opened(targetProcess) then return my vbp_result(true, "open_profile_entry", "profile_icon", "已点击右上角小人入口，并确认出现个人总览入口")
+        return my vbp_result(false, "profile_entry", "profile_icon", "已点击右上角小人入口，但没有看到赞和收藏/个人总览入口；" & my vbp_context_diagnostics(targetProcess))
+      end if
+      return my vbp_result(false, "profile_entry", "profile_icon", "未找到视频号右上角人物头像；" & my vbp_context_diagnostics(targetProcess))
     else if "${step}" is "open_overview" then
-      if my vbp_click_named(targetProcess, {"赞和收藏", "我的视频号", "个人中心", "个人主页"}, false) then return my vbp_result(true, "open_overview", "ax", "已进入赞和收藏/个人总览页")
-      return my vbp_result(true, "open_overview", "already_on_overview", "未发现需要额外点击的总览入口，继续查找左侧关注")
+      if my vbp_window_looks_profile_overview(targetProcess) or (my vbp_left_following_candidate_count(targetProcess)) > 0 then return my vbp_result(true, "open_overview", "already_on_overview", "已确认当前在个人总览/关注入口页")
+      if my vbp_click_named(targetProcess, {"赞和收藏", "我的视频号", "个人中心", "个人主页"}, false) then
+        if my vbp_window_looks_profile_overview(targetProcess) or (my vbp_left_following_candidate_count(targetProcess)) > 0 then return my vbp_result(true, "open_overview", "ax", "已进入赞和收藏/个人总览页")
+        return my vbp_result(false, "open_overview", "ax", "已点击总览入口，但没有确认进入个人总览；" & my vbp_context_diagnostics(targetProcess))
+      end if
+      return my vbp_result(false, "open_overview", "ax", "未找到赞和收藏/个人总览入口；" & my vbp_context_diagnostics(targetProcess))
     else if "${step}" is "open_following_overview" then
-      if my vbp_click_left_following(targetProcess) then return my vbp_result(true, "open_following_overview", "left_sidebar_only", "已点击个人总览左侧关注")
-      return my vbp_result(false, "open_following_overview", "left_sidebar_only", "未找到左侧关注，避免误点顶部关注")
+      if my vbp_click_left_following(targetProcess) then return my vbp_result(true, "open_following_overview", "left_sidebar_only", "已点击个人总览左侧关注；" & my vbp_following_diagnostics(targetProcess))
+      return my vbp_result(false, "open_following_overview", "left_sidebar_only", "未找到左侧关注，避免误点顶部关注；" & my vbp_following_diagnostics(targetProcess) & "；" & my vbp_context_diagnostics(targetProcess))
     else if "${step}" is "cleanup_autoplay_tabs" then
       return my vbp_result(true, "cleanup_autoplay_tabs", "protect_following_tab", my vbp_cleanup_autoplay_tabs(targetProcess, ${keepTabTitle}))
     else if "${step}" is "open_creator" then
@@ -1010,6 +1029,23 @@ on vbp_dock_label(dockItem)
   return parts as text
 end vbp_dock_label
 
+on vbp_dock_diagnostics()
+  tell application "System Events"
+    try
+      tell process "Dock"
+        set labels to {}
+        repeat with dockItem in UI elements of list 1
+          set labelText to my vbp_dock_label(dockItem)
+          if labelText is not "" then set end of labels to labelText
+          if (count of labels) >= 24 then exit repeat
+        end repeat
+        return "Dock候选=" & my vbp_join_list(labels, " / ")
+      end tell
+    end try
+  end tell
+  return "Dock候选=无法读取"
+end vbp_dock_diagnostics
+
 on vbp_click_dock_item_center(dockItem, labelText)
   try
     set p to position of dockItem
@@ -1056,6 +1092,82 @@ on vbp_window_looks_channels(targetProcessRef)
   end try
   return false
 end vbp_window_looks_channels
+
+on vbp_window_looks_profile_overview(targetProcessRef)
+  try
+    set dumpText to my vbp_visible_text_dump(targetProcessRef)
+    if dumpText contains "赞和收藏" then return true
+    if dumpText contains "我的视频号" then return true
+    if dumpText contains "浏览记录" then return true
+    if dumpText contains "个人主页" then return true
+    if dumpText contains "关注" and dumpText contains "粉丝" then return true
+  end try
+  return false
+end vbp_window_looks_profile_overview
+
+on vbp_profile_entry_opened(targetProcessRef)
+  if my vbp_window_looks_profile_overview(targetProcessRef) then return true
+  try
+    set dumpText to my vbp_visible_text_dump(targetProcessRef)
+    if dumpText contains "赞和收藏" or dumpText contains "我的视频号" or dumpText contains "个人中心" or dumpText contains "个人主页" then return true
+  end try
+  return false
+end vbp_profile_entry_opened
+
+on vbp_left_following_candidate_count(targetProcessRef)
+  tell application "System Events"
+    set countValue to 0
+    try
+      set w to window 1 of targetProcessRef
+      set wp to position of w
+      set ws to size of w
+      repeat with el in entire contents of targetProcessRef
+        set label to my vbp_text(el)
+        if label contains "关注" then
+          try
+            set p to position of el
+            if (item 1 of p) < (item 1 of wp) + ((item 1 of ws) * 0.42) and (item 2 of p) > (item 2 of wp) + 80 then set countValue to countValue + 1
+          end try
+        end if
+      end repeat
+    end try
+    return countValue
+  end tell
+end vbp_left_following_candidate_count
+
+on vbp_context_diagnostics(targetProcessRef)
+  tell application "System Events"
+    try
+      set bidText to ""
+      set procName to ""
+      set windowName to ""
+      set contentCount to 0
+      try
+        set bidText to bundle identifier of targetProcessRef as text
+      end try
+      try
+        set procName to name of targetProcessRef as text
+      end try
+      try
+        set windowName to name of window 1 of targetProcessRef as text
+      end try
+      try
+        set contentCount to count of entire contents of targetProcessRef
+      end try
+      set dumpText to my vbp_visible_text_dump(targetProcessRef)
+      set signals to {}
+      if dumpText contains "视频号" then set end of signals to "视频号"
+      if dumpText contains "关注" then set end of signals to "关注"
+      if dumpText contains "赞和收藏" then set end of signals to "赞和收藏"
+      if dumpText contains "我的视频号" then set end of signals to "我的视频号"
+      if dumpText contains "展开" then set end of signals to "展开"
+      if dumpText contains "评论" then set end of signals to "评论"
+      if dumpText contains "收藏" then set end of signals to "收藏"
+      return "窗口诊断=bundle " & bidText & "，进程 " & procName & "，窗口 " & windowName & "，控件 " & (contentCount as text) & "，信号 " & my vbp_join_list(signals, "/") & "，文本片段 " & my vbp_compact_text(dumpText, 260)
+    end try
+  end tell
+  return "窗口诊断=无法读取"
+end vbp_context_diagnostics
 
 on vbp_text(el)
   tell application "System Events"
@@ -1122,22 +1234,53 @@ on vbp_click_left_following(targetProcessRef)
     set w to window 1 of targetProcessRef
     set wp to position of w
     set ws to size of w
-    repeat with el in entire contents of targetProcessRef
-      set label to my vbp_text(el)
-      if label contains "关注" then
-        try
-          set p to position of el
-          if item 1 of p < (item 1 of wp) + ((item 1 of ws) * 0.28) then
-            click el
-            delay 1.1
-            return true
-          end if
-        end try
-      end if
+    repeat with cutoffFactor in {0.34, 0.42}
+      repeat with el in entire contents of targetProcessRef
+        set label to my vbp_text(el)
+        if label contains "关注" then
+          try
+            set p to position of el
+            set s to size of el
+            if (item 1 of p) < (item 1 of wp) + ((item 1 of ws) * cutoffFactor) and (item 2 of p) > (item 2 of wp) + 80 and (item 2 of p) < (item 2 of wp) + (item 2 of ws) - 40 then
+              if (item 1 of s) < ((item 1 of ws) * 0.5) then
+                click el
+                delay 1.1
+                return true
+              end if
+            end if
+          end try
+        end if
+      end repeat
     end repeat
   end tell
   return false
 end vbp_click_left_following
+
+on vbp_following_diagnostics(targetProcessRef)
+  tell application "System Events"
+    try
+      set w to window 1 of targetProcessRef
+      set wp to position of w
+      set ws to size of w
+      set allCount to 0
+      set leftCount to 0
+      set samples to {}
+      repeat with el in entire contents of targetProcessRef
+        set label to my vbp_text(el)
+        if label contains "关注" then
+          set allCount to allCount + 1
+          try
+            set p to position of el
+            if (item 1 of p) < (item 1 of wp) + ((item 1 of ws) * 0.42) and (item 2 of p) > (item 2 of wp) + 80 then set leftCount to leftCount + 1
+            if (count of samples) < 6 then set end of samples to my vbp_compact_text(label, 28) & "@(" & ((item 1 of p) as text) & "," & ((item 2 of p) as text) & ")"
+          end try
+        end if
+      end repeat
+      return "关注候选=全部 " & (allCount as text) & "，左侧 " & (leftCount as text) & "，样本 " & my vbp_join_list(samples, " / ")
+    end try
+  end tell
+  return "关注候选=无法读取"
+end vbp_following_diagnostics
 
 on vbp_cleanup_autoplay_tabs(targetProcessRef, keepTitle)
   set closedText to my vbp_close_non_following_tabs(targetProcessRef, keepTitle)
@@ -1376,6 +1519,23 @@ on vbp_looks_metric(valueText)
   end repeat
   return true
 end vbp_looks_metric
+
+on vbp_join_list(valueList, delimiterText)
+  if (count of valueList) is 0 then return "无"
+  set oldDelimiters to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to delimiterText
+  set joinedText to valueList as text
+  set AppleScript's text item delimiters to oldDelimiters
+  return joinedText
+end vbp_join_list
+
+on vbp_compact_text(valueText, maxLen)
+  set s to valueText as text
+  set s to my vbp_replace(s, return, " ")
+  set s to my vbp_replace(s, linefeed, " ")
+  if length of s > maxLen then return (text 1 thru maxLen of s) & "..."
+  return s
+end vbp_compact_text
 
 on vbp_return_wechat_home(targetProcessRef)
   tell application "System Events"

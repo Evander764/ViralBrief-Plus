@@ -93,7 +93,7 @@ POST /api/patrol/run
 }
 ```
 
-前端网页巡检会先调用一次 `platform = "xiaohongshu"`，完成后再调用一次 `platform = "douyin"`；微信视频号巡检单独调用 `platform = "wechat_channels"`。服务端也仍支持 `platforms: ["xiaohongshu", "douyin"]` 的兼容写法。`maxTabsPerBatch` 默认 6，允许 1-10。
+前端网页巡检会先调用一次 `platform = "xiaohongshu"`，完成后再调用一次 `platform = "douyin"`；微信视频号巡检单独调用 `platform = "wechat_channels"`，只操作 macOS 微信客户端：主微信窗口入口优先，绿色视频号独立 Dock 图标兜底，不使用网页版视频号。服务端也仍支持 `platforms: ["xiaohongshu", "douyin"]` 的兼容写法。`maxTabsPerBatch` 默认 6，允许 1-10。
 
 巡检按平台分批打开账号主页。详情页读取后先记录发布时间和互动指标，只要详情可采就截图并保存；缺少发布时间、未达阈值、标题不匹配不会在巡检阶段被丢弃。小红书详情页会优先读取标题/正文下方“编辑于”区域，抖音详情页会优先读取“举报”附近的可见发布日期；数据库已采集重复只记录去重，不直接结束账号；如果非置顶详情读到的日期早于本次窗口，保存该条后结束当前博主巡检。正式日报在巡检结束后再用 `recomputeAll` / `getEligible` 按窗口、账号池、确认状态和平台必需指标筛选。
 

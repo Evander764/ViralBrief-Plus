@@ -136,17 +136,40 @@ async function patrolWechatDesktopAccount(acc, { index, total, progress, scriptR
 }
 
 export async function prepareWechatChannelsFollowing({ scriptRunner = defaultWechatScriptRunner, progress = () => {} } = {}) {
-  const steps = [
-    ['assert_accessibility', {}],
-    ['activate_channels_dock_icon', {}],
-    ['activate_existing_channels', {}],
+  const evidence = [];
+  evidence.push(await runStep(scriptRunner, 'assert_accessibility', {}, progress));
+
+  try {
+    for (const [step, payload] of [
+      ['activate_wechat_main_window', {}],
+      ['open_channels_from_main', {}],
+      ['activate_existing_channels', {}],
+    ]) {
+      evidence.push(await runStep(scriptRunner, step, payload, progress));
+    }
+  } catch (mainEntryError) {
+    progress(`  微信主页面入口不可用，改用视频号独立窗口兜底：${friendlyWechatDesktopError(mainEntryError)}`);
+    try {
+      for (const [step, payload] of [
+        ['activate_channels_dock_icon', {}],
+        ['activate_existing_channels', {}],
+      ]) {
+        evidence.push(await runStep(scriptRunner, step, payload, progress));
+      }
+    } catch (dockEntryError) {
+      throw new WechatDesktopPatrolError(
+        dockEntryError.code || 'channels_entry',
+        `微信主页面入口失败：${friendlyWechatDesktopError(mainEntryError)}；独立窗口兜底失败：${friendlyWechatDesktopError(dockEntryError)}`,
+      );
+    }
+  }
+
+  for (const [step, payload] of [
     ['open_profile_entry', {}],
     ['open_overview', {}],
     ['open_following_overview', {}],
     ['cleanup_autoplay_tabs', { keepTabTitle: '关注' }],
-  ];
-  const evidence = [];
-  for (const [step, payload] of steps) {
+  ]) {
     evidence.push(await runStep(scriptRunner, step, payload, progress));
   }
   return {
@@ -167,12 +190,22 @@ async function cleanupWechatChannelsSession({ scriptRunner, progress }) {
 }
 
 async function collectWechatDesktopLatestVideos(acc, { scriptRunner, progress, count }) {
-  const r = await runStep(scriptRunner, 'collect_latest_videos', { nickname: acc.nickname, count }, progress);
-  const items = Array.isArray(r.items) ? r.items : parseCollectedVideos(r.detail);
-  return items
-    .filter((item) => item && String(item.title || item.bodyExcerpt || item.body_excerpt || '').trim())
-    .slice(0, count)
-    .map((item, index) => normalizeWechatVideoItem(item, index));
+  const items = [];
+  for (let index = 0; index < count; index++) {
+    if (index === 0) {
+      await runStep(scriptRunner, 'open_first_non_pinned_video', { nickname: acc.nickname }, progress);
+    } else {
+      const next = await runStep(scriptRunner, 'go_next_video', { nickname: acc.nickname, index: index + 1 }, progress, { optional: true });
+      if (!next.ok) break;
+    }
+    const r = await runStep(scriptRunner, 'collect_current_video', { nickname: acc.nickname, index: index + 1 }, progress, { optional: true });
+    if (!r.ok) break;
+    const item = Array.isArray(r.items) ? r.items[0] : parseCollectedVideos(r.detail)[0];
+    if (item && String(item.title || item.bodyExcerpt || item.body_excerpt || '').trim()) {
+      items.push(normalizeWechatVideoItem(item, index));
+    }
+  }
+  return items;
 }
 
 async function runStep(scriptRunner, step, payload, progress, { optional = false } = {}) {
@@ -411,14 +444,20 @@ function friendlyWechatDesktopError(e) {
   if (e?.code === 'not_logged_in' || /登录|login/i.test(message)) {
     return '桌面微信未登录或视频号窗口不可用，请先手动登录微信';
   }
+  if (e?.code === 'wechat_main_window') {
+    return appendWechatDiagnostics('无法从微信主页面开始巡检：请确认微信主窗口已打开且不在设置页', message);
+  }
+  if (e?.code === 'main_channels_entry') {
+    return appendWechatDiagnostics('没有从微信主页面进入视频号：请确认微信主窗口左侧有“视频号”入口；系统会继续尝试绿色视频号独立窗口兜底', message);
+  }
   if (e?.code === 'channels_window_required' || /当前窗口不是视频号/.test(message)) {
-    return appendWechatDiagnostics('请先确认程序坞里有微信视频号独立窗口图标，或把当前微信窗口手动切到视频号页面后重试；本轮会点击该图标接管视频号窗口，不会从微信首页自动点击视频号入口', message);
+    return appendWechatDiagnostics('请确认微信主页面能进入视频号，或程序坞里已有绿色的视频号独立窗口图标可作兜底', message);
   }
   if (e?.code === 'channels_dock_icon' || /未找到微信视频号程序坞图标/.test(message)) {
-    return appendWechatDiagnostics('没有找到微信视频号的程序坞图标：请先手动打开一次微信视频号，让底部程序坞出现绿色的视频号独立窗口图标后再重试', message);
+    return appendWechatDiagnostics('主页面入口失败后，也没有找到微信视频号的程序坞兜底图标：请先确认微信主窗口左侧视频号入口可见，或手动打开一次微信视频号让底部程序坞出现绿色的视频号独立窗口图标', message);
   }
   if (e?.code === 'profile_entry' || /未找到视频号右上角人物头像/.test(message)) {
-    return appendWechatDiagnostics('没有确认打开视频号右上角的小人入口：请确认程序坞里的绿色视频号独立窗口图标已打开，且视频号窗口右上角能看到小人图标', message);
+    return appendWechatDiagnostics('没有确认打开视频号右上角的小人入口：请确认当前已进入视频号界面，且窗口右上角能看到小人图标', message);
   }
   if (e?.code === 'open_following_overview' || /未找到左侧关注/.test(message)) {
     return appendWechatDiagnostics('没有找到右上角小人入口后的左侧“关注”：请确认已进入赞和收藏/个人总览页，而不是顶部视频流“关注”页', message);
@@ -427,7 +466,7 @@ function friendlyWechatDesktopError(e) {
     return appendWechatDiagnostics('没有确认进入视频号个人总览页：请确认右上角小人入口打开后能看到“赞和收藏”或“我的视频号”等入口', message);
   }
   if (e?.code === 'wechat_window_empty' || /微信主窗口是空白窗口|没有暴露可操作控件/.test(message)) {
-    return appendWechatDiagnostics('桌面微信当前没有暴露可操作控件；请先手动打开一次微信视频号，让程序坞出现绿色的视频号独立窗口图标后再重试', message);
+    return appendWechatDiagnostics('桌面微信当前没有暴露可操作控件；请确认微信主窗口已登录、可见，并允许本应用使用辅助功能', message);
   }
   return message || '桌面微信视频号自动化失败';
 }
@@ -445,6 +484,18 @@ async function defaultWechatScriptRunner(step, payload = {}) {
   try {
     const { stdout, stderr } = await execFileAsync('osascript', ['-e', script], { timeout: 60_000 });
     const parsed = parseScriptResult(stdout, stderr);
+    if (step === 'activate_wechat_main_window' && parsed.ok) {
+      const screenshotPath = await captureWechatDesktopScreenshot('wechat_main', {
+        preferredBundleIds: ['com.tencent.xinWeChat', 'com.tencent.flue.WeChatAppEx'],
+      });
+      parsed.screenshotPath = screenshotPath;
+      if (screenshotPath) parsed.detail = `${parsed.detail || '已激活微信主窗口'}；主页面截图=${screenshotPath}`;
+    }
+    if (step === 'collect_current_video' && parsed.ok) {
+      const screenshotPath = await captureWechatDesktopScreenshot(`${payload.nickname || 'wechat'}_${payload.index || 'video'}`);
+      const items = Array.isArray(parsed.items) ? parsed.items : parseCollectedVideos(parsed.detail);
+      parsed.items = items.map((item) => ({ ...item, screenshotPath: item.screenshotPath || screenshotPath }));
+    }
     if (step === 'collect_latest_videos' && parsed.ok) {
       const items = Array.isArray(parsed.items) ? parsed.items : parseCollectedVideos(parsed.detail);
       if (items.length) {
@@ -464,14 +515,14 @@ async function defaultWechatScriptRunner(step, payload = {}) {
   }
 }
 
-async function captureWechatDesktopScreenshot(label) {
+async function captureWechatDesktopScreenshot(label, options = {}) {
   try {
     mkdirSync(SCREENSHOTS_DIR, { recursive: true });
     const safe = String(label || 'wechat').replace(/[^\p{L}\p{N}_-]+/gu, '_').slice(0, 50) || 'wechat';
     const filename = `rpa_wechat_channels_home_${safe}_${Date.now()}.png`;
     const filepath = join(SCREENSHOTS_DIR, filename);
-    if (await captureWechatStandardScreenshot(filepath)) return `screenshots/${filename}`;
-    if (await captureWechatShortcutScreenshot(filepath)) return `screenshots/${filename}`;
+    if (await captureWechatStandardScreenshot(filepath, options)) return `screenshots/${filename}`;
+    if (await captureWechatShortcutScreenshot(filepath, options)) return `screenshots/${filename}`;
     return null;
   } catch (e) {
     log.warn(`[RPA] 微信视频号首页截图失败: ${screenshotErrorMessage(e)}`);
@@ -479,10 +530,10 @@ async function captureWechatDesktopScreenshot(label) {
   }
 }
 
-async function captureWechatStandardScreenshot(filepath) {
+async function captureWechatStandardScreenshot(filepath, options = {}) {
   let lastError = null;
   for (let attemptNo = 1; attemptNo <= WECHAT_SCREENSHOT_STANDARD_ATTEMPTS; attemptNo++) {
-    const state = await getWechatScreenshotState();
+    const state = await getWechatScreenshotState(options);
     const attempts = [];
     if (state?.region) attempts.push({ method: 'screen_region', args: ['-x', '-R', `${state.region.x},${state.region.y},${state.region.width},${state.region.height}`, filepath] });
     attempts.push({ method: 'full_screen', args: ['-x', filepath] });
@@ -503,9 +554,9 @@ async function captureWechatStandardScreenshot(filepath) {
   return false;
 }
 
-async function captureWechatShortcutScreenshot(filepath) {
+async function captureWechatShortcutScreenshot(filepath, options = {}) {
   try {
-    const state = await getWechatScreenshotState();
+    const state = await getWechatScreenshotState(options);
     await execFileAsync('osascript', ['-e', wechatScreenshotShortcutStartScript()], { timeout: 8_000 });
     if (state?.region) {
       try {
@@ -679,8 +730,8 @@ function wechatScreenshotStateLooksVisible(state) {
   return !!state.uiReady;
 }
 
-async function getWechatScreenshotState() {
-  const axState = await getWechatAccessibilityScreenshotState();
+async function getWechatScreenshotState(options = {}) {
+  const axState = await getWechatAccessibilityScreenshotState(options);
   const cgState = await getWechatCoreGraphicsScreenshotState();
   return {
     ...axState,
@@ -693,11 +744,14 @@ async function getWechatScreenshotState() {
   };
 }
 
-async function getWechatAccessibilityScreenshotState() {
+async function getWechatAccessibilityScreenshotState(options = {}) {
+  const preferredBundleIds = Array.isArray(options.preferredBundleIds) && options.preferredBundleIds.length
+    ? options.preferredBundleIds
+    : ['com.tencent.flue.WeChatAppEx', 'com.tencent.xinWeChat'];
   const script = `
 on run
   tell application "System Events"
-    set preferredBids to {"com.tencent.flue.WeChatAppEx", "com.tencent.xinWeChat"}
+    set preferredBids to {${preferredBundleIds.map((bid) => appleString(bid)).join(', ')}}
     repeat with bid in preferredBids
       try
         set p to first process whose bundle identifier is bid
@@ -851,9 +905,12 @@ function parseScriptResult(stdout, stderr) {
 function appleScriptForStep(step, payload = {}) {
   const nickname = appleString(payload.nickname || '');
   const count = normalizeWechatVideoCount(payload.count);
+  const ordinal = Number.isFinite(Number(payload.index)) ? Math.max(1, Math.floor(Number(payload.index))) : 1;
   const keepTabTitle = appleString(payload.keepTabTitle || '关注');
   const knownSteps = new Set([
     'assert_accessibility',
+    'activate_wechat_main_window',
+    'open_channels_from_main',
     'activate_channels_dock_icon',
     'activate_existing_channels',
     'open_profile_entry',
@@ -861,6 +918,9 @@ function appleScriptForStep(step, payload = {}) {
     'open_following_overview',
     'cleanup_autoplay_tabs',
     'open_creator',
+    'open_first_non_pinned_video',
+    'collect_current_video',
+    'go_next_video',
     'collect_latest_videos',
     'close_creator_tabs',
     'close_channels_tabs',
@@ -888,12 +948,41 @@ on run
     if "${step}" is "assert_accessibility" then
       try
         set windowCount to count of windows of targetProcess
-        if windowCount < 1 then return my vbp_result(false, "not_logged_in", "ax", "桌面微信或视频号没有可用窗口；请先手动打开一次微信视频号，让程序坞出现绿色的视频号独立窗口图标")
+        if windowCount < 1 then return my vbp_result(false, "not_logged_in", "ax", "桌面微信没有可用窗口；请先登录微信并打开主窗口")
         set ignored to name of window 1 of targetProcess
       on error errMsg
         return my vbp_result(false, "accessibility", "ax", errMsg)
       end try
       return my vbp_result(true, "assert_accessibility", "ax", "辅助功能权限可用，已验证可读取微信窗口")
+    else if "${step}" is "activate_wechat_main_window" then
+      tell application id "com.tencent.xinWeChat"
+        activate
+        reopen
+      end tell
+      delay 0.8
+      set targetProcess to my vbp_process("${step}")
+      if targetProcess is missing value then return my vbp_result(false, "not_logged_in", "wechat_main", "未找到桌面微信主进程")
+      set visible of targetProcess to true
+      set frontmost of targetProcess to true
+      my vbp_raise_window(targetProcess)
+      if my vbp_window_looks_preferences(targetProcess) then return my vbp_result(false, "wechat_main_window", "wechat_main", "当前窗口是微信设置页，请切回微信主页面；" & my vbp_context_diagnostics(targetProcess))
+      if (my vbp_accessible_content_count(targetProcess)) < 1 then return my vbp_result(false, "wechat_window_empty", "wechat_main", "微信主窗口没有暴露可操作控件；" & my vbp_context_diagnostics(targetProcess))
+      return my vbp_result(true, "activate_wechat_main_window", "wechat_main", "已激活微信主窗口并确认主页面可读取")
+    else if "${step}" is "open_channels_from_main" then
+      if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "open_channels_from_main", "already_channels", "当前窗口已在视频号界面")
+      if my vbp_window_looks_preferences(targetProcess) then return my vbp_result(false, "main_channels_entry", "wechat_main_sidebar", "当前窗口是微信设置页，无法从主页面进入视频号；" & my vbp_context_diagnostics(targetProcess))
+      if my vbp_click_main_channels_entry(targetProcess) then
+        delay 1.0
+        set targetProcess to my vbp_process("activate_existing_channels")
+        if targetProcess is not missing value then
+          set visible of targetProcess to true
+          set frontmost of targetProcess to true
+          my vbp_raise_window(targetProcess)
+          if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "open_channels_from_main", "wechat_main_sidebar", "已从微信主页面进入视频号")
+          return my vbp_result(false, "main_channels_entry", "wechat_main_sidebar", "已点击微信主页面视频号入口，但没有验证为视频号界面；" & my vbp_context_diagnostics(targetProcess))
+        end if
+      end if
+      return my vbp_result(false, "main_channels_entry", "wechat_main_sidebar", "未在微信主页面找到视频号入口；" & my vbp_context_diagnostics(targetProcess))
     else if "${step}" is "activate_channels_dock_icon" then
       set dockResult to my vbp_click_channels_dock_icon()
       if dockResult does not contain "CLICKED|" then
@@ -912,10 +1001,10 @@ on run
       return my vbp_result(false, "channels_window_required", "dock_icon", "已点击程序坞微信视频号图标，但没有找到可接管的微信窗口；" & my vbp_dock_diagnostics())
     else if "${step}" is "activate_existing_channels" then
       if my vbp_window_looks_preferences(targetProcess) then
-        return my vbp_result(false, "channels_window_required", "channels_dock_window", "当前窗口是微信设置页；请先让程序坞出现绿色的视频号独立窗口图标；" & my vbp_context_diagnostics(targetProcess))
+        return my vbp_result(false, "channels_window_required", "channels_dock_window", "当前窗口是微信设置页；请确认微信主页面可进入视频号，或使用绿色视频号独立窗口兜底；" & my vbp_context_diagnostics(targetProcess))
       end if
       if (my vbp_accessible_content_count(targetProcess)) < 1 then
-        return my vbp_result(false, "wechat_window_empty", "channels_dock_window", "当前微信窗口没有暴露可操作控件；请先让程序坞出现绿色的视频号独立窗口图标；" & my vbp_context_diagnostics(targetProcess))
+        return my vbp_result(false, "wechat_window_empty", "channels_dock_window", "当前微信窗口没有暴露可操作控件；请确认微信主窗口或视频号窗口可见；" & my vbp_context_diagnostics(targetProcess))
       end if
       if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_existing_channels", "channels_dock_window", "已接管并验证微信视频号窗口")
       return my vbp_result(false, "channels_window_required", "channels_dock_window", "当前窗口不是视频号；请先点击程序坞里的绿色视频号独立窗口图标；" & my vbp_context_diagnostics(targetProcess))
@@ -941,6 +1030,19 @@ on run
       if my vbp_click_creator_in_following(targetProcess, ${nickname}) then return my vbp_result(true, "open_creator", "following_list", "已从关注总览打开匹配博主")
       if my vbp_search_and_click_creator(targetProcess, ${nickname}) then return my vbp_result(true, "open_creator", "search", "已搜索并打开匹配博主")
       return my vbp_result(false, "creator_not_found", "following_list", "未在桌面微信视频号里找到匹配博主")
+    else if "${step}" is "open_first_non_pinned_video" then
+      if my vbp_open_first_non_pinned_video(targetProcess) then return my vbp_result(true, "open_first_non_pinned_video", "creator_grid", "已打开第一条非置顶视频")
+      return my vbp_result(false, "open_first_non_pinned_video", "creator_grid", "未找到可打开的非置顶视频；" & my vbp_context_diagnostics(targetProcess))
+    else if "${step}" is "collect_current_video" then
+      delay 0.9
+      my vbp_pause_video_if_possible(targetProcess)
+      my vbp_click_expand_if_present(targetProcess)
+      set itemJson to my vbp_collect_current_video_json(targetProcess, ${ordinal})
+      if itemJson is "" then return my vbp_result(false, "collect_current_video", "current_video", "当前视频没有可采集文本或指标；" & my vbp_context_diagnostics(targetProcess))
+      return "{\\"ok\\":true,\\"code\\":\\"collect_current_video\\",\\"method\\":\\"current_video\\",\\"detail\\":\\"collected current\\",\\"items\\":[" & itemJson & "]}"
+    else if "${step}" is "go_next_video" then
+      if my vbp_click_next_video_arrow(targetProcess) then return my vbp_result(true, "go_next_video", "fixed_right_next", "已点击右侧下一个视频箭头")
+      return my vbp_result(false, "go_next_video", "fixed_right_next", "未找到或无法点击右侧下一个视频箭头")
     else if "${step}" is "collect_latest_videos" then
       return my vbp_collect_latest_videos(targetProcess, ${count})
     else if "${step}" is "close_creator_tabs" then
@@ -955,7 +1057,11 @@ end run
 
 on vbp_process(stepName)
   tell application "System Events"
-    set preferredBids to {"com.tencent.flue.WeChatAppEx", "com.tencent.xinWeChat"}
+    if stepName is "activate_wechat_main_window" or stepName is "open_channels_from_main" then
+      set preferredBids to {"com.tencent.xinWeChat"}
+    else
+      set preferredBids to {"com.tencent.flue.WeChatAppEx", "com.tencent.xinWeChat"}
+    end if
     repeat with bid in preferredBids
       try
         set p to first process whose bundle identifier is bid
@@ -1058,6 +1164,61 @@ on vbp_click_dock_item_center(dockItem, labelText)
   end try
   return "NO_CLICK|" & labelText
 end vbp_click_dock_item_center
+
+on vbp_click_main_channels_entry(targetProcessRef)
+  tell application "System Events"
+    if my vbp_click_named_left_sidebar(targetProcessRef, {"视频号", "Channels"}) then return true
+    try
+      set w to window 1 of targetProcessRef
+      set wp to position of w
+      set ws to size of w
+      repeat with yOffset in {210, 250, 290, 330}
+        click at {(item 1 of wp) + 34, (item 2 of wp) + yOffset}
+        delay 0.7
+        set channelsProcess to my vbp_process("activate_existing_channels")
+        if channelsProcess is not missing value then
+          set visible of channelsProcess to true
+          set frontmost of channelsProcess to true
+          my vbp_raise_window(channelsProcess)
+          if my vbp_window_looks_channels(channelsProcess) then return true
+        end if
+        set visible of targetProcessRef to true
+        set frontmost of targetProcessRef to true
+        my vbp_raise_window(targetProcessRef)
+      end repeat
+    end try
+  end tell
+  return false
+end vbp_click_main_channels_entry
+
+on vbp_click_named_left_sidebar(targetProcessRef, terms)
+  tell application "System Events"
+    try
+      set w to window 1 of targetProcessRef
+      set wp to position of w
+      set ws to size of w
+      repeat with el in entire contents of targetProcessRef
+        set label to my vbp_text(el)
+        repeat with term in terms
+          if label contains (term as text) then
+            try
+              set p to position of el
+              set s to size of el
+              if (item 1 of p) < (item 1 of wp) + ((item 1 of ws) * 0.42) and (item 2 of p) > (item 2 of wp) + 70 and (item 2 of p) < (item 2 of wp) + (item 2 of ws) - 40 then
+                if (item 1 of s) < ((item 1 of ws) * 0.55) then
+                  click el
+                  delay 1.0
+                  return true
+                end if
+              end if
+            end try
+          end if
+        end repeat
+      end repeat
+    end try
+  end tell
+  return false
+end vbp_click_named_left_sidebar
 
 on vbp_window_looks_preferences(targetProcessRef)
   try

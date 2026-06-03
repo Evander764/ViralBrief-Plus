@@ -31,7 +31,7 @@ AND 平台必需指标都达标
 
 前端/API 实际按平台阶段执行：网页内容的小红书阶段整体先于抖音阶段；微信视频号由独立按钮/API 发起。每个阶段内部按评级从高到低排序，同评级按 `created_at` 更早优先；缺少添加时间时随机打散。`sortPatrolAccounts()` 仍保留混合列表的同评级小红书优先规则。默认跳过北京时间当天已经巡检过的账号。
 
-前端网页巡检分两次调用：先 `/api/patrol/run` 跑 `platform = xiaohongshu`，阶段完成后再跑 `platform = douyin`。微信视频号巡检单独调用 `/api/patrol/run` 跑 `platform = wechat_channels`，只操作桌面微信。服务端 `runDailyReport()` 自带 RPA 时只按小红书/抖音阶段执行；`runWechatReport()` 可单独跑桌面微信视频号阶段。每批默认 6 个账号标签，配置范围 1-10，内存保护可下调。多标签模式下每个账号标签有独立 CDP client，跑完立即关闭。
+前端网页巡检分两次调用：先 `/api/patrol/run` 跑 `platform = xiaohongshu`，阶段完成后再跑 `platform = douyin`。微信视频号巡检单独调用 `/api/patrol/run` 跑 `platform = wechat_channels`，只操作桌面微信：主微信窗口入口优先，绿色视频号独立 Dock 图标兜底，不使用网页版视频号。服务端 `runDailyReport()` 自带 RPA 时只按小红书/抖音阶段执行；`runWechatReport()` 可单独跑桌面微信视频号阶段。每批默认 6 个账号标签，配置范围 1-10，内存保护可下调。多标签模式下每个账号标签有独立 CDP client，跑完立即关闭。
 
 巡检控制由 `server/rpa/control.js` 管理。同一时间只允许一个活跃巡检；重复启动 `/api/patrol/run` 或含 RPA 的 `/api/reports/generate` 会返回 409，并带上当前 active 状态。`POST /api/patrol/stop` 只设置 stop flag；`runPatrol`、批次循环和详情采集点通过 `shouldStop` 收尾退出。停止前尚未实际处理完成的账号不能写 `last_patrolled_at`，只有账号完成路径会标记当天已巡检。
 

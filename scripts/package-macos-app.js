@@ -16,8 +16,11 @@ const ROOT = resolve(dirname(__filename), '..');
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
-const appName = 'Viral Brief Plus';
-const productSlug = 'viral-brief-plus';
+const appName = envText('VBP_MAC_APP_NAME', 'Viral Brief Plus');
+const productSlug = envText('VBP_MAC_PRODUCT_SLUG', 'viral-brief-plus');
+const bundleId = envText('VBP_MAC_BUNDLE_ID', 'local.viralbrief.app.v3');
+const appSupportName = envText('VBP_MAC_APP_SUPPORT_NAME', 'Viral Brief Plus');
+const defaultPort = envText('VBP_MAC_DEFAULT_PORT', '8787');
 const versionTag = `${pkg.version}-${stamp}`;
 const distDir = join(ROOT, 'dist');
 const macDir = join(distDir, 'mac');
@@ -52,6 +55,15 @@ function shouldCopy(src) {
 
 function parseEnvFlag(value) {
   return /^(1|true|yes|on)$/i.test(String(value || '').trim());
+}
+
+function envText(name, fallback) {
+  const value = String(process.env[name] || '').trim();
+  return value || fallback;
+}
+
+function shellDoubleQuotedContent(value) {
+  return String(value).replace(/["\\$`]/g, '\\$&');
 }
 
 function run(command, args, options = {}) {
@@ -101,7 +113,7 @@ function writeInfoPlist() {
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
-  <string>local.viralbrief.app.v3</string>
+  <string>${bundleId}</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
@@ -127,12 +139,13 @@ function writeLauncher() {
 set -euo pipefail
 
 APP_ROOT="$(cd "$(dirname "$0")/../Resources/app" && pwd)"
-APP_SUPPORT_DIR="$HOME/Library/Application Support/Viral Brief Plus"
-LOG_DIR="$HOME/Library/Logs/Viral Brief Plus"
-PORT="\${VBP_PORT:-\${VB_PORT:-8787}}"
+APP_SUPPORT_DIR="$HOME/Library/Application Support/${shellDoubleQuotedContent(appSupportName)}"
+LOG_DIR="$HOME/Library/Logs/${shellDoubleQuotedContent(appSupportName)}"
+PORT="\${VBP_PORT:-\${VB_PORT:-${shellDoubleQuotedContent(defaultPort)}}}"
 URL="http://127.0.0.1:\${PORT}"
 
 mkdir -p "$APP_SUPPORT_DIR" "$LOG_DIR"
+export VBP_PORT="$PORT"
 export VBP_DATA_DIR="\${VBP_DATA_DIR:-\${VB_DATA_DIR:-$APP_SUPPORT_DIR}}"
 export VBP_OPEN_BROWSER="false" # 阻止 Node 端在默认浏览器中弹窗，完全使用原生 WebKit 窗口
 
@@ -187,16 +200,16 @@ function writeReadme() {
   const distributionNote = signIdentity
     ? `- 此包已使用证书签名：${signIdentity}。\n${shouldNotarize ? '- 此包会在打包流程中提交 Apple 公证，公证通过后适合发布给普通用户。' : '- 此包尚未启用 Apple 公证；公开发布前请设置 VBP_MAC_NOTARIZE=1 重新打包。'}`
     : '- 这是本地开发包，尚未签名或公证；从网络下载后 macOS 可能会拦截。公开发给普通用户前，请使用 Developer ID 签名并完成 Apple 公证。';
-  const text = `Viral Brief Plus for macOS
+  const text = `${appName} for macOS
 
 版本：${pkg.version}
 打包时间：${new Date().toISOString()}
 
 打开方式：
-1. 双击 Viral Brief Plus.app。
-2. 应用会启动本地服务并打开 http://127.0.0.1:8787。
-3. 本地数据保存在 ~/Library/Application Support/Viral Brief Plus。
-4. 日志保存在 ~/Library/Logs/Viral Brief Plus。
+1. 双击 ${appName}.app。
+2. 应用会启动本地服务并打开 http://127.0.0.1:${defaultPort}。
+3. 本地数据保存在 ~/Library/Application Support/${appSupportName}。
+4. 日志保存在 ~/Library/Logs/${appSupportName}。
 
 运行要求：
 - macOS 12 或更高版本。

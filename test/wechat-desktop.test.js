@@ -13,6 +13,15 @@ const {
   parseTrafficLightOutput,
   leftRailRegionFromAnchors,
   locateChannelsIconByCode,
+  autoplayTabClosePlanFromAnchors,
+  chooseAutoplayClosePlanFromCandidates,
+  chooseFollowingSidebarPointFromRows,
+  followingSidebarPointFromAnchors,
+  profileEntryPointFromAnchors,
+  validateAutoplayTabClosePlan,
+  validateChannelsWindowFullScreenshotMetrics,
+  validateFollowingSidebarPoint,
+  validateProfileEntryPoint,
   validateVisionLocatorPoint,
   validateVisionLocatorResult,
 } = await import('../server/rpa/wechat-locator.js');
@@ -328,6 +337,179 @@ test('desktop WeChat locator refuses invalid or low-information vision coordinat
     imageHeight: 1536,
     region: { width: 124, height: 768 },
   }), /不在左侧图标列/);
+});
+
+test('desktop WeChat profile and following locator coordinates stay inside safe window regions', () => {
+  const anchors = parseTrafficLightOutput([
+    'WINDOW|微信|257|62|1201|768|0',
+    'BUTTON|zoom|全屏幕按钮|297|69|18|18',
+    'BUTTON|close|关闭按钮|261|69|18|18',
+    'BUTTON|minimize|最小化按钮|279|69|18|18',
+  ].join('\n'));
+
+  const profile = profileEntryPointFromAnchors(anchors);
+  assert.equal(validateProfileEntryPoint(profile, anchors), null);
+  assert.ok(profile.x > anchors.window.x + anchors.window.width * 0.82);
+  assert.ok(profile.y > anchors.window.y + 58);
+  assert.match(validateProfileEntryPoint({ x: anchors.window.x + 30, y: anchors.window.y + 44 }, anchors), /横坐标越界/);
+  assert.match(validateProfileEntryPoint({ x: profile.x, y: anchors.window.y + 52 }, anchors), /纵坐标越界/);
+
+  const narrowAnchors = parseTrafficLightOutput([
+    'WINDOW|微信 (窗口)|339|54|924|796|0',
+    'BUTTON|close|关闭按钮|360|67|12|14',
+    'BUTTON|minimize|最小化按钮|380|67|12|14',
+    'BUTTON|zoom|全屏幕按钮|400|67|12|14',
+  ].join('\n'));
+  const narrowProfile = profileEntryPointFromAnchors(narrowAnchors);
+  assert.equal(validateProfileEntryPoint(narrowProfile, narrowAnchors), null);
+  assert.equal(narrowProfile.x, 1238);
+  assert.equal(narrowProfile.y, 124);
+  assert.ok(narrowProfile.x > narrowAnchors.window.x + narrowAnchors.window.width - 36);
+
+  const following = followingSidebarPointFromAnchors(anchors);
+  assert.equal(validateFollowingSidebarPoint(following, anchors), null);
+  assert.ok(following.x < anchors.window.x + anchors.window.width * 0.42);
+  assert.ok(following.y > anchors.window.y + 120);
+  assert.match(validateFollowingSidebarPoint({ x: anchors.window.x + anchors.window.width * 0.7, y: following.y }, anchors), /拒绝点击顶部关注/);
+
+  const overviewAnchors = parseTrafficLightOutput([
+    'WINDOW|微信视频号|111|75|1826|974|0',
+    'BUTTON|close|关闭按钮|154|102|18|18',
+    'BUTTON|minimize|最小化按钮|194|102|18|18',
+    'BUTTON|zoom|全屏幕按钮|234|102|18|18',
+  ].join('\n'));
+  const imageFollowing = followingSidebarPointFromAnchors(overviewAnchors);
+  assert.equal(validateFollowingSidebarPoint(imageFollowing, overviewAnchors), null);
+  assert.equal(imageFollowing.x, 221);
+  assert.equal(imageFollowing.y, 367);
+});
+
+test('desktop WeChat autoplay tab cleanup plans hover before close and never targets the Follow tab itself', () => {
+  const anchors = parseTrafficLightOutput([
+    'WINDOW|微信|257|62|1201|768|0',
+    'BUTTON|zoom|全屏幕按钮|297|69|18|18',
+    'BUTTON|close|关闭按钮|261|69|18|18',
+    'BUTTON|minimize|最小化按钮|279|69|18|18',
+  ].join('\n'));
+
+  const plan = autoplayTabClosePlanFromAnchors(anchors);
+  assert.equal(validateAutoplayTabClosePlan(plan, anchors), null);
+  assert.equal(plan.hoverX, 617);
+  assert.equal(plan.closeX, 747);
+  assert.ok(plan.closeX > plan.hoverX);
+  assert.ok(Math.abs(plan.hoverY - (anchors.window.y + 40)) <= 1);
+  assert.match(validateAutoplayTabClosePlan({ hoverX: anchors.window.x + 10, hoverY: plan.hoverY, closeX: plan.closeX, closeY: plan.closeY }, anchors), /悬停点横坐标越界/);
+
+  const imageAnchors = parseTrafficLightOutput([
+    'WINDOW|微信视频号|111|75|1826|974|0',
+    'BUTTON|close|关闭按钮|154|102|18|18',
+    'BUTTON|minimize|最小化按钮|194|102|18|18',
+    'BUTTON|zoom|全屏幕按钮|234|102|18|18',
+  ].join('\n'));
+  const imagePlan = autoplayTabClosePlanFromAnchors(imageAnchors);
+  assert.equal(validateAutoplayTabClosePlan(imagePlan, imageAnchors), null);
+  assert.equal(imagePlan.hoverX, 659);
+  assert.equal(imagePlan.hoverY, 115);
+  assert.equal(imagePlan.closeX, 856);
+  assert.equal(imagePlan.closeY, 114);
+});
+
+test('desktop WeChat screenshot candidate pickers target sidebar Follow and the previous tab close button', () => {
+  const anchors = parseTrafficLightOutput([
+    'WINDOW|微信视频号|111|75|1826|974|0',
+    'BUTTON|close|关闭按钮|154|102|18|18',
+    'BUTTON|minimize|最小化按钮|194|102|18|18',
+    'BUTTON|zoom|全屏幕按钮|234|102|18|18',
+  ].join('\n'));
+
+  const following = chooseFollowingSidebarPointFromRows([
+    { centerX: 238, centerY: 221, width: 110, height: 24, darkPixels: 180 },
+    { centerX: 229, centerY: 297, width: 96, height: 24, darkPixels: 160 },
+    { centerX: 208, centerY: 373, width: 54, height: 24, darkPixels: 100 },
+    { centerX: 246, centerY: 448, width: 130, height: 24, darkPixels: 190 },
+  ], anchors);
+  assert.equal(following.ok, true);
+  assert.equal(following.x, 208);
+  assert.equal(following.y, 373);
+  assert.match(following.detail, /system_screenshot_left_sidebar_following/);
+  assert.match(following.detail, /groups=221,297,373,448/);
+
+  const noisyFollowing = chooseFollowingSidebarPointFromRows([
+    { centerX: 414, centerY: 171, width: 120, height: 18, darkPixels: 160 },
+    { centerX: 420, centerY: 262, width: 82, height: 14, darkPixels: 90 },
+    { centerX: 414, centerY: 286, width: 106, height: 14, darkPixels: 120 },
+    { centerX: 416, centerY: 334, width: 46, height: 13, darkPixels: 90 },
+    { centerX: 412, centerY: 358, width: 62, height: 13, darkPixels: 130 },
+    { centerX: 420, centerY: 479, width: 92, height: 14, darkPixels: 100 },
+    { centerX: 416, centerY: 502, width: 112, height: 14, darkPixels: 120 },
+  ], parseTrafficLightOutput([
+    'WINDOW|微信 (窗口)|339|60|924|796|0',
+    'BUTTON|close|关闭按钮|360|73|12|14',
+    'BUTTON|minimize|最小化按钮|380|73|12|14',
+    'BUTTON|zoom|全屏幕按钮|400|73|12|14',
+  ].join('\n')));
+  assert.equal(noisyFollowing.ok, true);
+  assert.equal(noisyFollowing.x, 414);
+  assert.ok(noisyFollowing.y >= 344 && noisyFollowing.y <= 348);
+  assert.match(noisyFollowing.detail, /groups=171,276,348,492/);
+
+  const closePlan = chooseAutoplayClosePlanFromCandidates([
+    { x: 856, y: 114, width: 14, height: 14, score: 0.4 },
+    { x: 1296, y: 114, width: 14, height: 14, score: 0.4 },
+  ], anchors);
+  assert.equal(closePlan.ok, true);
+  assert.equal(closePlan.noop, undefined);
+  assert.equal(closePlan.closeX, 856);
+  assert.equal(closePlan.closeY, 114);
+  assert.ok(closePlan.hoverX < closePlan.closeX);
+  assert.match(closePlan.detail, /system_screenshot_tab_close/);
+
+  const noExtraTab = chooseAutoplayClosePlanFromCandidates([
+    { x: 1296, y: 114, width: 14, height: 14, score: 0.4 },
+  ], anchors);
+  assert.equal(noExtraTab.ok, true);
+  assert.equal(noExtraTab.noop, true);
+
+  const noisyClosePlan = chooseAutoplayClosePlanFromCandidates([
+    { x: 552, y: 82, width: 14, height: 14, score: 0.24 },
+    { x: 773, y: 82, width: 14, height: 14, score: 0.32 },
+    { x: 796, y: 82, width: 14, height: 14, score: 0.36 },
+    { x: 807, y: 82, width: 14, height: 14, score: 0.34 },
+    { x: 939, y: 81, width: 14, height: 14, score: 0.34 },
+    { x: 975, y: 81, width: 14, height: 14, score: 0.32 },
+  ], parseTrafficLightOutput([
+    'WINDOW|微信 (窗口)|339|60|924|796|0',
+    'BUTTON|close|关闭按钮|360|73|12|14',
+    'BUTTON|minimize|最小化按钮|380|73|12|14',
+    'BUTTON|zoom|全屏幕按钮|400|73|12|14',
+  ].join('\n')));
+  assert.equal(noisyClosePlan.ok, true);
+  assert.equal(noisyClosePlan.closeX, 792);
+  assert.match(noisyClosePlan.detail, /groups=552,792,956/);
+});
+
+test('desktop WeChat full-system screenshot metrics accept Channels video windows and reject normal chat windows', () => {
+  assert.equal(validateChannelsWindowFullScreenshotMetrics({
+    bodyTotal: 220000,
+    bodyBlackRatio: 0.76,
+    bodyDarkRatio: 0.78,
+    bodyBrightRatio: 0.14,
+    bodyMidRatio: 0.04,
+  }), null);
+  assert.match(validateChannelsWindowFullScreenshotMetrics({
+    bodyTotal: 220000,
+    bodyBlackRatio: 0.02,
+    bodyDarkRatio: 0.04,
+    bodyBrightRatio: 0.82,
+    bodyMidRatio: 0.08,
+  }), /未检测到视频号黑色视频窗口/);
+  assert.match(validateChannelsWindowFullScreenshotMetrics({
+    bodyTotal: 200,
+    bodyBlackRatio: 0.8,
+    bodyDarkRatio: 0.9,
+    bodyBrightRatio: 0.02,
+    bodyMidRatio: 0.02,
+  }), /采样点不足/);
 });
 
 test('desktop WeChat AppleScript opens Channels from the main WeChat page before Dock fallback', () => {

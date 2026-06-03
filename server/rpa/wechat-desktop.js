@@ -10,7 +10,11 @@ import { SCREENSHOTS_DIR } from '../lib/paths.js';
 import { sortPatrolAccounts } from './patrol.js';
 import {
   clickWechatChannelsFromMainByLocator,
+  cleanupWechatAutoplayTabsByLocator,
   detectWechatChannelsVisibleByScreenshot,
+  ensureWechatOverviewByLocator,
+  openWechatFollowingOverviewByLocator,
+  openWechatProfileEntryByLocator,
 } from './wechat-locator.js';
 
 const execFileAsync = promisify(execFile);
@@ -506,6 +510,32 @@ async function defaultWechatScriptRunner(step, payload = {}) {
       }
       parsed.message = [parsed.message, visible.reason].filter(Boolean).join('；');
       parsed.method = visible.method || parsed.method;
+    }
+    if (step === 'open_profile_entry' && !parsed.ok && parsed.code === 'profile_entry') {
+      const located = await openWechatProfileEntryByLocator({ runner: execFileAsync });
+      if (located.ok) return located;
+      parsed.message = [parsed.message, located.message].filter(Boolean).join('；');
+      parsed.method = located.method || parsed.method;
+    }
+    if (step === 'open_overview' && !parsed.ok && parsed.code === 'open_overview') {
+      const visible = await ensureWechatOverviewByLocator({ runner: execFileAsync });
+      if (visible.ok) return visible;
+      parsed.message = [parsed.message, visible.message].filter(Boolean).join('；');
+      parsed.method = visible.method || parsed.method;
+    }
+    if (step === 'open_following_overview' && !parsed.ok && parsed.code === 'open_following_overview') {
+      const located = await openWechatFollowingOverviewByLocator({ runner: execFileAsync });
+      if (located.ok) return located;
+      parsed.message = [parsed.message, located.message].filter(Boolean).join('；');
+      parsed.method = located.method || parsed.method;
+    }
+    if (step === 'cleanup_autoplay_tabs') {
+      const cleaned = await cleanupWechatAutoplayTabsByLocator({ runner: execFileAsync, keepTabTitle: payload.keepTabTitle || '关注' });
+      if (cleaned.ok) return cleaned;
+      if (!parsed.ok) {
+        parsed.message = [parsed.message, cleaned.message].filter(Boolean).join('；');
+        parsed.method = cleaned.method || parsed.method;
+      }
     }
     if (step === 'activate_wechat_main_window' && parsed.ok) {
       const screenshotPath = await captureWechatDesktopScreenshot('wechat_main', {

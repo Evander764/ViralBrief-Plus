@@ -51,10 +51,12 @@ export function normalizeTrafficLightAnchors({ window, buttons } = {}) {
   };
 }
 
-export async function getWechatTrafficLightAnchors({ runner = execFileAsync } = {}) {
+export async function getWechatTrafficLightAnchors({ runner = execFileAsync, preferChannelsWindow = false } = {}) {
+  const preferChannelsLiteral = preferChannelsWindow ? 'true' : 'false';
   const script = `
 on run
   set rowItems to {}
+  set preferChannelsWindow to ${preferChannelsLiteral}
   tell application id "com.tencent.xinWeChat"
     activate
     reopen
@@ -65,7 +67,7 @@ on run
       set p to first process whose bundle identifier is "com.tencent.xinWeChat"
       set visible of p to true
       set frontmost of p to true
-      set w to window 1 of p
+      set w to my vbp_target_window(p, preferChannelsWindow)
       try
         set value of attribute "AXMinimized" of w to false
       end try
@@ -108,6 +110,32 @@ on run
   set AppleScript's text item delimiters to ""
   return outText
 end run
+
+on vbp_target_window(targetProcessRef, preferChannelsWindow)
+  tell application "System Events"
+    if preferChannelsWindow then
+      set bestWindow to missing value
+      try
+        repeat with candidateWindow in windows of targetProcessRef
+          set wp to position of candidateWindow
+          set ws to size of candidateWindow
+          set wn to ""
+          try
+            set wn to name of candidateWindow as text
+          end try
+          if wn contains "窗口" or ((item 1 of ws) < 1100 and (item 2 of ws) > 520) then
+            set bestWindow to candidateWindow
+          end if
+        end repeat
+      end try
+      if bestWindow is not missing value then return bestWindow
+      try
+        if (count of windows of targetProcessRef) > 1 then return window 2 of targetProcessRef
+      end try
+    end if
+    return window 1 of targetProcessRef
+  end tell
+end vbp_target_window
 `;
   const { stdout } = await runner('osascript', ['-e', script], { timeout: 8_000 });
   return parseTrafficLightOutput(String(stdout || ''));
@@ -176,8 +204,25 @@ export async function captureWechatLeftRail(anchors, { runner = execFileAsync } 
   }
 }
 
+export async function captureSystemFullScreenshot({ runner = execFileAsync } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'vbp-wechat-screen-'));
+  const path = join(dir, 'full-screen.png');
+  try {
+    await runner('screencapture', ['-x', path], { timeout: 8_000 });
+    const image = await imageSize(path, { runner });
+    return { ok: true, path, dir, image, diagnostics: `system_screenshot_full=${image.width}x${image.height}` };
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    return { ok: false, reason: String(e.stderr || e.message || e) };
+  }
+}
+
 export function cleanupCapturedRail(rail) {
   if (rail?.dir) rmSync(rail.dir, { recursive: true, force: true });
+}
+
+export function cleanupCapturedScreenshot(screenshot) {
+  if (screenshot?.dir) rmSync(screenshot.dir, { recursive: true, force: true });
 }
 
 export async function locateChannelsIconByCode({ anchors, rail, clusters } = {}) {
@@ -284,6 +329,17 @@ export async function clickWechatChannelsFromMainByLocator({ runner = execFileAs
   try {
     const anchors = await getWechatTrafficLightAnchors({ runner });
     if (!anchors.ok) return { ok: false, code: 'main_channels_entry', method: 'traffic_light_left_rail', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
+
+    const fullVisible = await verifyChannelsVisibleByFullSystemScreenshot({ runner, anchors });
+    if (fullVisible.ok) {
+      return {
+        ok: true,
+        code: 'open_channels_from_main',
+        method: fullVisible.method,
+        detail: `系统全屏截图确认当前已在视频号界面；${fullVisible.detail}; ${anchors.diagnostics}`,
+      };
+    }
+
     rail = await captureWechatLeftRail(anchors, { runner });
     if (!rail.ok) return { ok: false, code: 'main_channels_entry', method: 'traffic_light_left_rail', message: rail.reason || '无法截取微信左侧栏' };
 
@@ -327,8 +383,12 @@ export async function clickWechatChannelsFromMainByLocator({ runner = execFileAs
 export async function detectWechatChannelsVisibleByScreenshot({ runner = execFileAsync } = {}) {
   let rail = null;
   try {
-    const anchors = await getWechatTrafficLightAnchors({ runner });
+    const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
     if (!anchors.ok) return { ok: false, method: 'system_screenshot_channels_state', reason: anchors.reason || '无法读取微信窗口红黄绿按钮' };
+
+    const fullVisible = await verifyChannelsVisibleByFullSystemScreenshot({ runner, anchors });
+    if (fullVisible.ok) return fullVisible;
+
     rail = await captureWechatLeftRail(anchors, { runner });
     if (!rail.ok) return { ok: false, method: 'system_screenshot_channels_state', reason: rail.reason || '无法截取微信左侧栏' };
 
@@ -363,6 +423,320 @@ export async function detectWechatChannelsVisibleByScreenshot({ runner = execFil
   } finally {
     cleanupCapturedRail(rail);
   }
+}
+
+export async function openWechatProfileEntryByLocator({ runner = execFileAsync } = {}) {
+  const diagnostics = [];
+  let anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  if (!anchors.ok) return { ok: false, code: 'profile_entry', method: 'profile_icon_locator', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
+
+  const returned = await returnFromVideoDetailIfNeeded(anchors, { runner });
+  diagnostics.push(returned.detail);
+  anchors = returned.anchors || anchors;
+
+  const point = profileEntryPointFromAnchors(anchors);
+  const pointError = validateProfileEntryPoint(point, anchors);
+  if (pointError) return { ok: false, code: 'profile_entry', method: 'profile_icon_locator', message: pointError };
+
+  await clickAt(point.x, point.y, { runner });
+  await sleep(1400);
+
+  const verified = await verifyProfileOrOverviewVisible({ runner });
+  if (!verified.ok) {
+    return {
+      ok: false,
+      code: 'profile_entry',
+      method: 'profile_icon_locator',
+      message: [`已点击右上角小人入口 ${point.x},${point.y}，但未确认进入个人/总览页`, verified.reason, anchors.diagnostics, ...diagnostics].filter(Boolean).join('；'),
+    };
+  }
+
+  return {
+    ok: true,
+    code: 'open_profile_entry',
+    method: 'profile_icon_locator',
+    detail: [`已通过系统坐标点击右上角小人入口 ${point.x},${point.y}`, verified.detail, anchors.diagnostics, ...diagnostics].filter(Boolean).join('；'),
+  };
+}
+
+export async function ensureWechatOverviewByLocator({ runner = execFileAsync } = {}) {
+  const verified = await verifyProfileOrOverviewVisible({ runner });
+  if (verified.ok) {
+    return {
+      ok: true,
+      code: 'open_overview',
+      method: 'system_screenshot_profile_overview',
+      detail: `系统截图确认当前在个人/关注入口页；${verified.detail}`,
+    };
+  }
+  return { ok: false, code: 'open_overview', method: 'system_screenshot_profile_overview', message: verified.reason || '未确认个人/关注入口页' };
+}
+
+export async function openWechatFollowingOverviewByLocator({ runner = execFileAsync } = {}) {
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  if (!anchors.ok) return { ok: false, code: 'open_following_overview', method: 'left_sidebar_following_locator', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
+  const screenshotPoint = await findFollowingSidebarPointByScreenshot({ runner, anchors });
+  if (!screenshotPoint.ok) {
+    const reference = followingSidebarPointFromAnchors(anchors);
+    return {
+      ok: false,
+      code: 'open_following_overview',
+      method: 'left_sidebar_following_locator',
+      message: [
+        '未能从当前系统截图精准识别左侧栏“关注”，已停止点击',
+        screenshotPoint.reason,
+        reference ? `几何参考点=${reference.x},${reference.y}` : '',
+        anchors.diagnostics,
+      ].filter(Boolean).join('；'),
+    };
+  }
+  const point = screenshotPoint;
+  const pointError = validateFollowingSidebarPoint(point, anchors);
+  if (pointError) return { ok: false, code: 'open_following_overview', method: 'left_sidebar_following_locator', message: pointError };
+
+  await clickAt(point.x, point.y, { runner });
+  await sleep(1200);
+
+  const verified = await verifyFollowingOverviewVisible({ runner, point });
+  if (!verified.ok) {
+    return {
+      ok: false,
+      code: 'open_following_overview',
+      method: 'left_sidebar_following_locator',
+      message: [`已点击左侧栏关注 ${point.x},${point.y}，但未确认进入关注总览`, verified.reason, anchors.diagnostics].filter(Boolean).join('；'),
+    };
+  }
+  return {
+    ok: true,
+    code: 'open_following_overview',
+    method: 'left_sidebar_following_locator',
+    detail: [`已通过系统坐标点击个人页左侧栏关注 ${point.x},${point.y}`, screenshotPoint.ok ? screenshotPoint.detail : screenshotPoint.reason, verified.detail, anchors.diagnostics].filter(Boolean).join('；'),
+  };
+}
+
+export async function cleanupWechatAutoplayTabsByLocator({ runner = execFileAsync, keepTabTitle = '关注' } = {}) {
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  if (!anchors.ok) return { ok: false, code: 'cleanup_autoplay_tabs', method: 'hover_tab_close', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
+
+  const axPlan = await findAutoplayTabClosePlanByAX({ runner, keepTabTitle });
+  const screenshotPlan = axPlan.ok ? null : await findAutoplayTabClosePlanByScreenshot({ runner, anchors });
+  if (!axPlan.ok && !screenshotPlan.ok) {
+    const reference = autoplayTabClosePlanFromAnchors(anchors);
+    return {
+      ok: false,
+      code: 'cleanup_autoplay_tabs',
+      method: 'hover_tab_close',
+      message: [
+        '未能从当前系统截图精准识别关注左侧标签的关闭“×”，已停止点击',
+        axPlan.reason,
+        screenshotPlan.reason,
+        reference && !reference.noop ? `几何参考 close=${reference.closeX},${reference.closeY}` : '',
+        anchors.diagnostics,
+      ].filter(Boolean).join('；'),
+    };
+  }
+  const plan = axPlan.ok ? axPlan : screenshotPlan;
+  if (plan.noop) {
+    return { ok: true, code: 'cleanup_autoplay_tabs', method: 'hover_tab_close', detail: `${plan.detail || '关注左侧没有需要关闭的标签'}；closedCount=0；${anchors.diagnostics}` };
+  }
+  const planError = validateAutoplayTabClosePlan(plan, anchors);
+  if (planError) return { ok: false, code: 'cleanup_autoplay_tabs', method: 'hover_tab_close', message: planError };
+
+  await moveTo(plan.hoverX, plan.hoverY, { runner });
+  await sleep(650);
+  if (Number.isFinite(Number(plan.closeX)) && Number.isFinite(Number(plan.closeY))) {
+    await clickAt(plan.closeX, plan.closeY, { runner });
+  } else {
+    return { ok: false, code: 'cleanup_autoplay_tabs', method: 'hover_tab_close', message: '关闭“×”坐标缺失，已停止点击' };
+  }
+  await sleep(500);
+  return {
+    ok: true,
+    code: 'cleanup_autoplay_tabs',
+    method: 'hover_tab_close',
+    detail: [`已悬停并关闭关注左侧标签`, `hover=${Math.round(plan.hoverX)},${Math.round(plan.hoverY)}`, `close=${Math.round(plan.closeX || plan.hoverX + 42)},${Math.round(plan.closeY || plan.hoverY - 1)}`, `closedCount=1`, plan.detail, anchors.diagnostics].filter(Boolean).join('；'),
+  };
+}
+
+export function profileEntryPointFromAnchors(anchors) {
+  if (!anchors?.ok) return null;
+  const { window } = anchors;
+  const rightInset = window.width < 1000 ? 25 : 54;
+  return {
+    x: Math.round(window.x + window.width - rightInset),
+    y: Math.round(window.y + 70),
+  };
+}
+
+export function validateProfileEntryPoint(point, anchors) {
+  if (!point || !anchors?.ok) return '缺少右上角小人定位点或窗口锚点';
+  const { window } = anchors;
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return '右上角小人定位点不是有效数字';
+  if (point.x < window.x + window.width * 0.82 || point.x > window.x + window.width - 16) return `右上角小人横坐标越界: ${point.x}`;
+  if (point.y < window.y + 58 || point.y > window.y + 150) return `右上角小人纵坐标越界: ${point.y}`;
+  return null;
+}
+
+export function followingSidebarPointFromAnchors(anchors) {
+  if (!anchors?.ok) return null;
+  const { window } = anchors;
+  return {
+    x: Math.round(window.x + Math.min(110, Math.max(92, window.width * 0.105))),
+    y: Math.round(window.y + Math.min(Math.max(220, window.height * 0.30), 310)),
+  };
+}
+
+export function validateFollowingSidebarPoint(point, anchors) {
+  if (!point || !anchors?.ok) return '缺少左侧关注定位点或窗口锚点';
+  const { window } = anchors;
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return '左侧关注定位点不是有效数字';
+  if (point.x < window.x + 72 || point.x > window.x + window.width * 0.42) return `左侧关注横坐标越界，拒绝点击顶部关注: ${point.x}`;
+  if (point.y < window.y + 120 || point.y > window.y + window.height - 60) return `左侧关注纵坐标越界: ${point.y}`;
+  return null;
+}
+
+export function autoplayTabClosePlanFromAnchors(anchors) {
+  if (!anchors?.ok) return null;
+  const { window } = anchors;
+  const tabY = Math.round(window.y + 40);
+  const previousCenterX = Math.round(window.x + window.width * 0.30);
+  const previousCloseX = Math.round(window.x + window.width * 0.408);
+  if (previousCenterX < window.x + 100 || previousCloseX < window.x + 160) return { noop: true, detail: '关注标签左侧没有可关闭标签' };
+  return {
+    hoverX: previousCenterX,
+    hoverY: tabY,
+    closeX: previousCloseX,
+    closeY: tabY - 1,
+    detail: '顶部标签栏几何兜底，按视频号标签右侧关闭按钮定位',
+  };
+}
+
+export function validateAutoplayTabClosePlan(plan, anchors) {
+  if (!plan || !anchors?.ok) return '缺少关闭标签计划或窗口锚点';
+  if (plan.noop) return null;
+  const { window } = anchors;
+  for (const [key, value] of Object.entries({ hoverX: plan.hoverX, hoverY: plan.hoverY, closeX: plan.closeX, closeY: plan.closeY })) {
+    if (!Number.isFinite(Number(value))) return `关闭标签计划 ${key} 不是有效数字`;
+  }
+  if (plan.hoverY < window.y + 16 || plan.hoverY > window.y + 92) return `悬停点不在顶部标签栏: ${plan.hoverY}`;
+  if (plan.hoverX < window.x + 80 || plan.hoverX > window.x + window.width * 0.72) return `悬停点横坐标越界: ${plan.hoverX}`;
+  if (plan.closeX < window.x + 80 || plan.closeX > window.x + window.width * 0.72) return `关闭点横坐标越界: ${plan.closeX}`;
+  return null;
+}
+
+export function chooseFollowingSidebarPointFromRows(rows = [], anchors) {
+  if (!anchors?.ok) return { ok: false, reason: '缺少窗口锚点' };
+  const normalized = rows
+    .map((row) => ({
+      centerX: Number(row.centerX),
+      centerY: Number(row.centerY),
+      width: Number(row.width || 0),
+      height: Number(row.height || 0),
+      darkPixels: Number(row.darkPixels || 0),
+    }))
+    .filter((row) => [row.centerX, row.centerY].every(Number.isFinite))
+    .sort((a, b) => a.centerY - b.centerY);
+  if (normalized.length < 3) {
+    return { ok: false, reason: `左侧栏文字行不足 rows=${normalized.map((row) => Math.round(row.centerY)).join(',')}` };
+  }
+  const groups = [];
+  for (const row of normalized) {
+    const last = groups.at(-1);
+    if (last && Math.abs(row.centerY - last.centerY) <= 42) {
+      const weight = Math.max(1, row.darkPixels);
+      const totalWeight = last.weight + weight;
+      last.centerX = ((last.centerX * last.weight) + (row.centerX * weight)) / totalWeight;
+      last.centerY = ((last.centerY * last.weight) + (row.centerY * weight)) / totalWeight;
+      last.width = Math.max(last.width, row.width);
+      last.height += row.height;
+      last.darkPixels += row.darkPixels;
+      last.weight = totalWeight;
+      last.count += 1;
+    } else {
+      groups.push({ ...row, weight: Math.max(1, row.darkPixels), count: 1 });
+    }
+  }
+  if (groups.length < 3) {
+    return {
+      ok: false,
+      reason: `左侧栏文字组不足 rows=${normalized.map((row) => Math.round(row.centerY)).join(',')} groups=${groups.map((group) => Math.round(group.centerY)).join(',')}`,
+    };
+  }
+  const target = groups[2];
+  const point = {
+    ok: true,
+    x: Math.round(target.centerX),
+    y: Math.round(target.centerY),
+    confidence: groups.length >= 4 ? 0.92 : 0.78,
+    detail: `system_screenshot_left_sidebar_following rows=${normalized.map((row) => Math.round(row.centerY)).join(',')} groups=${groups.map((group) => Math.round(group.centerY)).join(',')} target=${Math.round(target.centerX)},${Math.round(target.centerY)}`,
+  };
+  const pointError = validateFollowingSidebarPoint(point, anchors);
+  if (pointError) return { ok: false, reason: pointError, rows: normalized };
+  return point;
+}
+
+export function chooseAutoplayClosePlanFromCandidates(candidates = [], anchors) {
+  if (!anchors?.ok) return { ok: false, reason: '缺少窗口锚点' };
+  const { window } = anchors;
+  const normalized = candidates
+    .map((candidate) => ({
+      x: Number(candidate.x),
+      y: Number(candidate.y),
+      score: Number(candidate.score || 0),
+      width: Number(candidate.width || 0),
+      height: Number(candidate.height || 0),
+    }))
+    .filter((candidate) => [candidate.x, candidate.y].every(Number.isFinite))
+    .filter((candidate) => candidate.x > window.x + Math.min(260, window.width * 0.22))
+    .sort((a, b) => a.x - b.x);
+  const groups = [];
+  for (const candidate of normalized) {
+    const last = groups.at(-1);
+    if (last && Math.abs(candidate.x - last.x) <= 36) {
+      const weight = Math.max(0.01, candidate.score);
+      const totalWeight = last.weight + weight;
+      last.x = ((last.x * last.weight) + (candidate.x * weight)) / totalWeight;
+      last.y = ((last.y * last.weight) + (candidate.y * weight)) / totalWeight;
+      last.weight = totalWeight;
+      last.count += 1;
+    } else {
+      groups.push({ ...candidate, weight: Math.max(0.01, candidate.score), count: 1 });
+    }
+  }
+  if (groups.length === 0) {
+    return { ok: false, reason: `系统截图未识别到顶部标签关闭“×” closeCandidates=${normalized.map((candidate) => Math.round(candidate.x)).join(',')}` };
+  }
+  if (groups.length === 1) {
+    return { ok: true, noop: true, detail: `关注左侧没有可关闭标签 closeCandidates=${normalized.map((candidate) => Math.round(candidate.x)).join(',')}` };
+  }
+  const target = groups[groups.length - 2];
+  const plan = {
+    ok: true,
+    hoverX: Math.round(Math.max(window.x + 100, target.x - 120)),
+    hoverY: Math.round(target.y + 1),
+    closeX: Math.round(target.x),
+    closeY: Math.round(target.y),
+    detail: `system_screenshot_tab_close closeCandidates=${normalized.map((candidate) => Math.round(candidate.x)).join(',')} groups=${groups.map((group) => Math.round(group.x)).join(',')} target=${Math.round(target.x)},${Math.round(target.y)}`,
+  };
+  const planError = validateAutoplayTabClosePlan(plan, anchors);
+  if (planError) return { ok: false, reason: planError, candidates: normalized };
+  return plan;
+}
+
+export function validateChannelsWindowFullScreenshotMetrics(metrics = {}) {
+  const bodyTotal = Number(metrics.bodyTotal);
+  const bodyBlackRatio = Number(metrics.bodyBlackRatio);
+  const bodyDarkRatio = Number(metrics.bodyDarkRatio);
+  const bodyBrightRatio = Number(metrics.bodyBrightRatio);
+  const bodyMidRatio = Number(metrics.bodyMidRatio);
+  if (![bodyTotal, bodyBlackRatio, bodyDarkRatio, bodyBrightRatio, bodyMidRatio].every(Number.isFinite)) {
+    return '全屏截图缺少视频号窗口颜色指标';
+  }
+  if (bodyTotal < 4000) return `全屏截图窗口采样点不足: ${bodyTotal}`;
+  const darkVideoSurface = bodyBlackRatio >= 0.5 && bodyDarkRatio >= 0.6;
+  const darkVideoWithContent = bodyBlackRatio >= 0.42 && bodyDarkRatio >= 0.55 && (bodyBrightRatio >= 0.035 || bodyMidRatio >= 0.02);
+  if (darkVideoSurface || darkVideoWithContent) return null;
+  return `全屏截图未检测到视频号黑色视频窗口 black=${bodyBlackRatio.toFixed(3)} dark=${bodyDarkRatio.toFixed(3)} bright=${bodyBrightRatio.toFixed(3)} mid=${bodyMidRatio.toFixed(3)}`;
 }
 
 export function validateVisionLocatorResult(json) {
@@ -442,7 +816,32 @@ post(.leftMouseUp)
   await runner('swift', ['-e', script, String(Math.round(x)), String(Math.round(y))], { timeout: 8_000 });
 }
 
+async function moveTo(x, y, { runner }) {
+  const script = `
+import CoreGraphics
+import Darwin
+import Foundation
+
+guard CommandLine.arguments.count >= 3,
+      let x = Double(CommandLine.arguments[1]),
+      let y = Double(CommandLine.arguments[2]) else {
+  exit(2)
+}
+
+let source = CGEventSource(stateID: .hidSystemState)
+let point = CGPoint(x: x, y: y)
+if let event = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
+  event.post(tap: .cghidEventTap)
+}
+usleep(180_000)
+`;
+  await runner('swift', ['-e', script, String(Math.round(x)), String(Math.round(y))], { timeout: 8_000 });
+}
+
 async function verifyChannelsVisible({ runner, location }) {
+  const full = await verifyChannelsVisibleByFullSystemScreenshot({ runner });
+  if (full.ok) return full;
+
   const selected = await verifyChannelsSelectedBySystemScreenshot(location, { runner });
   if (selected.ok) return selected;
 
@@ -507,13 +906,36 @@ end vbp_text
   }
 }
 
+async function verifyChannelsVisibleByFullSystemScreenshot({ runner, anchors: providedAnchors } = {}) {
+  let screenshot = null;
+  try {
+    const anchors = providedAnchors?.ok ? providedAnchors : await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+    if (!anchors.ok) return { ok: false, method: 'system_screenshot_full_channels_window', message: anchors.reason || '无法读取微信窗口锚点' };
+    screenshot = await captureSystemFullScreenshot({ runner });
+    if (!screenshot.ok) return { ok: false, method: 'system_screenshot_full_channels_window', message: screenshot.reason || '无法截取系统全屏截图' };
+    const analyzed = await analyzeChannelsWindowFullScreenshot(screenshot.path, anchors, { runner });
+    if (analyzed.ok) {
+      return {
+        ok: true,
+        method: 'system_screenshot_full_channels_window',
+        detail: `${analyzed.detail}; ${screenshot.diagnostics}`,
+      };
+    }
+    return { ok: false, method: 'system_screenshot_full_channels_window', message: analyzed.reason || analyzed.detail || '全屏截图未确认视频号界面' };
+  } catch (e) {
+    return { ok: false, method: 'system_screenshot_full_channels_window', message: String(e.message || e) };
+  } finally {
+    cleanupCapturedScreenshot(screenshot);
+  }
+}
+
 async function verifyChannelsSelectedBySystemScreenshot(location, { runner }) {
   if (!Number.isFinite(Number(location?.x)) || !Number.isFinite(Number(location?.y))) {
     return { ok: false, message: '缺少点击点，无法做左栏选中态验证' };
   }
   let rail = null;
   try {
-    const anchors = await getWechatTrafficLightAnchors({ runner });
+    const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
     if (!anchors.ok) return { ok: false, message: anchors.reason || '无法读取微信窗口锚点' };
     rail = await captureWechatLeftRail(anchors, { runner });
     if (!rail.ok) return { ok: false, message: rail.reason || '无法截取微信左侧栏' };
@@ -539,12 +961,638 @@ async function verifyChannelsSelectedBySystemScreenshot(location, { runner }) {
   }
 }
 
+async function analyzeChannelsWindowFullScreenshot(path, anchors, { runner }) {
+  const { window } = anchors;
+  const swift = `
+import AppKit
+import CoreGraphics
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count >= 6,
+      let wx = Double(args[2]),
+      let wy = Double(args[3]),
+      let ww = Double(args[4]),
+      let wh = Double(args[5]),
+      let data = try? Data(contentsOf: URL(fileURLWithPath: args[1])),
+      let rep = NSBitmapImageRep(data: data) else {
+  print("{\\"ok\\":false,\\"reason\\":\\"无法读取系统全屏截图\\"}")
+  exit(0)
+}
+
+let width = rep.pixelsWide
+let height = rep.pixelsHigh
+let bounds = CGDisplayBounds(CGMainDisplayID())
+let scaleX = Double(width) / max(Double(bounds.width), 1.0)
+let scaleY = Double(height) / max(Double(bounds.height), 1.0)
+
+func pixelX(_ x: Double) -> Int {
+  return min(width - 1, max(0, Int(((x - Double(bounds.minX)) * scaleX).rounded())))
+}
+
+func pixelY(_ y: Double) -> Int {
+  return min(height - 1, max(0, Int(((y - Double(bounds.minY)) * scaleY).rounded())))
+}
+
+let xStart = pixelX(wx + ww * 0.04)
+let xEnd = pixelX(wx + ww * 0.96)
+let yStart = pixelY(wy + 82.0)
+let yEnd = pixelY(wy + wh - 95.0)
+var total = 0
+var black = 0
+var dark = 0
+var bright = 0
+var mid = 0
+
+if xStart <= xEnd && yStart <= yEnd {
+  for y in stride(from: yStart, through: yEnd, by: 3) {
+    for x in stride(from: xStart, through: xEnd, by: 3) {
+      total += 1
+      guard let raw = rep.colorAt(x: x, y: y), let c = raw.usingColorSpace(.deviceRGB) else { continue }
+      let r = Double(c.redComponent)
+      let g = Double(c.greenComponent)
+      let b = Double(c.blueComponent)
+      let a = Double(c.alphaComponent)
+      let luma = (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+      if a > 0.7 && luma < 0.05 { black += 1 }
+      if a > 0.7 && luma < 0.16 { dark += 1 }
+      if a > 0.7 && luma > 0.78 { bright += 1 }
+      if a > 0.7 && luma > 0.22 && luma < 0.72 { mid += 1 }
+    }
+  }
+}
+
+let totalD = max(Double(total), 1.0)
+let out: [String: Any] = [
+  "bodyTotal": total,
+  "bodyBlackRatio": Double(black) / totalD,
+  "bodyDarkRatio": Double(dark) / totalD,
+  "bodyBrightRatio": Double(bright) / totalD,
+  "bodyMidRatio": Double(mid) / totalD,
+  "scaleX": scaleX,
+  "scaleY": scaleY,
+  "sampleRect": String(xStart) + "," + String(yStart) + "," + String(xEnd - xStart) + "," + String(yEnd - yStart)
+]
+let json = try! JSONSerialization.data(withJSONObject: out, options: [])
+print(String(data: json, encoding: .utf8)!)
+`;
+  const { stdout } = await runner('swift', [
+    '-e',
+    swift,
+    path,
+    String(window.x),
+    String(window.y),
+    String(window.width),
+    String(window.height),
+  ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+  const parsed = JSON.parse(String(stdout || '{}'));
+  const reason = validateChannelsWindowFullScreenshotMetrics(parsed);
+  const detail = `full_window black=${Number(parsed.bodyBlackRatio || 0).toFixed(3)} dark=${Number(parsed.bodyDarkRatio || 0).toFixed(3)} bright=${Number(parsed.bodyBrightRatio || 0).toFixed(3)} mid=${Number(parsed.bodyMidRatio || 0).toFixed(3)} rect=${parsed.sampleRect || ''} scale=${Number(parsed.scaleX || 0).toFixed(2)}x${Number(parsed.scaleY || 0).toFixed(2)}`;
+  if (!reason) return { ok: true, detail };
+  return { ok: false, reason: `${reason}; ${detail}` };
+}
+
+async function returnFromVideoDetailIfNeeded(anchors, { runner }) {
+  let current = anchors;
+  const details = [];
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    let rail = null;
+    try {
+      rail = await captureWechatLeftRail(current, { runner });
+      if (!rail.ok) {
+        details.push(`第${attempt}次详情页检测无法截图: ${rail.reason || ''}`);
+        break;
+      }
+      const visible = await analyzeChannelsAlreadyVisible(rail.path, rail.region, { runner });
+      if (!visible.ok) break;
+      const point = videoDetailBackPointFromAnchors(current);
+      await clickAt(point.x, point.y, { runner });
+      await sleep(900);
+      details.push(`第${attempt}次从视频详情页点击返回 ${point.x},${point.y}: ${visible.detail}`);
+      const refreshed = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+      if (refreshed.ok) current = refreshed;
+    } finally {
+      cleanupCapturedRail(rail);
+    }
+  }
+  return { anchors: current, detail: details.join('；') };
+}
+
+function videoDetailBackPointFromAnchors(anchors) {
+  const { window } = anchors;
+  return {
+    x: Math.round(window.x + 95),
+    y: Math.round(window.y + 40),
+  };
+}
+
+async function verifyProfileOrOverviewVisible({ runner }) {
+  const ax = await readWechatSignalsByAX({ runner });
+  if (ax.ok && /赞和收藏|我的视频号|个人中心|个人主页|浏览记录|关注/.test(ax.text)) {
+    return { ok: true, detail: `AX确认个人/总览信号: ${compactForLog(ax.text)}` };
+  }
+
+  const screenshot = await analyzeCurrentWechatWindowByScreenshot({ runner });
+  if (screenshot.ok && !screenshot.videoDetail) {
+    return { ok: true, detail: `system_screenshot_profile_overview ${screenshot.detail}` };
+  }
+  return { ok: false, reason: [ax.reason, screenshot.reason || screenshot.detail].filter(Boolean).join('；') || '未确认个人/总览页' };
+}
+
+async function verifyFollowingOverviewVisible({ runner, point }) {
+  const ax = await readWechatSignalsByAX({ runner });
+  if (ax.ok && /关注/.test(ax.text) && !/顶部视频流关注误点/.test(ax.text)) {
+    return { ok: true, detail: `AX确认关注入口/总览信号: ${compactForLog(ax.text)}` };
+  }
+  const screenshot = await analyzeCurrentWechatWindowByScreenshot({ runner });
+  if (screenshot.ok && !screenshot.videoDetail) {
+    return { ok: true, detail: `system_screenshot_following_overview point=${point?.x},${point?.y} ${screenshot.detail}` };
+  }
+  return { ok: false, reason: [ax.reason, screenshot.reason || screenshot.detail].filter(Boolean).join('；') || '未确认关注总览' };
+}
+
+async function readWechatSignalsByAX({ runner }) {
+  const script = `
+on run
+  tell application "System Events"
+    repeat with bid in {"com.tencent.flue.WeChatAppEx", "com.tencent.xinWeChat"}
+      try
+        set p to first process whose bundle identifier is bid
+        if (count of windows of p) > 0 then
+          set dumpText to my vbp_visible_text_dump(p)
+          if dumpText is not "" then return "OK|" & dumpText
+        end if
+      end try
+    end repeat
+  end tell
+  return "ERR|没有可读文本"
+end run
+
+on vbp_visible_text_dump(targetProcessRef)
+  tell application "System Events"
+    set out to ""
+    try
+      repeat with el in entire contents of targetProcessRef
+        set label to my vbp_text(el)
+        if label is not "" then
+          if out does not contain label then set out to out & label & linefeed
+        end if
+        if length of out > 4000 then exit repeat
+      end repeat
+    end try
+    return out
+  end tell
+end vbp_visible_text_dump
+
+on vbp_text(el)
+  tell application "System Events"
+    set parts to {}
+    try
+      set end of parts to name of el
+    end try
+    try
+      set end of parts to description of el
+    end try
+    try
+      set v to value of el
+      if v is not missing value then set end of parts to v as text
+    end try
+    return parts as text
+  end tell
+end vbp_text
+`;
+  try {
+    const { stdout } = await runner('osascript', ['-e', script], { timeout: 8_000 });
+    const text = String(stdout || '').trim();
+    if (text.startsWith('OK|')) return { ok: true, text: text.slice(3) };
+    return { ok: false, reason: text || 'AX 无输出' };
+  } catch (e) {
+    return { ok: false, reason: String(e.stderr || e.message || e) };
+  }
+}
+
+async function analyzeCurrentWechatWindowByScreenshot({ runner }) {
+  let rail = null;
+  try {
+    const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+    if (!anchors.ok) return { ok: false, reason: anchors.reason || '无法读取微信窗口红黄绿按钮' };
+    rail = await captureWechatLeftRail(anchors, { runner });
+    if (!rail.ok) return { ok: false, reason: rail.reason || '无法截取微信左侧栏' };
+    const detail = await analyzeChannelsAlreadyVisible(rail.path, rail.region, { runner });
+    return {
+      ok: true,
+      videoDetail: detail.ok,
+      detail: detail.ok ? detail.detail : (detail.reason || 'system_screenshot_non_video_detail'),
+    };
+  } catch (e) {
+    return { ok: false, reason: String(e.message || e) };
+  } finally {
+    cleanupCapturedRail(rail);
+  }
+}
+
+async function findAutoplayTabClosePlanByAX({ runner, keepTabTitle }) {
+  const script = `
+on run
+  tell application "System Events"
+    repeat with bid in {"com.tencent.flue.WeChatAppEx", "com.tencent.xinWeChat"}
+      try
+        set p to first process whose bundle identifier is bid
+        if (count of windows of p) > 0 then
+          set w to window 1 of p
+          set wp to position of w
+          set ws to size of w
+          set keepX to -1
+          set keepY to -1
+          repeat with el in entire contents of p
+            set label to my vbp_text(el)
+            if label contains ${JSON.stringify(keepTabTitle)} then
+              try
+                set ep to position of el
+                set es to size of el
+                if (item 2 of ep) < (item 2 of wp) + 96 then
+                  set keepX to (item 1 of ep) + ((item 1 of es) / 2)
+                  set keepY to (item 2 of ep) + ((item 2 of es) / 2)
+                  exit repeat
+                end if
+              end try
+            end if
+          end repeat
+          if keepX < 0 then return "ERR|未找到关注标签页"
+          set hoverX to keepX - 96
+          set hoverY to keepY
+          if hoverX < (item 1 of wp) + 100 then return "NOOP|关注左侧没有可关闭标签"
+          return "OK|" & (hoverX as text) & "|" & (hoverY as text) & "|" & ((hoverX + 42) as text) & "|" & ((hoverY - 1) as text) & "|AX 找到关注标签并计算左侧标签关闭点"
+        end if
+      end try
+    end repeat
+  end tell
+  return "ERR|没有可读窗口"
+end run
+
+on vbp_text(el)
+  tell application "System Events"
+    set parts to {}
+    try
+      set end of parts to name of el
+    end try
+    try
+      set end of parts to description of el
+    end try
+    try
+      set v to value of el
+      if v is not missing value then set end of parts to v as text
+    end try
+    return parts as text
+  end tell
+end vbp_text
+`;
+  try {
+    const { stdout } = await runner('osascript', ['-e', script], { timeout: 8_000 });
+    const text = String(stdout || '').trim();
+    if (text.startsWith('NOOP|')) return { ok: true, noop: true, detail: text.slice(5) };
+    if (!text.startsWith('OK|')) return { ok: false, reason: text || 'AX 未找到标签关闭点' };
+    const [, hoverX, hoverY, closeX, closeY, detail] = text.split('|');
+    return {
+      ok: true,
+      hoverX: Number(hoverX),
+      hoverY: Number(hoverY),
+      closeX: Number(closeX),
+      closeY: Number(closeY),
+      detail,
+    };
+  } catch (e) {
+    return { ok: false, reason: String(e.stderr || e.message || e) };
+  }
+}
+
+async function findFollowingSidebarPointByScreenshot({ runner, anchors }) {
+  let screenshot = null;
+  try {
+    screenshot = await captureSystemFullScreenshot({ runner });
+    if (!screenshot.ok) return { ok: false, reason: screenshot.reason || '无法截取系统全屏截图' };
+    const rows = await analyzeFollowingSidebarRowsByScreenshot(screenshot.path, anchors, { runner });
+    const picked = chooseFollowingSidebarPointFromRows(rows, anchors);
+    if (picked.ok) {
+      picked.detail = `${picked.detail}; ${screenshot.diagnostics}`;
+      return picked;
+    }
+    return picked;
+  } catch (e) {
+    return { ok: false, reason: String(e.message || e) };
+  } finally {
+    cleanupCapturedScreenshot(screenshot);
+  }
+}
+
+async function findAutoplayTabClosePlanByScreenshot({ runner, anchors }) {
+  let screenshot = null;
+  try {
+    screenshot = await captureSystemFullScreenshot({ runner });
+    if (!screenshot.ok) return { ok: false, reason: screenshot.reason || '无法截取系统全屏截图' };
+    const candidates = await analyzeTopTabCloseCandidatesByScreenshot(screenshot.path, anchors, { runner });
+    const picked = chooseAutoplayClosePlanFromCandidates(candidates, anchors);
+    if (picked.ok && !picked.noop) {
+      picked.detail = `${picked.detail}; ${screenshot.diagnostics}`;
+    }
+    return picked;
+  } catch (e) {
+    return { ok: false, reason: String(e.message || e) };
+  } finally {
+    cleanupCapturedScreenshot(screenshot);
+  }
+}
+
+async function analyzeFollowingSidebarRowsByScreenshot(path, anchors, { runner }) {
+  const { window } = anchors;
+  const swift = `
+import AppKit
+import CoreGraphics
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count >= 6,
+      let wx = Double(args[2]),
+      let wy = Double(args[3]),
+      let ww = Double(args[4]),
+      let wh = Double(args[5]),
+      let data = try? Data(contentsOf: URL(fileURLWithPath: args[1])),
+      let rep = NSBitmapImageRep(data: data) else {
+  print("[]")
+  exit(0)
+}
+
+let width = rep.pixelsWide
+let height = rep.pixelsHigh
+let bounds = CGDisplayBounds(CGMainDisplayID())
+let scaleX = Double(width) / max(Double(bounds.width), 1.0)
+let scaleY = Double(height) / max(Double(bounds.height), 1.0)
+
+func pixelX(_ x: Double) -> Int {
+  return min(width - 1, max(0, Int(((x - Double(bounds.minX)) * scaleX).rounded())))
+}
+
+func pixelY(_ y: Double) -> Int {
+  return min(height - 1, max(0, Int(((y - Double(bounds.minY)) * scaleY).rounded())))
+}
+
+let xStart = pixelX(wx + 20.0)
+let xEnd = pixelX(wx + min(190.0, max(130.0, ww * 0.13)))
+let yStart = pixelY(wy + 105.0)
+let yEnd = pixelY(min(wy + wh - 120.0, wy + 470.0))
+let rowCount = max(0, yEnd - yStart + 1)
+var counts = Array(repeating: 0, count: rowCount)
+var minXs = Array(repeating: Int.max, count: rowCount)
+var maxXs = Array(repeating: 0, count: rowCount)
+var sumXs = Array(repeating: 0.0, count: rowCount)
+
+if xStart <= xEnd && yStart <= yEnd {
+  for y in yStart...yEnd {
+    let row = y - yStart
+    for x in xStart...xEnd {
+      guard let raw = rep.colorAt(x: x, y: y), let c = raw.usingColorSpace(.deviceRGB) else { continue }
+      let r = Double(c.redComponent)
+      let g = Double(c.greenComponent)
+      let b = Double(c.blueComponent)
+      let a = Double(c.alphaComponent)
+      let luma = (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+      if a > 0.7 && luma < 0.82 && max(r, max(g, b)) < 0.90 {
+        counts[row] += 1
+        minXs[row] = min(minXs[row], x)
+        maxXs[row] = max(maxXs[row], x)
+        sumXs[row] += Double(x)
+      }
+    }
+  }
+}
+
+let threshold = max(5, Int(Double(max(1, xEnd - xStart + 1)) * 0.012))
+let maxGap = max(3, Int((6.0 * scaleY).rounded()))
+var rows: [[String: Any]] = []
+var start = -1
+var end = -1
+var gap = 0
+
+func flushSegment() {
+  if start < 0 || end < start { return }
+  var total = 0
+  var weightedY = 0.0
+  var weightedX = 0.0
+  var minX = Int.max
+  var maxX = 0
+  for i in start...end {
+    total += counts[i]
+    weightedY += Double(yStart + i) * Double(counts[i])
+    weightedX += sumXs[i]
+    if counts[i] > 0 {
+      minX = min(minX, minXs[i])
+      maxX = max(maxX, maxXs[i])
+    }
+  }
+  if total <= 0 { return }
+  let heightPts = Double(end - start + 1) / max(scaleY, 0.01)
+  let widthPts = Double(maxX - minX + 1) / max(scaleX, 0.01)
+  if heightPts >= 8.0 && heightPts <= 36.0 && widthPts >= 18.0 && total >= 40 {
+    rows.append([
+      "centerX": Double(bounds.minX) + (weightedX / Double(total)) / scaleX,
+      "centerY": Double(bounds.minY) + (weightedY / Double(total)) / scaleY,
+      "width": widthPts,
+      "height": heightPts,
+      "darkPixels": total
+    ])
+  }
+}
+
+for i in 0..<rowCount {
+  if counts[i] > threshold {
+    if start < 0 { start = i }
+    end = i
+    gap = 0
+  } else if start >= 0 {
+    gap += 1
+    if gap > maxGap {
+      flushSegment()
+      start = -1
+      end = -1
+      gap = 0
+    }
+  }
+}
+flushSegment()
+
+let json = try! JSONSerialization.data(withJSONObject: rows, options: [])
+print(String(data: json, encoding: .utf8)!)
+`;
+  const { stdout } = await runner('swift', [
+    '-e',
+    swift,
+    path,
+    String(window.x),
+    String(window.y),
+    String(window.width),
+    String(window.height),
+  ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+  return JSON.parse(String(stdout || '[]'));
+}
+
+async function analyzeTopTabCloseCandidatesByScreenshot(path, anchors, { runner }) {
+  const { window } = anchors;
+  const swift = `
+import AppKit
+import CoreGraphics
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count >= 6,
+      let wx = Double(args[2]),
+      let wy = Double(args[3]),
+      let ww = Double(args[4]),
+      let wh = Double(args[5]),
+      let data = try? Data(contentsOf: URL(fileURLWithPath: args[1])),
+      let rep = NSBitmapImageRep(data: data) else {
+  print("[]")
+  exit(0)
+}
+
+let width = rep.pixelsWide
+let height = rep.pixelsHigh
+let bounds = CGDisplayBounds(CGMainDisplayID())
+let scaleX = Double(width) / max(Double(bounds.width), 1.0)
+let scaleY = Double(height) / max(Double(bounds.height), 1.0)
+
+func pixelX(_ x: Double) -> Int {
+  return min(width - 1, max(0, Int(((x - Double(bounds.minX)) * scaleX).rounded())))
+}
+
+func pixelY(_ y: Double) -> Int {
+  return min(height - 1, max(0, Int(((y - Double(bounds.minY)) * scaleY).rounded())))
+}
+
+let xStart = pixelX(wx + min(250.0, ww * 0.20))
+let xEnd = pixelX(wx + min(ww - 120.0, ww * 0.82))
+let yStart = pixelY(wy + 15.0)
+let yEnd = pixelY(wy + 72.0)
+let cropWidth = max(0, xEnd - xStart + 1)
+let cropHeight = max(0, yEnd - yStart + 1)
+if cropWidth <= 0 || cropHeight <= 0 {
+  print("[]")
+  exit(0)
+}
+
+var mask = Array(repeating: false, count: cropWidth * cropHeight)
+func idx(_ x: Int, _ y: Int) -> Int { return y * cropWidth + x }
+
+for cy in 0..<cropHeight {
+  for cx in 0..<cropWidth {
+    let x = xStart + cx
+    let y = yStart + cy
+    guard let raw = rep.colorAt(x: x, y: y), let c = raw.usingColorSpace(.deviceRGB) else { continue }
+    let r = Double(c.redComponent)
+    let g = Double(c.greenComponent)
+    let b = Double(c.blueComponent)
+    let a = Double(c.alphaComponent)
+    let luma = (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+    if a > 0.7 && luma < 0.48 && max(r, max(g, b)) < 0.65 {
+      mask[idx(cx, cy)] = true
+    }
+  }
+}
+
+var visited = Array(repeating: false, count: cropWidth * cropHeight)
+let dirs = [(-1,-1),(0,-1),(1,-1),(-1,0),(1,0),(-1,1),(0,1),(1,1)]
+var candidates: [[String: Any]] = []
+
+for sy in 0..<cropHeight {
+  for sx in 0..<cropWidth {
+    let startIndex = idx(sx, sy)
+    if visited[startIndex] || !mask[startIndex] { continue }
+    var stack = [(sx, sy)]
+    var pixels: [(Int, Int)] = []
+    visited[startIndex] = true
+    var minX = sx
+    var maxX = sx
+    var minY = sy
+    var maxY = sy
+    while let (px, py) = stack.popLast() {
+      pixels.append((px, py))
+      minX = min(minX, px)
+      maxX = max(maxX, px)
+      minY = min(minY, py)
+      maxY = max(maxY, py)
+      for (dx, dy) in dirs {
+        let nx = px + dx
+        let ny = py + dy
+        if nx < 0 || ny < 0 || nx >= cropWidth || ny >= cropHeight { continue }
+        let ni = idx(nx, ny)
+        if visited[ni] || !mask[ni] { continue }
+        visited[ni] = true
+        stack.append((nx, ny))
+      }
+    }
+    let count = pixels.count
+    if count < 12 { continue }
+    let boxW = maxX - minX + 1
+    let boxH = maxY - minY + 1
+    let wPts = Double(boxW) / max(scaleX, 0.01)
+    let hPts = Double(boxH) / max(scaleY, 0.01)
+    if wPts < 6.0 || wPts > 22.0 || hPts < 6.0 || hPts > 22.0 { continue }
+    let aspect = wPts / max(hPts, 0.01)
+    if aspect < 0.55 || aspect > 1.65 { continue }
+    var diag = 0
+    var anti = 0
+    for (px, py) in pixels {
+      let nx = Double(px - minX) / max(Double(boxW - 1), 1.0)
+      let ny = Double(py - minY) / max(Double(boxH - 1), 1.0)
+      if abs(nx - ny) < 0.24 { diag += 1 }
+      if abs((1.0 - nx) - ny) < 0.24 { anti += 1 }
+    }
+    let density = Double(count) / Double(max(1, boxW * boxH))
+    let diagRatio = Double(diag) / Double(count)
+    let antiRatio = Double(anti) / Double(count)
+    let score = min(diagRatio, antiRatio) - abs(density - 0.28) * 0.25
+    if diagRatio >= 0.20 && antiRatio >= 0.20 && density >= 0.10 && density <= 0.58 && score >= 0.18 {
+      candidates.append([
+        "x": Double(bounds.minX) + Double(xStart + minX + boxW / 2) / scaleX,
+        "y": Double(bounds.minY) + Double(yStart + minY + boxH / 2) / scaleY,
+        "width": wPts,
+        "height": hPts,
+        "score": score
+      ])
+    }
+  }
+}
+
+candidates.sort { a, b in
+  let ax = a["x"] as? Double ?? 0
+  let bx = b["x"] as? Double ?? 0
+  return ax < bx
+}
+
+let json = try! JSONSerialization.data(withJSONObject: candidates, options: [])
+print(String(data: json, encoding: .utf8)!)
+`;
+  const { stdout } = await runner('swift', [
+    '-e',
+    swift,
+    path,
+    String(window.x),
+    String(window.y),
+    String(window.width),
+    String(window.height),
+  ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+  return JSON.parse(String(stdout || '[]'));
+}
+
 async function imageSize(path, { runner }) {
   const { stdout } = await runner('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', path], { timeout: 5_000 });
   const width = Number(String(stdout).match(/pixelWidth:\s*(\d+)/)?.[1]);
   const height = Number(String(stdout).match(/pixelHeight:\s*(\d+)/)?.[1]);
   if (!Number.isFinite(width) || !Number.isFinite(height)) throw new Error('无法读取截图尺寸');
   return { width, height };
+}
+
+function compactForLog(text) {
+  return String(text || '').replace(/\s+/g, ' ').slice(0, 180);
 }
 
 async function analyzeChannelsSelectedRail(path, region, location, { runner }) {

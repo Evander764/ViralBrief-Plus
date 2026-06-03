@@ -39,7 +39,7 @@ import { startScheduler, restartScheduler } from './scheduler.js';
 import { testConnection } from './ai/client.js';
 import { analyzeContent, suggestAccountsFromAI } from './ai/analyze.js';
 import { recognizePageState, observeVideo } from './ai/observe.js';
-import { fetchAndExtract } from './ingest/scrape.js';
+import { ingestPayload } from './ingest/submit.js';
 import { openExternalBrowser, openExternalBrowserUrls } from './lib/browser-open.js';
 import { accountOpenUrlsForPlatform } from './lib/account-open.js';
 import { cleanupStorage, inspectStorage } from './lib/storage-cleanup.js';
@@ -182,26 +182,8 @@ async function handleApi(req, res, url, segs) {
 
   // ---- ingest（粘贴链接，服务端抓取解析）----
   if (p[0] === 'ingest' && method === 'POST') {
-    const { url } = await readJson(req);
-    if (!url || !/^https?:\/\//i.test(url)) return sendJson(res, 400, { error: '请提供合法的 http(s) 链接' });
-    const r = await fetchAndExtract(url);
-    if (!r.ok) return sendJson(res, 200, { ok: false, note: r.note });
-    // 抓到的指标来源标记 scraped → 走 needs_review（待复核），不自动入榜。
-    const cap = upsertCapture({
-      url: r.url,
-      platform: r.platform,
-      content_type: r.content_type,
-      title: r.title,
-      author_name: r.author_name,
-      body_excerpt: r.body_excerpt,
-      metrics_source: 'scraped',
-      metrics_raw: r.metrics_raw,
-    });
-    return sendJson(res, 200, {
-      ok: true, id: cap.id, duplicate: cap.duplicate, status: cap.status,
-      platform: r.platform, title: r.title, author_name: r.author_name,
-      metrics: r.metrics_raw, found: r.found, note: r.note,
-    });
+    const result = await ingestPayload(await readJson(req));
+    return sendJson(res, result.httpStatus, result.body);
   }
 
   // ---- stats ----

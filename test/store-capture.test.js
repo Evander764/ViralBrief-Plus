@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 process.env.VBP_DATA_DIR = mkdtempSync(join(tmpdir(), 'vbp-capture-'));
 
 const {
-  upsertAccount, upsertCapture, confirmContent, getContent, importAccountsCsv, importAccountsLines, listAccounts, listContents,
+  upsertAccount, upsertCapture, confirmContent, getContent, importAccountsCsv, importAccountsLines, listAccounts, listContents, markAccountSeen,
 } = await import('../server/store.js');
 const { run } = await import('../server/db.js');
 
@@ -75,6 +75,25 @@ test('采集按主页链接自动关联（忽略追踪参数）', () => {
     metrics_source: 'manual', publish_time: recent(),
   });
   assert.equal(getContent(r.id).account_id, acc.id);
+});
+
+test('公众号导入更新账号 last_seen，不改 last_patrolled_at', () => {
+  const lastPatrolledAt = '2026-06-01T00:00:00.000Z';
+  const acc = upsertAccount({
+    platform: 'wechat_article',
+    nickname: '公众号作者',
+    monitor_enabled: true,
+    last_patrolled_at: lastPatrolledAt,
+  });
+
+  const updated = markAccountSeen(acc.id, {
+    lastSeenUrl: 'https://mp.weixin.qq.com/s/article-seen',
+    lastSeenPublishTime: '2026-06-03T00:30:00.000Z',
+  });
+
+  assert.equal(updated.last_seen_url, 'https://mp.weixin.qq.com/s/article-seen');
+  assert.equal(updated.last_seen_publish_time, '2026-06-03T00:30:00.000Z');
+  assert.equal(updated.last_patrolled_at, lastPatrolledAt);
 });
 
 test('重复采集：URL 命中 → 合并补缺，不覆盖已有值', () => {

@@ -441,6 +441,16 @@ export function markAccountPatrolled(id, { lastSeenUrl = null, lastSeenPublishTi
   return get('SELECT * FROM accounts WHERE id = ?', [id]);
 }
 
+export function markAccountSeen(id, { lastSeenUrl = null, lastSeenPublishTime = null } = {}) {
+  const patch = {};
+  if (lastSeenUrl) patch.last_seen_url = String(lastSeenUrl).trim();
+  if (lastSeenPublishTime) patch.last_seen_publish_time = parsePublishTime(lastSeenPublishTime);
+  const keys = Object.keys(patch);
+  if (keys.length === 0) return get('SELECT * FROM accounts WHERE id = ?', [id]);
+  run(`UPDATE accounts SET ${keys.map((k) => `${k}=?`).join(', ')} WHERE id=?`, [...keys.map((k) => patch[k]), id]);
+  return get('SELECT * FROM accounts WHERE id = ?', [id]);
+}
+
 export function contentExistsByUrl(url) {
   const urlKey = normalizeUrl(url);
   if (!urlKey) return false;

@@ -427,6 +427,50 @@ main {
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none;
 }
+.wechat-import {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+.wechat-import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.wechat-import textarea {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+}
+.import-results {
+  display: grid;
+  gap: 8px;
+}
+.import-result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+.import-result-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 650;
+}
+.import-result-meta {
+  grid-column: 1 / -1;
+  color: var(--text-muted);
+  font-size: 12px;
+}
 
 /* ─── Typography ─── */
 .muted { color: var(--text-muted); font-size: 12.5px; }

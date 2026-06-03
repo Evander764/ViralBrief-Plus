@@ -76,10 +76,22 @@
             <b style="color: var(--brand-strong);">粘贴链接抓取</b>
             <div class="muted" style="font-size:13px; margin-top:4px;">把单条内容链接贴进来，服务端尝试抓取标题/指标。抓到的数字默认进「待补录」，需你核对确认（平台可能返回不全或验证页）。</div>
           </div>
-          <input id="ingestUrl" placeholder="https://www.douyin.com/video/... 或 小红书笔记链接" style="flex:2; min-width:240px;" />
+          <input id="ingestUrl" placeholder="https://www.douyin.com/video/... 或 https://mp.weixin.qq.com/s/..." style="flex:2; min-width:240px;" />
           <button class="primary" id="ingestBtn" style="align-self:center;">抓取</button>
         </div>
         <div class="muted" id="ingestMsg" style="margin:-6px 0 12px; min-height:16px;"></div>
+        <div class="wechat-import accent-row">
+          <div class="wechat-import-head">
+            <div>
+              <b style="color: var(--brand-strong);">公众号文章导入</b>
+              <div class="muted" style="font-size:13px; margin-top:4px;">多行粘贴文章链接；作者命中账号池后进入微信候选。</div>
+            </div>
+            <button class="primary" id="wechatArticleImportBtn">导入公众号文章</button>
+          </div>
+          <textarea id="wechatArticleUrls" rows="4" placeholder="https://mp.weixin.qq.com/s/..."></textarea>
+          <div class="muted" id="wechatArticleImportMsg"></div>
+          <div id="wechatArticleImportResults" class="import-results"></div>
+        </div>
         <div class="row" id="candToolbar" style="margin-bottom:10px;display:none">
           <label class="check" style="font-size:13px"><input type="checkbox" id="candSelectAll" /> 全选</label>
           <span class="muted" id="candSelectedCount"></span>

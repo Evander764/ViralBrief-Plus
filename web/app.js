@@ -638,6 +638,60 @@ async function runIngest() {
 $('#ingestBtn').addEventListener('click', runIngest);
 $('#ingestUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') runIngest(); });
 
+function parseWechatArticleUrls(text) {
+  const seen = new Set();
+  return String(text || '')
+    .split(/[\s,，]+/)
+    .map((url) => url.trim())
+    .filter((url) => {
+      if (!/^https?:\/\//i.test(url) || seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    });
+}
+
+function renderWechatArticleImportResults(results = []) {
+  $('#wechatArticleImportResults').innerHTML = results.slice(0, 20).map((r) => {
+    const status = r.ok ? (r.duplicate ? '重复' : (STATUS_LABEL[r.status] || r.status || '已入库')) : '失败';
+    const badgeClass = r.ok ? (r.duplicate ? 'duplicate' : (r.status || 'needs_review')) : 'archived';
+    const title = r.title || r.url || '(无标题)';
+    const author = r.author_name || '作者待补录';
+    const account = r.ok ? (r.accountMatched ? '已匹配账号池' : '未匹配账号池') : (r.note || '导入失败');
+    return `<div class="import-result">
+      <div class="import-result-title">${esc(title)}</div>
+      <span class="badge ${esc(badgeClass)}">${esc(status)}</span>
+      <div class="import-result-meta">${esc(author)} · ${esc(account)}</div>
+    </div>`;
+  }).join('');
+}
+
+async function runWechatArticleImport() {
+  const urls = parseWechatArticleUrls($('#wechatArticleUrls').value);
+  if (urls.length === 0) return toast('请粘贴公众号文章链接', 'bad');
+  $('#wechatArticleImportBtn').disabled = true;
+  $('#wechatArticleImportMsg').textContent = `导入中… ${urls.length} 条`;
+  $('#wechatArticleImportResults').innerHTML = '';
+  try {
+    const r = await api('/ingest', { method: 'POST', body: JSON.stringify({ urls }) });
+    renderWechatArticleImportResults(r.results || []);
+    $('#wechatArticleImportMsg').textContent = `完成：成功 ${r.success || 0} 条，重复 ${r.duplicates || 0} 条，失败 ${r.failed || 0} 条`;
+    if ((r.success || 0) > 0) {
+      $('#wechatArticleUrls').value = '';
+      toast('公众号文章已导入候选池', 'ok');
+      loadCandidates(); loadOverview();
+    } else {
+      toast('公众号文章导入失败', 'bad');
+    }
+  } catch (e) {
+    $('#wechatArticleImportMsg').textContent = '导入失败：' + e.message;
+    toast('导入失败：' + e.message, 'bad');
+  } finally {
+    $('#wechatArticleImportBtn').disabled = false;
+  }
+}
+
+$('#wechatArticleImportBtn').addEventListener('click', runWechatArticleImport);
+
 // 批量归档
 $('#candBatchArchive').addEventListener('click', async () => {
   const checked = $$('.cand-cb:checked');

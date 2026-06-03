@@ -56,3 +56,27 @@ test('诚实：验证页 → blocked=true', () => {
   assert.equal(r.blocked, true);
   assert.deepEqual(r.found, []);
 });
+
+test('公众号文章：抽取标题、作者、正文和北京时间发布时间，指标未知保持 null', () => {
+  const html = `<!doctype html><html><head><title>备用标题</title></head><body>
+    <h1 id="activity-name">增长复盘 &amp; 选题观察</h1>
+    <span id="publish_time" class="rich_media_meta rich_media_meta_text">2026年06月03日 08:30</span>
+    <a id="js_name">公众号作者</a>
+    <div id="js_content">
+      <p>第一段正文。</p>
+      <p>第二段正文，包含 &amp; HTML 实体。</p>
+    </div>
+    <script>var appmsg_token = "x";</script>
+  </body></html>`;
+
+  const r = extractFromHtml(html, 'https://mp.weixin.qq.com/s/article1');
+  assert.equal(r.platform, 'wechat_article');
+  assert.equal(r.content_type, 'article');
+  assert.equal(r.title, '增长复盘 & 选题观察');
+  assert.equal(r.author_name, '公众号作者');
+  assert.match(r.body_excerpt, /第一段正文/);
+  assert.match(r.body_excerpt, /第二段正文，包含 & HTML 实体/);
+  assert.equal(r.publish_time, '2026-06-03T00:30:00.000Z');
+  assert.deepEqual(r.metrics_raw, { like: null, share: null, comment: null, favorite: null });
+  assert.deepEqual(r.found, []);
+});

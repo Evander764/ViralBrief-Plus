@@ -27,6 +27,23 @@ const tag = (html, re) => { const m = html.match(re); return m ? m[1].trim() : n
 const metaContent = (html, name) => tag(html,
   new RegExp(`<meta[^>]+(?:property|name)=["']${name}["'][^>]+content=["']([^"']*)["']`, 'i'))
   || tag(html, new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${name}["']`, 'i'));
+const decodeHtml = (s) => String(s || '')
+  .replace(/&nbsp;/gi, ' ')
+  .replace(/&amp;/gi, '&')
+  .replace(/&lt;/gi, '<')
+  .replace(/&gt;/gi, '>')
+  .replace(/&quot;/gi, '"')
+  .replace(/&#39;|&apos;/gi, "'")
+  .replace(/&#(\d+);/g, (_, n) => {
+    const code = Number(n);
+    return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : _;
+  })
+  .replace(/&#x([0-9a-f]+);/gi, (_, n) => {
+    const code = Number.parseInt(n, 16);
+    return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : _;
+  });
+const cleanText = (s) => decodeHtml(s).replace(/\s+/g, ' ').trim();
+const textById = (html, id) => tag(html, new RegExp(`<[^>]+id=["']${id}["'][^>]*>([\\s\\S]*?)<\\/[^>]+>`, 'i'));
 
 /** 直接对原始（可能不是合法 JSON 的）文本按字段名正则取值——比 JSON.parse 更耐脏。 */
 function pickByKeyRegex(text) {
@@ -49,6 +66,40 @@ const stripTags = (html) => html
   .replace(/\s+/g, ' ')
   .slice(0, 8000);
 
+function stripTagsClean(html, limit = 1000) {
+  return cleanText(stripTags(html)).slice(0, limit);
+}
+
+function parseWechatPublishTime(html) {
+  const seconds = tag(html, /\b(?:ct|createTime|publish_time|publishTime)\b\s*[:=]\s*["']?(\d{10,13})["']?/i);
+  if (seconds) {
+    const n = Number(seconds);
+    const ms = n < 1e12 ? n * 1000 : n;
+    const d = new Date(ms);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+
+  const visible = cleanText(textById(html, 'publish_time') || tag(html, /class=["'][^"']*rich_media_meta_text[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/i) || '');
+  const m = visible.match(/(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})日?(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!m) return null;
+  const [, y, mo, d, h = '0', mi = '0', s = '0'] = m;
+  // 公众号发布时间展示按北京时间处理，避免受本机时区影响。
+  return new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h) - 8, Number(mi), Number(s))).toISOString();
+}
+
+function extractWechatArticleFields(html) {
+  const bodyHtml = tag(html, /<div[^>]+id=["']js_content["'][^>]*>([\s\S]*?)<\/div>\s*(?:<script|<\/body>|<\/html>)/i)
+    || tag(html, /<article[^>]*>([\s\S]*?)<\/article>/i)
+    || '';
+  return {
+    title: cleanText(textById(html, 'activity-name') || metaContent(html, 'og:title') || tag(html, /<title[^>]*>([^<]+)<\/title>/i) || ''),
+    author_name: cleanText(textById(html, 'js_name') || tag(html, /class=["'][^"']*account_nickname_inner[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/i)
+      || metaContent(html, 'og:author') || metaContent(html, 'author') || ''),
+    body_excerpt: stripTagsClean(bodyHtml || metaContent(html, 'og:description') || metaContent(html, 'description') || '', 1000),
+    publish_time: parseWechatPublishTime(html),
+  };
+}
+
 /**
  * 纯函数：从一段 HTML 里尽力抽取信息。无网络，可单测。
  * @returns {{platform, content_type, title, author_name, body_excerpt, metrics_raw, found:string[], blocked:boolean}}
@@ -56,11 +107,12 @@ const stripTags = (html) => html
 export function extractFromHtml(html, url) {
   const platform = detectPlatform(url);
   const content_type = platform === 'douyin' ? 'video' : 'article';
+  const wechatArticle = platform === 'wechat_article' ? extractWechatArticleFields(html) : null;
 
-  const title = metaContent(html, 'og:title') || tag(html, /<title[^>]*>([^<]+)<\/title>/i) || '';
+  const title = wechatArticle?.title || metaContent(html, 'og:title') || tag(html, /<title[^>]*>([^<]+)<\/title>/i) || '';
   const author = metaContent(html, 'og:author') || metaContent(html, 'author')
     || tag(html, /["']nickname["']\s*:\s*["']([^"']{1,40})["']/);
-  const body = (metaContent(html, 'og:description') || metaContent(html, 'description') || '').slice(0, 1000);
+  const body = wechatArticle?.body_excerpt || (metaContent(html, 'og:description') || metaContent(html, 'description') || '').slice(0, 1000);
 
   // 候选数据块：含指标字段名的 <script>，外加抖音 RENDER_DATA（URL 编码）
   const blobs = [];
@@ -97,7 +149,17 @@ export function extractFromHtml(html, url) {
   // 反爬/验证页启发式：没抓到任何指标且页面像验证/登录页
   const blocked = found.length === 0 && /(验证码|滑块|安全验证|请完成验证|verify|captcha|login|登录后查看|帮你识别)/i.test(visibleText);
 
-  return { platform, content_type, title, author_name: author, body_excerpt: body, metrics_raw, found, blocked };
+  return {
+    platform,
+    content_type,
+    title: cleanText(title),
+    author_name: wechatArticle?.author_name || cleanText(author || ''),
+    body_excerpt: body,
+    publish_time: wechatArticle?.publish_time || null,
+    metrics_raw,
+    found,
+    blocked,
+  };
 }
 
 /** 抓取一个 URL 并解析。网络失败/超时返回 { ok:false, note }。 */

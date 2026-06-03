@@ -1,14 +1,13 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { callJSON } from '../ai/client.js';
 import { log } from '../lib/log.js';
 
 const execFileAsync = promisify(execFile);
 const CODE_CONFIDENCE_THRESHOLD = 0.72;
-const VISION_CONFIDENCE_THRESHOLD = 0.65;
+const CREATOR_SCROLL_ATTEMPTS = 12;
 
 export function normalizeTrafficLightAnchors({ window, buttons } = {}) {
   const normalizedButtons = {};
@@ -273,57 +272,6 @@ export async function locateChannelsIconByCode({ anchors, rail, clusters } = {})
   };
 }
 
-export async function locateChannelsIconByVision({ anchors, rail } = {}) {
-  const region = rail?.region || leftRailRegionFromAnchors(anchors);
-  if (!region || !rail?.path || !rail?.image) {
-    return { ok: false, method: 'vision_left_rail', reason: '缺少左侧栏截图' };
-  }
-  try {
-    const imageB64 = readFileSync(rail.path, 'base64');
-    const imageWidth = rail.image.width;
-    const imageHeight = rail.image.height;
-    const { json } = await callJSON({
-      task: 'wechat_channels_locator',
-      maxTokens: 600,
-      images: [{ data: imageB64, media_type: 'image/png' }],
-      system: [
-        '你是桌面软件定位助手。只根据截图识别 macOS 微信左侧导航栏里的“视频号”入口。',
-        '视频号图标通常像蝴蝶或双叶结形，不是聊天气泡、联系人、盒子、朋友圈圆环、靶心或小程序图标。',
-        '只返回 JSON，不要解释。',
-      ].join('\n'),
-      user: [
-        `截图只包含微信左侧导航栏，图片像素尺寸 ${imageWidth}x${imageHeight}。`,
-        '请返回视频号图标中心点的图片像素坐标。',
-        'JSON 格式: {"x": number, "y": number, "confidence": number, "reason": "简短说明"}',
-      ].join('\n'),
-      validate: validateVisionLocatorResult,
-    });
-    const confidence = Number(json.confidence);
-    const px = Number(json.x);
-    const py = Number(json.y);
-    if (confidence < VISION_CONFIDENCE_THRESHOLD) {
-      return { ok: false, method: 'vision_left_rail', reason: `视觉定位置信度过低: ${confidence}`, confidence, diagnostics: json.reason || '' };
-    }
-    if (px < 0 || py < 0 || px > imageWidth || py > imageHeight) {
-      return { ok: false, method: 'vision_left_rail', reason: '视觉定位返回越界坐标', confidence, diagnostics: json.reason || '' };
-    }
-    const pointError = validateVisionLocatorPoint({ px, py, imageWidth, imageHeight, region });
-    if (pointError) {
-      return { ok: false, method: 'vision_left_rail', reason: pointError, confidence, diagnostics: json.reason || '' };
-    }
-    return {
-      ok: true,
-      method: 'vision_left_rail',
-      x: Math.round(region.x + (px / imageWidth) * region.width),
-      y: Math.round(region.y + (py / imageHeight) * region.height),
-      confidence,
-      diagnostics: `视觉定位 ${Math.round(px)},${Math.round(py)}: ${json.reason || ''}`,
-    };
-  } catch (e) {
-    return { ok: false, method: 'vision_left_rail', reason: String(e.message || e) };
-  }
-}
-
 export async function clickWechatChannelsFromMainByLocator({ runner = execFileAsync } = {}) {
   let rail = null;
   try {
@@ -355,22 +303,15 @@ export async function clickWechatChannelsFromMainByLocator({ runner = execFileAs
 
     const codeLocated = await locateChannelsIconByCode({ anchors, rail });
     if (codeLocated.ok && codeLocated.confidence >= CODE_CONFIDENCE_THRESHOLD) {
-      const codeClick = await clickAndVerify(codeLocated, { runner });
-      if (codeClick.ok) return codeClick;
-      log.info(`[RPA] 微信视频号代码定位点击未验证成功，尝试视觉兜底: ${codeClick.message || ''}`);
+      return await clickAndVerify(codeLocated, { runner });
     }
-
-    log.info(`[RPA] 微信视频号代码定位未达阈值，尝试视觉兜底: ${codeLocated.diagnostics || codeLocated.reason || ''}`);
-    const visionLocated = await locateChannelsIconByVision({ anchors, rail });
-    if (visionLocated.ok) return await clickAndVerify(visionLocated, { runner });
 
     return {
       ok: false,
       code: 'main_channels_entry',
-      method: 'traffic_light_left_rail+vision_left_rail',
+      method: 'traffic_light_left_rail',
       message: [
-        codeLocated.diagnostics || codeLocated.reason || '代码定位失败',
-        visionLocated.reason || visionLocated.diagnostics || '视觉定位失败',
+        codeLocated.diagnostics || codeLocated.reason || '代码定位置信度不足，已停止点击',
         anchors.diagnostics,
         rail.diagnostics,
       ].filter(Boolean).join('；'),
@@ -558,6 +499,194 @@ export async function cleanupWechatAutoplayTabsByLocator({ runner = execFileAsyn
   };
 }
 
+export async function openWechatCreatorByFollowingScroll({ runner = execFileAsync, nickname, maxScrolls = CREATOR_SCROLL_ATTEMPTS } = {}) {
+  const term = String(nickname || '').trim();
+  if (!term) return { ok: false, code: 'creator_not_found', method: 'following_scroll_locator', message: '缺少视频号博主昵称' };
+
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  if (!anchors.ok) return { ok: false, code: 'creator_not_found', method: 'following_scroll_locator', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
+
+  let repeated = 0;
+  let previousSignature = '';
+  const attempts = Math.max(1, Math.min(30, Number(maxScrolls) || CREATOR_SCROLL_ATTEMPTS));
+  const diagnostics = [];
+  for (let attempt = 0; attempt <= attempts; attempt++) {
+    let screenshot = null;
+    try {
+      screenshot = await captureSystemFullScreenshot({ runner });
+      if (screenshot.ok) diagnostics.push(`第${attempt + 1}次截图 ${screenshot.diagnostics}`);
+
+      const located = await findCreatorPointByAX({ runner, nickname: term, anchors });
+      if (located.ok) {
+        await clickAt(located.x, located.y, { runner });
+        await sleep(1300);
+        const verified = await verifyCreatorHomeVisible({ runner, nickname: term });
+        if (!verified.ok) {
+          return {
+            ok: false,
+            code: 'creator_not_found',
+            method: 'following_scroll_locator',
+            message: [`已点击关注列表博主 ${located.x},${located.y}，但未确认打开主页`, verified.reason, located.detail, anchors.diagnostics].filter(Boolean).join('；'),
+          };
+        }
+        return {
+          ok: true,
+          code: 'open_creator_by_following_scroll',
+          method: 'following_scroll_locator',
+          detail: [`已通过关注总览打开匹配博主 ${term}`, `click=${located.x},${located.y}`, `scrollAttempts=${attempt}`, located.detail, verified.detail, ...diagnostics.slice(-3), anchors.diagnostics].filter(Boolean).join('；'),
+        };
+      }
+
+      const signature = await readFollowingListSignatureByAX({ runner });
+      const currentSignature = signature.signature || '';
+      if (currentSignature && currentSignature === previousSignature) repeated += 1;
+      else repeated = 0;
+      previousSignature = currentSignature;
+      diagnostics.push([located.reason, signature.detail].filter(Boolean).join('；'));
+      if (attempt >= attempts || repeated >= 2) {
+        return {
+          ok: false,
+          code: 'creator_not_found',
+          method: 'following_scroll_locator',
+          message: [`未在关注总览找到匹配博主 ${term}`, `scrollAttempts=${attempt}`, repeated >= 2 ? '列表连续重复，判断已到底部' : '', ...diagnostics.slice(-5), anchors.diagnostics].filter(Boolean).join('；'),
+        };
+      }
+      const scrollPoint = followingListScrollPointFromAnchors(anchors);
+      await scrollAt(scrollPoint.x, scrollPoint.y, -7, { runner });
+      await sleep(650);
+    } finally {
+      cleanupCapturedScreenshot(screenshot);
+    }
+  }
+
+  return { ok: false, code: 'creator_not_found', method: 'following_scroll_locator', message: `未在关注总览找到匹配博主 ${term}` };
+}
+
+export async function openFirstNonPinnedWechatVideoByScreenshot({ runner = execFileAsync, nickname = '' } = {}) {
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  if (!anchors.ok) return { ok: false, code: 'open_first_non_pinned_video_by_screenshot', method: 'creator_grid_screenshot', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
+
+  let screenshot = null;
+  try {
+    screenshot = await captureSystemFullScreenshot({ runner });
+    if (!screenshot.ok) return { ok: false, code: 'open_first_non_pinned_video_by_screenshot', method: 'creator_grid_screenshot', message: screenshot.reason || '无法截取系统全屏截图' };
+    const screenshotCards = await analyzeCreatorVideoCardsByScreenshot(screenshot.path, anchors, { runner });
+    const axCards = await readCreatorVideoCardsByAX({ runner, anchors });
+    const cards = mergeCreatorCards(screenshotCards, axCards);
+    const picked = chooseFirstNonPinnedVideoCard(cards, anchors);
+    if (!picked.ok) {
+      return {
+        ok: false,
+        code: 'open_first_non_pinned_video_by_screenshot',
+        method: 'creator_grid_screenshot',
+        message: [picked.reason, `nickname=${nickname}`, `cards=${cards.length}`, screenshot.diagnostics, anchors.diagnostics].filter(Boolean).join('；'),
+      };
+    }
+
+    await clickAt(picked.x, picked.y, { runner });
+    await sleep(1400);
+    const verified = await verifyVideoDetailVisible({ runner });
+    if (!verified.ok) {
+      return {
+        ok: false,
+        code: 'open_first_non_pinned_video_by_screenshot',
+        method: 'creator_grid_screenshot',
+        message: [`已点击第一条非置顶视频 ${picked.x},${picked.y}，但未确认进入详情页`, verified.reason, picked.detail, screenshot.diagnostics, anchors.diagnostics].filter(Boolean).join('；'),
+      };
+    }
+
+    return {
+      ok: true,
+      code: 'open_first_non_pinned_video_by_screenshot',
+      method: 'creator_grid_screenshot',
+      detail: [`已通过截图定位打开第一条非置顶视频`, `click=${picked.x},${picked.y}`, `skippedPinned=${picked.skippedPinned || 0}`, picked.detail, verified.detail, screenshot.diagnostics, anchors.diagnostics].filter(Boolean).join('；'),
+    };
+  } catch (e) {
+    return { ok: false, code: 'open_first_non_pinned_video_by_screenshot', method: 'creator_grid_screenshot', message: String(e.message || e) };
+  } finally {
+    cleanupCapturedScreenshot(screenshot);
+  }
+}
+
+export async function goNextWechatVideoByScreenshot({ runner = execFileAsync } = {}) {
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  if (!anchors.ok) return { ok: false, code: 'go_next_video_by_screenshot', method: 'right_arrow_screenshot', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
+  const focusPoint = videoSurfacePointFromAnchors(anchors);
+  const before = await captureWechatWindowFingerprint({ runner, anchors });
+  const beforeText = await readWechatSignalsByAX({ runner });
+
+  await clickAt(focusPoint.x, focusPoint.y, { runner });
+  await mouseWiggle(focusPoint.x, focusPoint.y, { runner });
+  await sleep(350);
+
+  let screenshot = null;
+  try {
+    screenshot = await captureSystemFullScreenshot({ runner });
+    if (!screenshot.ok) return { ok: false, code: 'go_next_video_by_screenshot', method: 'right_arrow_screenshot', message: screenshot.reason || '无法截取系统全屏截图' };
+    const candidates = await analyzeNextArrowCandidatesByScreenshot(screenshot.path, anchors, { runner });
+    const picked = chooseNextVideoArrowCandidate(candidates, anchors);
+    if (!picked.ok) {
+      return {
+        ok: false,
+        code: 'go_next_video_by_screenshot',
+        method: 'right_arrow_screenshot',
+        message: [picked.reason, screenshot.diagnostics, anchors.diagnostics].filter(Boolean).join('；'),
+      };
+    }
+
+    await clickAt(picked.x, picked.y, { runner });
+    await sleep(1100);
+    const after = await captureWechatWindowFingerprint({ runner, anchors });
+    const afterText = await readWechatSignalsByAX({ runner });
+    const changed = fingerprintChanged(before, after) || compactForLog(beforeText.text) !== compactForLog(afterText.text);
+    if (!changed) {
+      return {
+        ok: false,
+        code: 'go_next_video_by_screenshot',
+        method: 'right_arrow_screenshot',
+        message: [`已点击右侧下箭头 ${picked.x},${picked.y}，但截图/文本未确认变化`, picked.detail, screenshot.diagnostics, anchors.diagnostics].filter(Boolean).join('；'),
+      };
+    }
+    return {
+      ok: true,
+      code: 'go_next_video_by_screenshot',
+      method: 'right_arrow_screenshot',
+      detail: [`已通过截图定位点击右侧下箭头`, `click=${picked.x},${picked.y}`, picked.detail, screenshot.diagnostics, anchors.diagnostics].filter(Boolean).join('；'),
+    };
+  } catch (e) {
+    return { ok: false, code: 'go_next_video_by_screenshot', method: 'right_arrow_screenshot', message: String(e.message || e) };
+  } finally {
+    cleanupCapturedScreenshot(screenshot);
+  }
+}
+
+export async function closeWechatCreatorWithCommandW({ runner = execFileAsync, keepTabTitle = '关注' } = {}) {
+  const before = await readWechatSignalsByAX({ runner });
+  try {
+    await commandW({ runner });
+    await sleep(320);
+    await commandW({ runner });
+    await sleep(900);
+  } catch (e) {
+    return { ok: false, code: 'close_creator_with_command_w', method: 'command_w', message: String(e.stderr || e.message || e) };
+  }
+  const verified = await verifyFollowingOverviewVisible({ runner, point: null });
+  if (!verified.ok) {
+    return {
+      ok: false,
+      code: 'close_creator_with_command_w',
+      method: 'command_w',
+      message: [`已发送两次 Command+W，但未确认回到“${keepTabTitle}”总览`, verified.reason, before.ok ? `关闭前=${compactForLog(before.text)}` : before.reason].filter(Boolean).join('；'),
+    };
+  }
+  return {
+    ok: true,
+    code: 'close_creator_with_command_w',
+    method: 'command_w',
+    detail: [`已发送两次 Command+W 并确认回到“${keepTabTitle}”总览`, verified.detail].filter(Boolean).join('；'),
+  };
+}
+
 export function profileEntryPointFromAnchors(anchors) {
   if (!anchors?.ok) return null;
   const { window } = anchors;
@@ -723,6 +852,89 @@ export function chooseAutoplayClosePlanFromCandidates(candidates = [], anchors) 
   return plan;
 }
 
+export function chooseFirstNonPinnedVideoCard(cards = [], anchors) {
+  if (!anchors?.ok) return { ok: false, reason: '缺少窗口锚点' };
+  const { window } = anchors;
+  const normalized = cards
+    .map((card) => ({
+      x: Number(card.x ?? card.centerX),
+      y: Number(card.y ?? card.centerY),
+      width: Number(card.width || 0),
+      height: Number(card.height || 0),
+      pinned: !!card.pinned || /置顶/.test(String(card.label || '')),
+      blocked: /直播|预约/.test(String(card.label || '')),
+      confidence: Number(card.confidence || card.score || 0),
+      label: String(card.label || ''),
+      source: card.source || 'screenshot',
+    }))
+    .filter((card) => [card.x, card.y, card.width, card.height].every(Number.isFinite))
+    .filter((card) => card.width >= 64 && card.height >= 64)
+    .filter((card) => card.x > window.x + Math.min(180, window.width * 0.16))
+    .filter((card) => card.y > window.y + 130 && card.y < window.y + window.height - 55)
+    .sort((a, b) => {
+      const rowA = Math.round(a.y / 48);
+      const rowB = Math.round(b.y / 48);
+      return rowA === rowB ? a.x - b.x : a.y - b.y;
+    });
+  const skippedPinned = normalized.filter((card) => card.pinned).length;
+  const skippedBlocked = normalized.filter((card) => card.blocked).length;
+  const picked = normalized.find((card) => !card.pinned && !card.blocked && card.confidence >= 0.55);
+  if (!picked) {
+    return {
+      ok: false,
+      reason: `未识别到高置信非置顶视频卡片 cards=${normalized.length} pinned=${skippedPinned} blocked=${skippedBlocked}`,
+      cards: normalized,
+    };
+  }
+  return {
+    ok: true,
+    x: Math.round(picked.x),
+    y: Math.round(picked.y),
+    skippedPinned,
+    skippedBlocked,
+    confidence: picked.confidence,
+    detail: `creator_grid_card source=${picked.source} cards=${normalized.length} pinned=${skippedPinned} blocked=${skippedBlocked} picked=${Math.round(picked.x)},${Math.round(picked.y)} size=${Math.round(picked.width)}x${Math.round(picked.height)}`,
+  };
+}
+
+export function chooseNextVideoArrowCandidate(candidates = [], anchors) {
+  if (!anchors?.ok) return { ok: false, reason: '缺少窗口锚点' };
+  const { window } = anchors;
+  const normalized = candidates
+    .map((candidate) => ({
+      x: Number(candidate.x),
+      y: Number(candidate.y),
+      width: Number(candidate.width || 0),
+      height: Number(candidate.height || 0),
+      score: Number(candidate.score || 0),
+      direction: String(candidate.direction || ''),
+    }))
+    .filter((candidate) => [candidate.x, candidate.y].every(Number.isFinite))
+    .filter((candidate) => candidate.x > window.x + window.width * 0.68)
+    .filter((candidate) => candidate.y > window.y + window.height * 0.35 && candidate.y < window.y + window.height * 0.82)
+    .sort((a, b) => {
+      const dirScore = (value) => value.direction === 'down' ? 1 : 0;
+      if (dirScore(a) !== dirScore(b)) return dirScore(b) - dirScore(a);
+      if (Math.abs(a.score - b.score) > 0.02) return b.score - a.score;
+      return b.y - a.y;
+    });
+  const picked = normalized[0];
+  if (!picked || picked.score < 0.16) {
+    return {
+      ok: false,
+      reason: `系统截图未识别到右侧下箭头 candidates=${normalized.map((candidate) => `${Math.round(candidate.x)},${Math.round(candidate.y)}:${candidate.score.toFixed(2)}`).join('/')}`,
+      candidates: normalized,
+    };
+  }
+  return {
+    ok: true,
+    x: Math.round(picked.x),
+    y: Math.round(picked.y),
+    confidence: picked.score,
+    detail: `right_arrow candidates=${normalized.map((candidate) => `${Math.round(candidate.x)},${Math.round(candidate.y)}:${candidate.score.toFixed(2)}:${candidate.direction || 'unknown'}`).join('/')} picked=${Math.round(picked.x)},${Math.round(picked.y)}`,
+  };
+}
+
 export function validateChannelsWindowFullScreenshotMetrics(metrics = {}) {
   const bodyTotal = Number(metrics.bodyTotal);
   const bodyBlackRatio = Number(metrics.bodyBlackRatio);
@@ -739,25 +951,633 @@ export function validateChannelsWindowFullScreenshotMetrics(metrics = {}) {
   return `全屏截图未检测到视频号黑色视频窗口 black=${bodyBlackRatio.toFixed(3)} dark=${bodyDarkRatio.toFixed(3)} bright=${bodyBrightRatio.toFixed(3)} mid=${bodyMidRatio.toFixed(3)}`;
 }
 
-export function validateVisionLocatorResult(json) {
-  if (!json || typeof json !== 'object') return '返回值不是对象';
-  if (!Number.isFinite(Number(json.x))) return 'x 必须是数字';
-  if (!Number.isFinite(Number(json.y))) return 'y 必须是数字';
-  if (!Number.isFinite(Number(json.confidence))) return 'confidence 必须是数字';
-  return null;
+async function findCreatorPointByAX({ runner, nickname, anchors }) {
+  const script = `
+on run
+  set term to ${JSON.stringify(nickname)}
+  tell application "System Events"
+    repeat with bid in {"com.tencent.flue.WeChatAppEx", "com.tencent.xinWeChat"}
+      try
+        set p to first process whose bundle identifier is bid
+        if (count of windows of p) > 0 then
+          set w to window 1 of p
+          set wp to position of w
+          set ws to size of w
+          repeat with el in entire contents of p
+            set label to my vbp_text(el)
+            if label contains term then
+              try
+                set ep to position of el
+                set es to size of el
+                set cx to (item 1 of ep) + ((item 1 of es) / 2)
+                set cy to (item 2 of ep) + ((item 2 of es) / 2)
+                if cx > (item 1 of wp) + 95 and cx < (item 1 of wp) + ((item 1 of ws) * 0.82) and cy > (item 2 of wp) + 98 and cy < (item 2 of wp) + (item 2 of ws) - 42 then
+                  return "OK|" & (cx as text) & "|" & (cy as text) & "|" & my vbp_compact(label, 120)
+                end if
+              end try
+            end if
+          end repeat
+        end if
+      end try
+    end repeat
+  end tell
+  return "ERR|当前可见关注列表未找到昵称"
+end run
+
+on vbp_text(el)
+  tell application "System Events"
+    set parts to {}
+    try
+      set end of parts to name of el
+    end try
+    try
+      set end of parts to description of el
+    end try
+    try
+      set v to value of el
+      if v is not missing value then set end of parts to v as text
+    end try
+    return parts as text
+  end tell
+end vbp_text
+
+on vbp_compact(valueText, maxLen)
+  set s to valueText as text
+  set s to my vbp_replace(s, return, " ")
+  set s to my vbp_replace(s, linefeed, " ")
+  if length of s > maxLen then return (text 1 thru maxLen of s) & "..."
+  return s
+end vbp_compact
+
+on vbp_replace(sourceText, searchText, replacementText)
+  set AppleScript's text item delimiters to searchText
+  set parts to text items of sourceText
+  set AppleScript's text item delimiters to replacementText
+  set joinedText to parts as text
+  set AppleScript's text item delimiters to ""
+  return joinedText
+end vbp_replace
+`;
+  try {
+    const { stdout } = await runner('osascript', ['-e', script], { timeout: 8_000 });
+    const text = String(stdout || '').trim();
+    if (!text.startsWith('OK|')) return { ok: false, reason: text || 'AX 未找到博主' };
+    const [, xRaw, yRaw, label] = text.split('|');
+    const x = Number(xRaw);
+    const y = Number(yRaw);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, reason: `AX 返回博主坐标无效: ${text}` };
+    const { window } = anchors;
+    if (x < window.x + 80 || x > window.x + window.width * 0.86 || y < window.y + 90 || y > window.y + window.height - 36) {
+      return { ok: false, reason: `AX 博主坐标越界: ${Math.round(x)},${Math.round(y)}` };
+    }
+    return { ok: true, x: Math.round(x), y: Math.round(y), detail: `AX昵称匹配=${compactForLog(label)}` };
+  } catch (e) {
+    return { ok: false, reason: String(e.stderr || e.message || e) };
+  }
 }
 
-export function validateVisionLocatorPoint({ px, py, imageWidth, imageHeight, region } = {}) {
-  const values = [px, py, imageWidth, imageHeight, region?.width, region?.height].map(Number);
-  if (values.some((value) => !Number.isFinite(value))) return '视觉定位缺少截图尺寸或区域信息';
-  if (px < 0 || py < 0 || px > imageWidth || py > imageHeight) return '视觉定位返回越界坐标';
-  const logicalX = (px / imageWidth) * region.width;
-  const minIconX = Math.max(4, region.width * 0.06);
-  const maxIconX = Math.min(region.width * 0.46, 58);
-  if (logicalX < minIconX || logicalX > maxIconX) {
-    return `视觉定位横坐标不在左侧图标列内: ${Math.round(logicalX)}`;
+async function readFollowingListSignatureByAX({ runner }) {
+  const signals = await readWechatSignalsByAX({ runner });
+  if (!signals.ok) return { signature: '', detail: signals.reason || 'AX 列表不可读' };
+  const lines = String(signals.text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/视频号|赞和收藏|展开|点赞|评论|收藏|转发/.test(line))
+    .slice(-24);
+  return {
+    signature: lines.join('|').slice(0, 1000),
+    detail: `列表签名=${compactForLog(lines.join(' / '))}`,
+  };
+}
+
+async function verifyCreatorHomeVisible({ runner, nickname }) {
+  const ax = await readWechatSignalsByAX({ runner });
+  if (ax.ok && ax.text.includes(nickname) && /关注|粉丝|作品|视频|动态/.test(ax.text)) {
+    return { ok: true, detail: `AX确认博主主页: ${compactForLog(ax.text)}` };
   }
-  return null;
+  return { ok: false, reason: ax.reason || `未确认打开博主主页 ${nickname}` };
+}
+
+async function verifyVideoDetailVisible({ runner }) {
+  const ax = await readWechatSignalsByAX({ runner });
+  if (ax.ok && /展开|点赞|评论|收藏|转发/.test(ax.text)) {
+    return { ok: true, detail: `AX确认视频详情: ${compactForLog(ax.text)}` };
+  }
+  const screenshot = await analyzeCurrentWechatWindowByScreenshot({ runner });
+  if (screenshot.ok && screenshot.videoDetail) return { ok: true, detail: screenshot.detail };
+  return { ok: false, reason: [ax.reason, screenshot.reason || screenshot.detail].filter(Boolean).join('；') || '未确认视频详情页' };
+}
+
+function followingListScrollPointFromAnchors(anchors) {
+  const { window } = anchors;
+  return {
+    x: Math.round(window.x + Math.min(Math.max(window.width * 0.32, 260), window.width - 160)),
+    y: Math.round(window.y + window.height * 0.58),
+  };
+}
+
+function videoSurfacePointFromAnchors(anchors) {
+  const { window } = anchors;
+  return {
+    x: Math.round(window.x + window.width * 0.54),
+    y: Math.round(window.y + window.height * 0.52),
+  };
+}
+
+async function readCreatorVideoCardsByAX({ runner, anchors }) {
+  const { window } = anchors;
+  const script = `
+on run
+  tell application "System Events"
+    repeat with bid in {"com.tencent.flue.WeChatAppEx", "com.tencent.xinWeChat"}
+      try
+        set p to first process whose bundle identifier is bid
+        if (count of windows of p) > 0 then
+          set rows to {}
+          repeat with el in entire contents of p
+            set label to my vbp_text(el)
+            if label is not "" then
+              try
+                set ep to position of el
+                set es to size of el
+                if (item 1 of es) > 60 and (item 2 of es) > 60 then
+                  set end of rows to "CARD|" & ((item 1 of ep) as text) & "|" & ((item 2 of ep) as text) & "|" & ((item 1 of es) as text) & "|" & ((item 2 of es) as text) & "|" & my vbp_compact(label, 80)
+                end if
+              end try
+            end if
+            if (count of rows) >= 80 then exit repeat
+          end repeat
+          set AppleScript's text item delimiters to linefeed
+          set outText to rows as text
+          set AppleScript's text item delimiters to ""
+          return outText
+        end if
+      end try
+    end repeat
+  end tell
+  return ""
+end run
+
+on vbp_text(el)
+  tell application "System Events"
+    set parts to {}
+    try
+      set end of parts to name of el
+    end try
+    try
+      set end of parts to description of el
+    end try
+    try
+      set v to value of el
+      if v is not missing value then set end of parts to v as text
+    end try
+    return parts as text
+  end tell
+end vbp_text
+
+on vbp_compact(valueText, maxLen)
+  set s to valueText as text
+  set s to my vbp_replace(s, return, " ")
+  set s to my vbp_replace(s, linefeed, " ")
+  if length of s > maxLen then return (text 1 thru maxLen of s) & "..."
+  return s
+end vbp_compact
+
+on vbp_replace(sourceText, searchText, replacementText)
+  set AppleScript's text item delimiters to searchText
+  set parts to text items of sourceText
+  set AppleScript's text item delimiters to replacementText
+  set joinedText to parts as text
+  set AppleScript's text item delimiters to ""
+  return joinedText
+end vbp_replace
+`;
+  try {
+    const { stdout } = await runner('osascript', ['-e', script], { timeout: 8_000 });
+    return String(stdout || '')
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => line.split('|'))
+      .filter((parts) => parts[0] === 'CARD')
+      .map((parts) => {
+        const x = Number(parts[1]);
+        const y = Number(parts[2]);
+        const width = Number(parts[3]);
+        const height = Number(parts[4]);
+        return {
+          x: Math.round(x + width / 2),
+          y: Math.round(y + height / 2),
+          width,
+          height,
+          label: parts.slice(5).join('|'),
+          pinned: /置顶/.test(parts.slice(5).join('|')),
+          source: 'ax',
+          confidence: 0.62,
+        };
+      })
+      .filter((card) => card.x > window.x + 120 && card.y > window.y + 120 && card.x < window.x + window.width - 40 && card.y < window.y + window.height - 40);
+  } catch {
+    return [];
+  }
+}
+
+function mergeCreatorCards(screenshotCards = [], axCards = []) {
+  const cards = screenshotCards.map((card) => ({ ...card, label: card.label || '' }));
+  for (const ax of axCards) {
+    const match = cards.find((card) => Math.abs(card.x - ax.x) <= Math.max(42, card.width / 2) && Math.abs(card.y - ax.y) <= Math.max(42, card.height / 2));
+    if (match) {
+      match.label = [match.label, ax.label].filter(Boolean).join(' ');
+      match.pinned ||= ax.pinned;
+      match.blocked ||= /直播|预约/.test(ax.label);
+      match.source = `${match.source || 'screenshot'}+ax`;
+    } else {
+      cards.push(ax);
+    }
+  }
+  return cards;
+}
+
+async function analyzeCreatorVideoCardsByScreenshot(path, anchors, { runner }) {
+  const { window } = anchors;
+  const swift = `
+import AppKit
+import CoreGraphics
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count >= 6,
+      let wx = Double(args[2]),
+      let wy = Double(args[3]),
+      let ww = Double(args[4]),
+      let wh = Double(args[5]),
+      let data = try? Data(contentsOf: URL(fileURLWithPath: args[1])),
+      let rep = NSBitmapImageRep(data: data) else {
+  print("[]")
+  exit(0)
+}
+
+let width = rep.pixelsWide
+let height = rep.pixelsHigh
+let bounds = CGDisplayBounds(CGMainDisplayID())
+let scaleX = Double(width) / max(Double(bounds.width), 1.0)
+let scaleY = Double(height) / max(Double(bounds.height), 1.0)
+func pixelX(_ x: Double) -> Int { min(width - 1, max(0, Int(((x - Double(bounds.minX)) * scaleX).rounded()))) }
+func pixelY(_ y: Double) -> Int { min(height - 1, max(0, Int(((y - Double(bounds.minY)) * scaleY).rounded()))) }
+
+let xStart = pixelX(wx + max(170.0, ww * 0.15))
+let xEnd = pixelX(wx + ww - 46.0)
+let yStart = pixelY(wy + 150.0)
+let yEnd = pixelY(wy + wh - 70.0)
+let cropW = max(0, xEnd - xStart + 1)
+let cropH = max(0, yEnd - yStart + 1)
+if cropW <= 0 || cropH <= 0 {
+  print("[]")
+  exit(0)
+}
+
+var rowCounts = Array(repeating: 0, count: cropH)
+var rowMinX = Array(repeating: Int.max, count: cropH)
+var rowMaxX = Array(repeating: 0, count: cropH)
+
+for cy in 0..<cropH {
+  for cx in stride(from: 0, to: cropW, by: 2) {
+    let x = xStart + cx
+    let y = yStart + cy
+    guard let raw = rep.colorAt(x: x, y: y), let c = raw.usingColorSpace(.deviceRGB) else { continue }
+    let r = Double(c.redComponent)
+    let g = Double(c.greenComponent)
+    let b = Double(c.blueComponent)
+    let a = Double(c.alphaComponent)
+    let luma = (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+    let chroma = max(r, max(g, b)) - min(r, min(g, b))
+    if a > 0.7 && (luma < 0.88 || chroma > 0.08) {
+      rowCounts[cy] += 1
+      rowMinX[cy] = min(rowMinX[cy], x)
+      rowMaxX[cy] = max(rowMaxX[cy], x)
+    }
+  }
+}
+
+let threshold = max(24, cropW / 28)
+var bands: [(start: Int, end: Int, minX: Int, maxX: Int, pixels: Int)] = []
+var start = -1
+var end = -1
+var minX = Int.max
+var maxX = 0
+var pixels = 0
+var gap = 0
+func flush() {
+  if start < 0 || end < start { return }
+  let hPts = Double(end - start + 1) / max(scaleY, 0.01)
+  let wPts = Double(maxX - minX + 1) / max(scaleX, 0.01)
+  if hPts >= 70.0 && wPts >= 70.0 && pixels >= 450 {
+    bands.append((start, end, minX, maxX, pixels))
+  }
+}
+for i in 0..<cropH {
+  if rowCounts[i] >= threshold {
+    if start < 0 { start = i }
+    end = i
+    minX = min(minX, rowMinX[i])
+    maxX = max(maxX, rowMaxX[i])
+    pixels += rowCounts[i]
+    gap = 0
+  } else if start >= 0 {
+    gap += 1
+    if gap > 8 {
+      flush()
+      start = -1
+      end = -1
+      minX = Int.max
+      maxX = 0
+      pixels = 0
+      gap = 0
+    }
+  }
+}
+flush()
+
+func pinnedScore(minX: Int, maxX: Int, startY: Int, endY: Int) -> Double {
+  let w = maxX - minX + 1
+  let h = endY - startY + 1
+  if w <= 20 || h <= 20 { return 0.0 }
+  let px0 = min(width - 1, max(0, maxX - max(22, w / 5)))
+  let px1 = min(width - 1, max(0, maxX - 4))
+  let py0 = min(height - 1, max(0, startY + Int(Double(h) * 0.58)))
+  let py1 = min(height - 1, max(0, endY - 4))
+  var bright = 0
+  var horizontalRows = 0
+  if px0 > px1 || py0 > py1 { return 0.0 }
+  for y in py0...py1 {
+    var rowBright = 0
+    for x in px0...px1 {
+      guard let raw = rep.colorAt(x: x, y: y), let c = raw.usingColorSpace(.deviceRGB) else { continue }
+      let r = Double(c.redComponent)
+      let g = Double(c.greenComponent)
+      let b = Double(c.blueComponent)
+      let a = Double(c.alphaComponent)
+      let luma = (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+      if a > 0.7 && luma > 0.72 && max(r, max(g, b)) - min(r, min(g, b)) < 0.25 {
+        bright += 1
+        rowBright += 1
+      }
+    }
+    if rowBright >= max(6, (px1 - px0 + 1) / 3) { horizontalRows += 1 }
+  }
+  return min(1.0, (Double(bright) / 70.0) + (Double(horizontalRows) / 18.0))
+}
+
+var cards: [[String: Any]] = []
+for band in bands {
+  let hPts = Double(band.end - band.start + 1) / max(scaleY, 0.01)
+  let wPts = Double(band.maxX - band.minX + 1) / max(scaleX, 0.01)
+  let centerX = Double(bounds.minX) + Double(band.minX + band.maxX) / 2.0 / scaleX
+  let centerY = Double(bounds.minY) + Double(yStart + band.start + yStart + band.end) / 2.0 / scaleY
+  let pin = pinnedScore(minX: band.minX, maxX: band.maxX, startY: yStart + band.start, endY: yStart + band.end)
+  cards.append([
+    "x": centerX,
+    "y": centerY,
+    "width": wPts,
+    "height": hPts,
+    "confidence": min(0.96, max(0.55, Double(band.pixels) / 1800.0)),
+    "pinned": pin >= 0.55,
+    "pinScore": pin,
+    "source": "screenshot"
+  ])
+}
+
+cards.sort { a, b in
+  let ay = a["y"] as? Double ?? 0
+  let by = b["y"] as? Double ?? 0
+  if abs(ay - by) > 36 { return ay < by }
+  return (a["x"] as? Double ?? 0) < (b["x"] as? Double ?? 0)
+}
+let json = try! JSONSerialization.data(withJSONObject: cards, options: [])
+print(String(data: json, encoding: .utf8)!)
+`;
+  const { stdout } = await runner('swift', [
+    '-e',
+    swift,
+    path,
+    String(window.x),
+    String(window.y),
+    String(window.width),
+    String(window.height),
+  ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+  return JSON.parse(String(stdout || '[]'));
+}
+
+async function analyzeNextArrowCandidatesByScreenshot(path, anchors, { runner }) {
+  const { window } = anchors;
+  const swift = `
+import AppKit
+import CoreGraphics
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count >= 6,
+      let wx = Double(args[2]),
+      let wy = Double(args[3]),
+      let ww = Double(args[4]),
+      let wh = Double(args[5]),
+      let data = try? Data(contentsOf: URL(fileURLWithPath: args[1])),
+      let rep = NSBitmapImageRep(data: data) else {
+  print("[]")
+  exit(0)
+}
+
+let width = rep.pixelsWide
+let height = rep.pixelsHigh
+let bounds = CGDisplayBounds(CGMainDisplayID())
+let scaleX = Double(width) / max(Double(bounds.width), 1.0)
+let scaleY = Double(height) / max(Double(bounds.height), 1.0)
+func pixelX(_ x: Double) -> Int { min(width - 1, max(0, Int(((x - Double(bounds.minX)) * scaleX).rounded()))) }
+func pixelY(_ y: Double) -> Int { min(height - 1, max(0, Int(((y - Double(bounds.minY)) * scaleY).rounded()))) }
+let xStart = pixelX(wx + ww * 0.70)
+let xEnd = pixelX(wx + ww - 24.0)
+let yStart = pixelY(wy + wh * 0.30)
+let yEnd = pixelY(wy + wh * 0.84)
+let cropW = max(0, xEnd - xStart + 1)
+let cropH = max(0, yEnd - yStart + 1)
+if cropW <= 0 || cropH <= 0 {
+  print("[]")
+  exit(0)
+}
+
+var mask = Array(repeating: false, count: cropW * cropH)
+func idx(_ x: Int, _ y: Int) -> Int { y * cropW + x }
+for cy in 0..<cropH {
+  for cx in 0..<cropW {
+    let x = xStart + cx
+    let y = yStart + cy
+    guard let raw = rep.colorAt(x: x, y: y), let c = raw.usingColorSpace(.deviceRGB) else { continue }
+    let r = Double(c.redComponent)
+    let g = Double(c.greenComponent)
+    let b = Double(c.blueComponent)
+    let a = Double(c.alphaComponent)
+    let luma = (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+    if a > 0.7 && luma > 0.52 && luma < 0.98 && max(r, max(g, b)) - min(r, min(g, b)) < 0.30 {
+      mask[idx(cx, cy)] = true
+    }
+  }
+}
+
+var visited = Array(repeating: false, count: cropW * cropH)
+let dirs = [(-1,-1),(0,-1),(1,-1),(-1,0),(1,0),(-1,1),(0,1),(1,1)]
+var candidates: [[String: Any]] = []
+for sy in 0..<cropH {
+  for sx in 0..<cropW {
+    let startIndex = idx(sx, sy)
+    if visited[startIndex] || !mask[startIndex] { continue }
+    var stack = [(sx, sy)]
+    visited[startIndex] = true
+    var pixels: [(Int, Int)] = []
+    var minX = sx
+    var maxX = sx
+    var minY = sy
+    var maxY = sy
+    while let (px, py) = stack.popLast() {
+      pixels.append((px, py))
+      minX = min(minX, px)
+      maxX = max(maxX, px)
+      minY = min(minY, py)
+      maxY = max(maxY, py)
+      for (dx, dy) in dirs {
+        let nx = px + dx
+        let ny = py + dy
+        if nx < 0 || ny < 0 || nx >= cropW || ny >= cropH { continue }
+        let ni = idx(nx, ny)
+        if visited[ni] || !mask[ni] { continue }
+        visited[ni] = true
+        stack.append((nx, ny))
+      }
+    }
+    let count = pixels.count
+    if count < 12 { continue }
+    let boxW = maxX - minX + 1
+    let boxH = maxY - minY + 1
+    let wPts = Double(boxW) / max(scaleX, 0.01)
+    let hPts = Double(boxH) / max(scaleY, 0.01)
+    if wPts < 8.0 || wPts > 72.0 || hPts < 8.0 || hPts > 72.0 { continue }
+    var lower = 0
+    var upper = 0
+    for (_, py) in pixels {
+      if py > minY + boxH / 2 { lower += 1 } else { upper += 1 }
+    }
+    let lowerRatio = Double(lower) / Double(max(count, 1))
+    let direction = lowerRatio >= 0.47 ? "down" : "up"
+    let density = Double(count) / Double(max(1, boxW * boxH))
+    let score = min(0.95, max(0.0, density + min(wPts, hPts) / 80.0 + (direction == "down" ? 0.08 : 0.0)))
+    candidates.append([
+      "x": Double(bounds.minX) + Double(xStart + minX + boxW / 2) / scaleX,
+      "y": Double(bounds.minY) + Double(yStart + minY + boxH / 2) / scaleY,
+      "width": wPts,
+      "height": hPts,
+      "score": score,
+      "direction": direction
+    ])
+  }
+}
+let json = try! JSONSerialization.data(withJSONObject: candidates, options: [])
+print(String(data: json, encoding: .utf8)!)
+`;
+  const { stdout } = await runner('swift', [
+    '-e',
+    swift,
+    path,
+    String(window.x),
+    String(window.y),
+    String(window.width),
+    String(window.height),
+  ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+  return JSON.parse(String(stdout || '[]'));
+}
+
+async function captureWechatWindowFingerprint({ runner, anchors }) {
+  let screenshot = null;
+  try {
+    screenshot = await captureSystemFullScreenshot({ runner });
+    if (!screenshot.ok) return { ok: false, signature: '' };
+    const signature = await screenshotWindowFingerprint(screenshot.path, anchors, { runner });
+    return { ok: true, signature };
+  } catch {
+    return { ok: false, signature: '' };
+  } finally {
+    cleanupCapturedScreenshot(screenshot);
+  }
+}
+
+async function screenshotWindowFingerprint(path, anchors, { runner }) {
+  const { window } = anchors;
+  const swift = `
+import AppKit
+import CoreGraphics
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count >= 6,
+      let wx = Double(args[2]),
+      let wy = Double(args[3]),
+      let ww = Double(args[4]),
+      let wh = Double(args[5]),
+      let data = try? Data(contentsOf: URL(fileURLWithPath: args[1])),
+      let rep = NSBitmapImageRep(data: data) else {
+  print("")
+  exit(0)
+}
+let width = rep.pixelsWide
+let height = rep.pixelsHigh
+let bounds = CGDisplayBounds(CGMainDisplayID())
+let scaleX = Double(width) / max(Double(bounds.width), 1.0)
+let scaleY = Double(height) / max(Double(bounds.height), 1.0)
+func pixelX(_ x: Double) -> Int { min(width - 1, max(0, Int(((x - Double(bounds.minX)) * scaleX).rounded()))) }
+func pixelY(_ y: Double) -> Int { min(height - 1, max(0, Int(((y - Double(bounds.minY)) * scaleY).rounded()))) }
+let gx = 7
+let gy = 7
+var parts: [String] = []
+for yy in 0..<gy {
+  for xx in 0..<gx {
+    let x0 = pixelX(wx + ww * (0.18 + 0.68 * Double(xx) / Double(gx)))
+    let x1 = pixelX(wx + ww * (0.18 + 0.68 * Double(xx + 1) / Double(gx)))
+    let y0 = pixelY(wy + wh * (0.16 + 0.70 * Double(yy) / Double(gy)))
+    let y1 = pixelY(wy + wh * (0.16 + 0.70 * Double(yy + 1) / Double(gy)))
+    var total = 0.0
+    var count = 0.0
+    if x0 <= x1 && y0 <= y1 {
+      for y in stride(from: y0, through: y1, by: 4) {
+        for x in stride(from: x0, through: x1, by: 4) {
+          guard let raw = rep.colorAt(x: x, y: y), let c = raw.usingColorSpace(.deviceRGB) else { continue }
+          let luma = (0.2126 * Double(c.redComponent)) + (0.7152 * Double(c.greenComponent)) + (0.0722 * Double(c.blueComponent))
+          total += luma
+          count += 1
+        }
+      }
+    }
+    parts.append(String(Int(((total / max(count, 1.0)) * 9.0).rounded())))
+  }
+}
+print(parts.joined())
+`;
+  const { stdout } = await runner('swift', [
+    '-e',
+    swift,
+    path,
+    String(window.x),
+    String(window.y),
+    String(window.width),
+    String(window.height),
+  ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+  return String(stdout || '').trim();
+}
+
+function fingerprintChanged(before, after) {
+  const a = String(before?.signature || '');
+  const b = String(after?.signature || '');
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) diff += 1;
+  return diff >= Math.max(3, Math.floor(a.length * 0.08));
 }
 
 async function clickAndVerify(location, { runner }) {
@@ -814,6 +1634,68 @@ usleep(90_000)
 post(.leftMouseUp)
 `;
   await runner('swift', ['-e', script, String(Math.round(x)), String(Math.round(y))], { timeout: 8_000 });
+}
+
+async function scrollAt(x, y, deltaY, { runner }) {
+  const script = `
+import CoreGraphics
+import Darwin
+import Foundation
+
+guard CommandLine.arguments.count >= 4,
+      let x = Double(CommandLine.arguments[1]),
+      let y = Double(CommandLine.arguments[2]),
+      let deltaY = Int32(CommandLine.arguments[3]) else {
+  exit(2)
+}
+
+let source = CGEventSource(stateID: .hidSystemState)
+let point = CGPoint(x: x, y: y)
+if let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
+  move.post(tap: .cghidEventTap)
+}
+usleep(80_000)
+if let event = CGEvent(scrollWheelEvent2Source: source, units: .line, wheelCount: 1, wheel1: deltaY, wheel2: 0, wheel3: 0) {
+  event.post(tap: .cghidEventTap)
+}
+usleep(120_000)
+`;
+  await runner('swift', ['-e', script, String(Math.round(x)), String(Math.round(y)), String(Math.round(deltaY))], { timeout: 8_000 });
+}
+
+async function mouseWiggle(x, y, { runner }) {
+  const script = `
+import CoreGraphics
+import Darwin
+import Foundation
+
+guard CommandLine.arguments.count >= 3,
+      let x = Double(CommandLine.arguments[1]),
+      let y = Double(CommandLine.arguments[2]) else {
+  exit(2)
+}
+
+let source = CGEventSource(stateID: .hidSystemState)
+for dx in [-18.0, 18.0, -10.0, 10.0, 0.0] {
+  let point = CGPoint(x: x + dx, y: y)
+  if let event = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
+    event.post(tap: .cghidEventTap)
+  }
+  usleep(70_000)
+}
+`;
+  await runner('swift', ['-e', script, String(Math.round(x)), String(Math.round(y))], { timeout: 8_000 });
+}
+
+async function commandW({ runner }) {
+  const script = `
+on run
+  tell application "System Events"
+    keystroke "w" using command down
+  end tell
+end run
+`;
+  await runner('osascript', ['-e', script], { timeout: 8_000 });
 }
 
 async function moveTo(x, y, { runner }) {

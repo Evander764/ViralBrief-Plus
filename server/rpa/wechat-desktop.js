@@ -11,8 +11,12 @@ import { sortPatrolAccounts } from './patrol.js';
 import {
   clickWechatChannelsFromMainByLocator,
   cleanupWechatAutoplayTabsByLocator,
+  closeWechatCreatorWithCommandW,
   detectWechatChannelsVisibleByScreenshot,
   ensureWechatOverviewByLocator,
+  goNextWechatVideoByScreenshot,
+  openFirstNonPinnedWechatVideoByScreenshot,
+  openWechatCreatorByFollowingScroll,
   openWechatFollowingOverviewByLocator,
   openWechatProfileEntryByLocator,
 } from './wechat-locator.js';
@@ -117,7 +121,7 @@ async function patrolWechatDesktopAccount(acc, { index, total, progress, scriptR
     if (!acc.nickname) return errorOutcome(acc, '缺少视频号博主昵称，无法在桌面微信内匹配');
     progress(`(${index + 1}/${total}) 打开桌面微信视频号博主 ${acc.nickname}`);
 
-    const openCreator = await runStep(scriptRunner, 'open_creator', { nickname: acc.nickname }, progress);
+    const openCreator = await runStep(scriptRunner, 'open_creator_by_following_scroll', { nickname: acc.nickname }, progress);
     if (shouldStop()) return stoppedOutcome(acc);
 
     const videos = await collectWechatDesktopLatestVideos(acc, {
@@ -127,16 +131,16 @@ async function patrolWechatDesktopAccount(acc, { index, total, progress, scriptR
     });
     if (shouldStop()) return stoppedOutcome(acc);
     if (!videos.length) {
-      throw new WechatDesktopPatrolError('collect_latest_videos', '未采集到微信视频号最新视频数据');
+      throw new WechatDesktopPatrolError('collect_current_videos', '未采集到微信视频号最新视频数据');
     }
 
     const navigation = mergeNavigationEvidence(opened, openCreator);
     const items = videos.map((video, i) => saveWechatDesktopVideoItem(acc, video, { opened: navigation, now, index: i }));
     markAccountPatrolled(acc.id);
-    await runStep(scriptRunner, 'close_creator_tabs', { keepTabTitle: '关注' }, progress, { optional: true });
+    await runStep(scriptRunner, 'close_creator_with_command_w', { keepTabTitle: '关注' }, progress, { optional: true });
     return okOutcome(acc, items, [{ reason: 'desktop_wechat_latest_videos', detail: `已采集微信视频号最新 ${items.length} 条视频` }]);
   } catch (e) {
-    await runStep(scriptRunner, 'close_creator_tabs', { keepTabTitle: '关注' }, progress, { optional: true });
+    await runStep(scriptRunner, 'close_creator_with_command_w', { keepTabTitle: '关注' }, progress, { optional: true });
     const message = friendlyWechatDesktopError(e);
     log.warn(`[RPA] 桌面微信视频号巡检失败 ${label}: ${message}`);
     return errorOutcome(acc, message);
@@ -189,7 +193,7 @@ export async function prepareWechatChannelsFollowing({ scriptRunner = defaultWec
 
 export async function openWechatDesktopCreator(acc, { scriptRunner = defaultWechatScriptRunner, progress = () => {} } = {}) {
   const opened = await prepareWechatChannelsFollowing({ scriptRunner, progress });
-  const creator = await runStep(scriptRunner, 'open_creator', { nickname: acc.nickname }, progress);
+  const creator = await runStep(scriptRunner, 'open_creator_by_following_scroll', { nickname: acc.nickname }, progress);
   return mergeNavigationEvidence(opened, creator);
 }
 
@@ -199,21 +203,32 @@ async function cleanupWechatChannelsSession({ scriptRunner, progress }) {
 
 async function collectWechatDesktopLatestVideos(acc, { scriptRunner, progress, count }) {
   const items = [];
+  const locatorEvidence = [];
   for (let index = 0; index < count; index++) {
     if (index === 0) {
-      await runStep(scriptRunner, 'open_first_non_pinned_video', { nickname: acc.nickname }, progress);
+      const opened = await runStep(scriptRunner, 'open_first_non_pinned_video_by_screenshot', { nickname: acc.nickname }, progress);
+      locatorEvidence.push(stepEvidence(opened));
     } else {
-      const next = await runStep(scriptRunner, 'go_next_video', { nickname: acc.nickname, index: index + 1 }, progress, { optional: true });
+      const next = await runStep(scriptRunner, 'go_next_video_by_screenshot', { nickname: acc.nickname, index: index + 1 }, progress, { optional: true });
       if (!next.ok) break;
+      locatorEvidence.push(stepEvidence(next));
     }
     const r = await runStep(scriptRunner, 'collect_current_video', { nickname: acc.nickname, index: index + 1 }, progress, { optional: true });
     if (!r.ok) break;
     const item = Array.isArray(r.items) ? r.items[0] : parseCollectedVideos(r.detail)[0];
     if (item && String(item.title || item.bodyExcerpt || item.body_excerpt || '').trim()) {
-      items.push(normalizeWechatVideoItem(item, index));
+      items.push(normalizeWechatVideoItem({ ...item, locatorEvidence: [...locatorEvidence, stepEvidence(r)] }, index));
     }
   }
   return items;
+}
+
+function stepEvidence(stepResult) {
+  return {
+    step: stepResult?.step || stepResult?.code || null,
+    method: stepResult?.method || null,
+    detail: stepResult?.detail || null,
+  };
 }
 
 async function runStep(scriptRunner, step, payload, progress, { optional = false } = {}) {
@@ -226,7 +241,7 @@ async function runStep(scriptRunner, step, payload, progress, { optional = false
     }
     throw new WechatDesktopPatrolError(r?.code || step, r?.message || `桌面微信步骤失败: ${step}`);
   }
-  if (r.detail && step !== 'collect_latest_videos') progress(`  ${r.detail}`);
+  if (r.detail) progress(`  ${r.detail}`);
   return { ...r, step, code: r.code || step };
 }
 
@@ -271,6 +286,7 @@ function normalizeWechatVideoItem(item, index) {
   const bodyExcerpt = String(firstPresent(item.bodyExcerpt, item.body_excerpt, item.expandedText, item.expanded_text, item.textDump, item.rawText, '') || '').trim();
   const title = String(firstPresent(item.title, firstTitleLine(bodyExcerpt), '') || '').trim();
   const metricPositions = item.metricPositions || item.metric_positions || {};
+  const locatorEvidence = Array.isArray(item.locatorEvidence) ? item.locatorEvidence : [];
   return {
     title,
     bodyExcerpt,
@@ -291,6 +307,11 @@ function normalizeWechatVideoItem(item, index) {
     rawText: item.rawText || item.raw_text || item.textDump || item.text_dump || null,
     frames: Array.isArray(item.frames) ? item.frames : [],
     metricPositions,
+    locatorEvidence,
+    expandedClicked: Boolean(item.expandedClicked ?? item.expanded_clicked),
+    textSource: item.textSource || item.text_source || 'ax',
+    textCompleteness: item.textCompleteness || item.text_completeness || (bodyExcerpt ? 'ax_visible' : 'ax_empty'),
+    textDiagnostics: item.textDiagnostics || item.text_diagnostics || null,
   };
 }
 
@@ -308,6 +329,14 @@ function buildWechatMetricsEvidence(video, opened) {
     comment: { label: '评论', raw: video.commentRaw ?? video.comment, source: 'desktop_wechat', position: position('comment') },
     rawText: video.rawText || null,
     frames: video.frames || [],
+    locator: {
+      source: 'system_screenshot_code',
+      steps: video.locatorEvidence || [],
+      expandedClicked: !!video.expandedClicked,
+      textSource: video.textSource || 'ax',
+      textCompleteness: video.textCompleteness || null,
+      textDiagnostics: video.textDiagnostics || null,
+    },
   };
 }
 
@@ -488,6 +517,18 @@ function appendWechatDiagnostics(base, message) {
 }
 
 async function defaultWechatScriptRunner(step, payload = {}) {
+  if (step === 'open_creator_by_following_scroll') {
+    return await openWechatCreatorByFollowingScroll({ runner: execFileAsync, nickname: payload.nickname });
+  }
+  if (step === 'open_first_non_pinned_video_by_screenshot') {
+    return await openFirstNonPinnedWechatVideoByScreenshot({ runner: execFileAsync, nickname: payload.nickname });
+  }
+  if (step === 'go_next_video_by_screenshot') {
+    return await goNextWechatVideoByScreenshot({ runner: execFileAsync, nickname: payload.nickname, index: payload.index });
+  }
+  if (step === 'close_creator_with_command_w') {
+    return await closeWechatCreatorWithCommandW({ runner: execFileAsync, keepTabTitle: payload.keepTabTitle || '关注' });
+  }
   const script = appleScriptForStep(step, payload);
   try {
     const { stdout, stderr } = await execFileAsync('osascript', ['-e', script], { timeout: 60_000 });
@@ -548,13 +589,6 @@ async function defaultWechatScriptRunner(step, payload = {}) {
       const screenshotPath = await captureWechatDesktopScreenshot(`${payload.nickname || 'wechat'}_${payload.index || 'video'}`);
       const items = Array.isArray(parsed.items) ? parsed.items : parseCollectedVideos(parsed.detail);
       parsed.items = items.map((item) => ({ ...item, screenshotPath: item.screenshotPath || screenshotPath }));
-    }
-    if (step === 'collect_latest_videos' && parsed.ok) {
-      const items = Array.isArray(parsed.items) ? parsed.items : parseCollectedVideos(parsed.detail);
-      if (items.length) {
-        const screenshotPath = await captureWechatDesktopScreenshot(payload.nickname || 'wechat');
-        parsed.items = items.map((item) => ({ ...item, screenshotPath: item.screenshotPath || screenshotPath }));
-      }
     }
     return parsed;
   } catch (e) {
@@ -814,12 +848,7 @@ function appleScriptForStep(step, payload = {}) {
     'open_overview',
     'open_following_overview',
     'cleanup_autoplay_tabs',
-    'open_creator',
-    'open_first_non_pinned_video',
     'collect_current_video',
-    'go_next_video',
-    'collect_latest_videos',
-    'close_creator_tabs',
     'close_channels_tabs',
   ]);
   if (!knownSteps.has(step)) throw new Error(`unknown desktop wechat step: ${step}`);
@@ -926,27 +955,13 @@ on run
       return my vbp_result(false, "open_following_overview", "left_sidebar_only", "未找到左侧关注，避免误点顶部关注；" & my vbp_following_diagnostics(targetProcess) & "；" & my vbp_context_diagnostics(targetProcess))
     else if "${step}" is "cleanup_autoplay_tabs" then
       return my vbp_result(true, "cleanup_autoplay_tabs", "protect_following_tab", my vbp_cleanup_autoplay_tabs(targetProcess, ${keepTabTitle}))
-    else if "${step}" is "open_creator" then
-      if my vbp_click_creator_in_following(targetProcess, ${nickname}) then return my vbp_result(true, "open_creator", "following_list", "已从关注总览打开匹配博主")
-      if my vbp_search_and_click_creator(targetProcess, ${nickname}) then return my vbp_result(true, "open_creator", "search", "已搜索并打开匹配博主")
-      return my vbp_result(false, "creator_not_found", "following_list", "未在桌面微信视频号里找到匹配博主")
-    else if "${step}" is "open_first_non_pinned_video" then
-      if my vbp_open_first_non_pinned_video(targetProcess) then return my vbp_result(true, "open_first_non_pinned_video", "creator_grid", "已打开第一条非置顶视频")
-      return my vbp_result(false, "open_first_non_pinned_video", "creator_grid", "未找到可打开的非置顶视频；" & my vbp_context_diagnostics(targetProcess))
     else if "${step}" is "collect_current_video" then
       delay 0.9
       my vbp_pause_video_if_possible(targetProcess)
-      my vbp_click_expand_if_present(targetProcess)
-      set itemJson to my vbp_collect_current_video_json(targetProcess, ${ordinal})
+      set expandedClicked to my vbp_click_expand_if_present(targetProcess)
+      set itemJson to my vbp_collect_current_video_json(targetProcess, ${ordinal}, expandedClicked)
       if itemJson is "" then return my vbp_result(false, "collect_current_video", "current_video", "当前视频没有可采集文本或指标；" & my vbp_context_diagnostics(targetProcess))
       return "{\\"ok\\":true,\\"code\\":\\"collect_current_video\\",\\"method\\":\\"current_video\\",\\"detail\\":\\"collected current\\",\\"items\\":[" & itemJson & "]}"
-    else if "${step}" is "go_next_video" then
-      if my vbp_click_next_video_arrow(targetProcess) then return my vbp_result(true, "go_next_video", "fixed_right_next", "已点击右侧下一个视频箭头")
-      return my vbp_result(false, "go_next_video", "fixed_right_next", "未找到或无法点击右侧下一个视频箭头")
-    else if "${step}" is "collect_latest_videos" then
-      return my vbp_collect_latest_videos(targetProcess, ${count})
-    else if "${step}" is "close_creator_tabs" then
-      return my vbp_result(true, "close_creator_tabs", "protect_following_tab", my vbp_close_non_following_tabs(targetProcess, ${keepTabTitle}))
     else if "${step}" is "close_channels_tabs" then
       set closeDetail to my vbp_close_non_following_tabs(targetProcess, ${keepTabTitle})
       my vbp_return_wechat_home(targetProcess)
@@ -1377,98 +1392,6 @@ on vbp_close_non_following_tabs(targetProcessRef, keepTitle)
   end tell
 end vbp_close_non_following_tabs
 
-on vbp_click_creator_in_following(targetProcessRef, term)
-  tell application "System Events"
-    repeat with el in entire contents of targetProcessRef
-      set label to my vbp_text(el)
-      if label contains term then
-        try
-          click el
-          delay 1.3
-          return true
-        end try
-      end if
-    end repeat
-  end tell
-  return false
-end vbp_click_creator_in_following
-
-on vbp_search_and_click_creator(targetProcessRef, term)
-  tell application "System Events"
-    if my vbp_click_named(targetProcessRef, {"搜索", "Search"}, false) then
-      keystroke term
-      key code 36
-      delay 1.6
-      return my vbp_click_creator_in_following(targetProcessRef, term)
-    end if
-  end tell
-  return false
-end vbp_search_and_click_creator
-
-on vbp_collect_latest_videos(targetProcessRef, maxCount)
-  tell application "System Events"
-    set jsonItems to ""
-    set collectedCount to 0
-    repeat with i from 1 to maxCount
-      if i is 1 then
-        if not my vbp_open_first_non_pinned_video(targetProcessRef) then exit repeat
-      end if
-      delay 0.9
-      my vbp_pause_video_if_possible(targetProcessRef)
-      my vbp_click_expand_if_present(targetProcessRef)
-      set itemJson to my vbp_collect_current_video_json(targetProcessRef, i)
-      if itemJson is not "" then
-        if collectedCount > 0 then set jsonItems to jsonItems & ","
-        set jsonItems to jsonItems & itemJson
-        set collectedCount to collectedCount + 1
-      end if
-      if i < maxCount then
-        if not my vbp_click_next_video_arrow(targetProcessRef) then exit repeat
-      end if
-    end repeat
-    return "{\\"ok\\":true,\\"code\\":\\"collect_latest_videos\\",\\"method\\":\\"video_detail_sequence\\",\\"detail\\":\\"collected " & collectedCount & "\\",\\"items\\":[" & jsonItems & "]}"
-  end tell
-end vbp_collect_latest_videos
-
-on vbp_open_first_non_pinned_video(targetProcessRef)
-  tell application "System Events"
-    set w to window 1 of targetProcessRef
-    set wp to position of w
-    set ws to size of w
-    set minY to (item 2 of wp) + 360
-    set bestEl to missing value
-    set bestY to 99999
-    repeat with el in entire contents of targetProcessRef
-      set label to my vbp_text(el)
-      if label is not "" and label does not contain "置顶" and label does not contain "预约" and label does not contain "直播" then
-        try
-          set p to position of el
-          set s to size of el
-          if (item 2 of p) > minY and (item 1 of s) > 60 and (item 2 of s) > 60 then
-            if (item 2 of p) < bestY then
-              set bestY to item 2 of p
-              set bestEl to el
-            end if
-          end if
-        end try
-      end if
-    end repeat
-    if bestEl is not missing value then
-      try
-        click bestEl
-        delay 1.2
-        return true
-      end try
-    end if
-    try
-      click at {(item 1 of wp) + 165, (item 2 of wp) + 555}
-      delay 1.2
-      return true
-    end try
-  end tell
-  return false
-end vbp_open_first_non_pinned_video
-
 on vbp_pause_video_if_possible(targetProcessRef)
   tell application "System Events"
     try
@@ -1494,21 +1417,7 @@ on vbp_click_expand_if_present(targetProcessRef)
   return false
 end vbp_click_expand_if_present
 
-on vbp_click_next_video_arrow(targetProcessRef)
-  tell application "System Events"
-    try
-      set w to window 1 of targetProcessRef
-      set p to position of w
-      set s to size of w
-      click at {(item 1 of p) + (item 1 of s) - 70, (item 2 of p) + ((item 2 of s) * 0.54)}
-      delay 0.9
-      return true
-    end try
-  end tell
-  return false
-end vbp_click_next_video_arrow
-
-on vbp_collect_current_video_json(targetProcessRef, ordinal)
+on vbp_collect_current_video_json(targetProcessRef, ordinal, expandedClicked)
   tell application "System Events"
     set allText to my vbp_visible_text_dump(targetProcessRef)
     set likeMetric to my vbp_metric_at_bucket(targetProcessRef, "like")
@@ -1516,7 +1425,19 @@ on vbp_collect_current_video_json(targetProcessRef, ordinal)
     set favoriteMetric to my vbp_metric_at_bucket(targetProcessRef, "favorite")
     set commentMetric to my vbp_metric_at_bucket(targetProcessRef, "comment")
     set titleText to my vbp_title_from_dump(allText, ordinal)
-    return "{\\"title\\":\\"" & my vbp_json_escape(titleText) & "\\",\\"bodyExcerpt\\":\\"" & my vbp_json_escape(allText) & "\\",\\"like\\":\\"" & my vbp_json_escape(likeMetric) & "\\",\\"share\\":\\"" & my vbp_json_escape(shareMetric) & "\\",\\"favorite\\":\\"" & my vbp_json_escape(favoriteMetric) & "\\",\\"comment\\":\\"" & my vbp_json_escape(commentMetric) & "\\",\\"rawText\\":\\"" & my vbp_json_escape(allText) & "\\",\\"metricPositions\\":{\\"like\\":\\"right-bottom-like\\",\\"share\\":\\"right-bottom-share\\",\\"favorite\\":\\"right-bottom-favorite\\",\\"comment\\":\\"right-bottom-comment\\"}}"
+    if expandedClicked then
+      set expandedValue to "true"
+    else
+      set expandedValue to "false"
+    end if
+    if allText is "" then
+      set textCompleteness to "ax_empty"
+      set textDiagnostics to "展开后微信未暴露可读文案，需人工复核截图"
+    else
+      set textCompleteness to "ax_visible"
+      set textDiagnostics to "展开后使用微信辅助功能可读文本"
+    end if
+    return "{\\"title\\":\\"" & my vbp_json_escape(titleText) & "\\",\\"bodyExcerpt\\":\\"" & my vbp_json_escape(allText) & "\\",\\"like\\":\\"" & my vbp_json_escape(likeMetric) & "\\",\\"share\\":\\"" & my vbp_json_escape(shareMetric) & "\\",\\"favorite\\":\\"" & my vbp_json_escape(favoriteMetric) & "\\",\\"comment\\":\\"" & my vbp_json_escape(commentMetric) & "\\",\\"rawText\\":\\"" & my vbp_json_escape(allText) & "\\",\\"expandedClicked\\":" & expandedValue & ",\\"textSource\\":\\"ax\\",\\"textCompleteness\\":\\"" & textCompleteness & "\\",\\"textDiagnostics\\":\\"" & my vbp_json_escape(textDiagnostics) & "\\",\\"metricPositions\\":{\\"like\\":\\"right-bottom-like\\",\\"share\\":\\"right-bottom-share\\",\\"favorite\\":\\"right-bottom-favorite\\",\\"comment\\":\\"right-bottom-comment\\"}}"
   end tell
 end vbp_collect_current_video_json
 

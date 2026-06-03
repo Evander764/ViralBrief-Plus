@@ -15,15 +15,15 @@ const {
   locateChannelsIconByCode,
   autoplayTabClosePlanFromAnchors,
   chooseAutoplayClosePlanFromCandidates,
+  chooseFirstNonPinnedVideoCard,
   chooseFollowingSidebarPointFromRows,
+  chooseNextVideoArrowCandidate,
   followingSidebarPointFromAnchors,
   profileEntryPointFromAnchors,
   validateAutoplayTabClosePlan,
   validateChannelsWindowFullScreenshotMetrics,
   validateFollowingSidebarPoint,
   validateProfileEntryPoint,
-  validateVisionLocatorPoint,
-  validateVisionLocatorResult,
 } = await import('../server/rpa/wechat-locator.js');
 
 beforeEach(() => {
@@ -65,9 +65,6 @@ function fakeRunner({ failStep = '', collectItems = sampleCollectedVideos(), met
         ? { ok: true, code: step, method: 'current_video', detail: 'collected current', items: [item] }
         : { ok: false, code: step, message: 'no current video' };
     }
-    if (step === 'collect_latest_videos') {
-      return { ok: true, code: step, method: 'video_detail_sequence', detail: 'collected latest videos', items: collectItems };
-    }
     return { ok: true, code: step, method: methods[step] || 'ax', detail: `${step} ok` };
   };
   runner.calls = calls;
@@ -96,21 +93,21 @@ test('desktop WeChat patrol enters following overview once, opens nickname, and 
     'open_overview',
     'open_following_overview',
     'cleanup_autoplay_tabs',
-    'open_creator',
-    'open_first_non_pinned_video',
+    'open_creator_by_following_scroll',
+    'open_first_non_pinned_video_by_screenshot',
     'collect_current_video',
-    'go_next_video',
+    'go_next_video_by_screenshot',
     'collect_current_video',
-    'go_next_video',
+    'go_next_video_by_screenshot',
     'collect_current_video',
-    'close_creator_tabs',
+    'close_creator_with_command_w',
     'close_channels_tabs',
   ]);
   assert.equal(runner.calls.find((c) => c.step === 'cleanup_autoplay_tabs').payload.keepTabTitle, '关注');
   assert.equal(runner.calls.find((c) => c.step === 'activate_wechat_main_window').payload.nickname, undefined);
   assert.equal(runner.calls.find((c) => c.step === 'open_channels_from_main').payload.nickname, undefined);
   assert.equal(runner.calls.find((c) => c.step === 'activate_existing_channels').payload.nickname, undefined);
-  assert.equal(runner.calls.find((c) => c.step === 'open_creator').payload.nickname, '目标视频号');
+  assert.equal(runner.calls.find((c) => c.step === 'open_creator_by_following_scroll').payload.nickname, '目标视频号');
   assert.deepEqual(runner.calls.filter((c) => c.step === 'collect_current_video').map((c) => c.payload.index), [1, 2, 3]);
 
   const rows = await import('../server/db.js').then(({ all }) => all('SELECT * FROM contents WHERE account_id = ? AND platform = ? ORDER BY title', [acc.id, 'wechat_channels']));
@@ -151,7 +148,7 @@ test('desktop WeChat patrol respects custom maxVideosPerAccount clamp', async ()
   assert.equal(runner.calls.filter((c) => c.step === 'collect_current_video').length, 2);
 });
 
-test('desktop WeChat patrol records main-window, fixed-coordinate and protected-tab evidence', async () => {
+test('desktop WeChat patrol records main-window, screenshot locator and protected-tab evidence', async () => {
   const acc = upsertAccount({ platform: 'wechat_channels', nickname: '坐标号', monitor_enabled: true });
   const runner = fakeRunner({
     methods: {
@@ -160,6 +157,9 @@ test('desktop WeChat patrol records main-window, fixed-coordinate and protected-
       activate_existing_channels: 'channels_dock_window',
       cleanup_autoplay_tabs: 'protect_following_tab',
       open_following_overview: 'left_sidebar_only',
+      open_creator_by_following_scroll: 'following_scroll_locator',
+      open_first_non_pinned_video_by_screenshot: 'creator_grid_screenshot',
+      go_next_video_by_screenshot: 'right_arrow_screenshot',
     },
   });
 
@@ -177,6 +177,8 @@ test('desktop WeChat patrol records main-window, fixed-coordinate and protected-
   assert.match(evidence.navigation.method, /channels_dock_window/);
   assert.match(evidence.navigation.method, /protect_following_tab/);
   assert.match(evidence.navigation.method, /left_sidebar_only/);
+  assert.equal(evidence.locator.source, 'system_screenshot_code');
+  assert.match(evidence.locator.steps.map((step) => step.method).join('|'), /creator_grid_screenshot|right_arrow_screenshot/);
 });
 
 test('desktop WeChat patrol falls back to the Channels Dock icon when main entry fails', async () => {
@@ -218,15 +220,15 @@ test('desktop WeChat patrol reports missing Accessibility permission during setu
 
 test('desktop WeChat patrol reports creator lookup failure and keeps cleanup stop-safe', async () => {
   upsertAccount({ platform: 'wechat_channels', nickname: '不存在博主', monitor_enabled: true });
-  const runner = fakeRunner({ failStep: 'open_creator' });
+  const runner = fakeRunner({ failStep: 'open_creator_by_following_scroll' });
   const result = await runWechatDesktopPatrol({
     scriptRunner: runner,
     includePatrolledToday: true,
   });
 
   assert.equal(result.failed, 1);
-  assert.match(result.details[0].error, /open_creator failed/);
-  assert.equal(runner.calls.at(-2).step, 'close_creator_tabs');
+  assert.match(result.details[0].error, /open_creator_by_following_scroll failed/);
+  assert.equal(runner.calls.at(-2).step, 'close_creator_with_command_w');
   assert.equal(runner.calls.at(-1).step, 'close_channels_tabs');
 });
 
@@ -247,7 +249,7 @@ test('desktop WeChat patrol does not mark account patrolled when stopped after o
   let stop = false;
   const wrappedRunner = async (step, payload) => {
     const r = await runner(step, payload);
-    if (step === 'open_creator') stop = true;
+    if (step === 'open_creator_by_following_scroll') stop = true;
     return r;
   };
   wrappedRunner.calls = runner.calls;
@@ -269,7 +271,7 @@ test('desktop WeChat parser accepts structured JSON result with long text delimi
   const parsed = __wechatDesktopInternals.parseScriptResult(
     JSON.stringify({
       ok: true,
-      code: 'collect_latest_videos',
+      code: 'collect_current_video',
       method: 'video_detail_sequence',
       detail: '文案里有 | 也能保留',
       items: [{ title: '标题|带分隔符', like: '1.2万' }],
@@ -319,24 +321,64 @@ test('desktop WeChat locator reads traffic-light anchors by role and targets the
   assert.match(located.diagnostics, /蝴蝶形视频号图标/);
 });
 
-test('desktop WeChat locator refuses invalid or low-information vision coordinates', () => {
-  assert.equal(validateVisionLocatorResult({ x: 10, y: 20, confidence: 0.8 }), null);
-  assert.match(validateVisionLocatorResult({ x: 'left', y: 20, confidence: 0.8 }), /x 必须是数字/);
-  assert.match(validateVisionLocatorResult({ x: 10, y: 20, confidence: 'high' }), /confidence 必须是数字/);
-  assert.equal(validateVisionLocatorPoint({
-    px: 58,
-    py: 700,
-    imageWidth: 248,
-    imageHeight: 1536,
-    region: { width: 124, height: 768 },
-  }), null);
-  assert.match(validateVisionLocatorPoint({
-    px: 124,
-    py: 700,
-    imageWidth: 248,
-    imageHeight: 1536,
-    region: { width: 124, height: 768 },
-  }), /不在左侧图标列/);
+test('desktop WeChat code picker skips pinned creator videos and chooses the first normal card', () => {
+  const anchors = parseTrafficLightOutput([
+    'WINDOW|微信视频号|111|75|1826|974|0',
+    'BUTTON|close|关闭按钮|154|102|18|18',
+    'BUTTON|minimize|最小化按钮|194|102|18|18',
+    'BUTTON|zoom|全屏幕按钮|234|102|18|18',
+  ].join('\n'));
+
+  const picked = chooseFirstNonPinnedVideoCard([
+    { x: 430, y: 420, width: 188, height: 250, pinned: true, confidence: 0.92 },
+    { x: 650, y: 420, width: 188, height: 250, label: '置顶', confidence: 0.92 },
+    { x: 870, y: 420, width: 188, height: 250, label: '直播', confidence: 0.92 },
+    { x: 430, y: 710, width: 188, height: 250, confidence: 0.88 },
+  ], anchors);
+
+  assert.equal(picked.ok, true);
+  assert.equal(picked.x, 430);
+  assert.equal(picked.y, 710);
+  assert.equal(picked.skippedPinned, 2);
+  assert.equal(picked.skippedBlocked, 1);
+  assert.match(picked.detail, /creator_grid_card/);
+});
+
+test('desktop WeChat code picker refuses uncertain creator video cards instead of clicking fallback coordinates', () => {
+  const anchors = parseTrafficLightOutput([
+    'WINDOW|微信视频号|111|75|1826|974|0',
+    'BUTTON|close|关闭按钮|154|102|18|18',
+    'BUTTON|minimize|最小化按钮|194|102|18|18',
+    'BUTTON|zoom|全屏幕按钮|234|102|18|18',
+  ].join('\n'));
+
+  const picked = chooseFirstNonPinnedVideoCard([
+    { x: 430, y: 420, width: 188, height: 250, pinned: true, confidence: 0.92 },
+    { x: 650, y: 420, width: 188, height: 250, confidence: 0.41 },
+  ], anchors);
+
+  assert.equal(picked.ok, false);
+  assert.match(picked.reason, /未识别到高置信非置顶视频卡片/);
+});
+
+test('desktop WeChat code picker targets the right-side down arrow from screenshot candidates', () => {
+  const anchors = parseTrafficLightOutput([
+    'WINDOW|微信视频号|111|75|1826|974|0',
+    'BUTTON|close|关闭按钮|154|102|18|18',
+    'BUTTON|minimize|最小化按钮|194|102|18|18',
+    'BUTTON|zoom|全屏幕按钮|234|102|18|18',
+  ].join('\n'));
+
+  const picked = chooseNextVideoArrowCandidate([
+    { x: 1500, y: 410, score: 0.4, direction: 'up' },
+    { x: 1512, y: 620, score: 0.32, direction: 'down' },
+    { x: 400, y: 620, score: 0.8, direction: 'down' },
+  ], anchors);
+
+  assert.equal(picked.ok, true);
+  assert.equal(picked.x, 1512);
+  assert.equal(picked.y, 620);
+  assert.match(picked.detail, /right_arrow/);
 });
 
 test('desktop WeChat profile and following locator coordinates stay inside safe window regions', () => {
@@ -617,16 +659,19 @@ test('desktop WeChat friendly errors prefer the main page and keep the Dock fall
   assert.match(diagnosticMessage, /窗口诊断=bundle com\.tencent\.xinWeChat/);
 });
 
-test('desktop WeChat AppleScript collection skips pinned, expands text, maps metrics, and uses next arrow', () => {
-  const script = __wechatDesktopInternals.appleScriptForStep('collect_latest_videos', { count: 3 });
-  assert.match(script, /vbp_open_first_non_pinned_video/);
-  assert.match(script, /label does not contain "置顶"/);
+test('desktop WeChat AppleScript collection only reads current detail text and metrics', () => {
+  const script = __wechatDesktopInternals.appleScriptForStep('collect_current_video', { index: 1 });
   assert.match(script, /vbp_click_expand_if_present/);
-  assert.match(script, /vbp_click_next_video_arrow/);
+  assert.match(script, /expandedClicked/);
+  assert.match(script, /textSource/);
+  assert.match(script, /ax_empty/);
   assert.match(script, /\\"like\\"/);
   assert.match(script, /\\"share\\"/);
   assert.match(script, /\\"favorite\\"/);
   assert.match(script, /\\"comment\\"/);
+  assert.throws(() => __wechatDesktopInternals.appleScriptForStep('collect_latest_videos', { count: 3 }), /unknown desktop wechat step/);
+  assert.throws(() => __wechatDesktopInternals.appleScriptForStep('open_first_non_pinned_video'), /unknown desktop wechat step/);
+  assert.throws(() => __wechatDesktopInternals.appleScriptForStep('go_next_video'), /unknown desktop wechat step/);
 });
 
 test('desktop WeChat screenshots use only the system screenshot path', () => {
@@ -637,6 +682,16 @@ test('desktop WeChat screenshots use only the system screenshot path', () => {
   assert.match(source, /screencapture/);
   assert.doesNotMatch(source, new RegExp(['control', 'command'].join('.+')));
   assert.doesNotMatch(source, new RegExp(['clip', 'board'].join('')));
+});
+
+test('desktop WeChat locator source does not use AI or OCR fallbacks', () => {
+  const source = readFileSync(new URL('../server/rpa/wechat-locator.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /callJSON/);
+  assert.doesNotMatch(source, /vision_left_rail/);
+  assert.doesNotMatch(source, /locateChannelsIconByVision/);
+  assert.doesNotMatch(source, /\bOCR\b/i);
+  assert.match(source, /screencapture/);
+  assert.match(source, /CoreGraphics/);
 });
 
 test('desktop WeChat friendly errors distinguish left-sidebar following from top following', () => {

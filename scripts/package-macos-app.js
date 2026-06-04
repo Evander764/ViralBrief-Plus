@@ -16,12 +16,16 @@ const ROOT = resolve(dirname(__filename), '..');
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
-const appName = envText('VBP_MAC_APP_NAME', 'Viral Brief Plus');
+// 命名规则（见 CLAUDE.md「打包与版本命名」）：本项目只产出一个正式 app，名字固定为 “Viral Brief Plus”。
+// 不要用 VBP_MAC_APP_NAME 改名打包（历史上改成 “Viral Brief Plus WeChat” 造成了多个 app/数据目录混乱）。
+const appName = 'Viral Brief Plus';
 const productSlug = envText('VBP_MAC_PRODUCT_SLUG', 'viral-brief-plus');
 const bundleId = envText('VBP_MAC_BUNDLE_ID', 'local.viralbrief.app.v3');
 const appSupportName = envText('VBP_MAC_APP_SUPPORT_NAME', 'Viral Brief Plus');
 const defaultPort = envText('VBP_MAC_DEFAULT_PORT', '8787');
-const versionTag = `${pkg.version}-${stamp}`;
+// 产物只用 semver 版本号命名（不再拼时间戳）：同一版本重打包会覆盖旧产物，避免 releases 目录堆几十个怪名字。
+// 版本迭代：新功能 → 次版本 +1（npm run release:feature）；优化 → 补丁版本 +1（npm run release:fix）。
+const versionTag = pkg.version;
 const distDir = join(ROOT, 'dist');
 const macDir = join(distDir, 'mac');
 const releasesDir = join(distDir, 'releases');
@@ -123,7 +127,7 @@ function writeInfoPlist() {
   <key>CFBundleShortVersionString</key>
   <string>${pkg.version}</string>
   <key>CFBundleVersion</key>
-  <string>${stamp}</string>
+  <string>${pkg.version}</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>

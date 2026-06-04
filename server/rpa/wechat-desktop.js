@@ -8,6 +8,7 @@ import { loadConfig } from '../config.js';
 import { log } from '../lib/log.js';
 import { SCREENSHOTS_DIR } from '../lib/paths.js';
 import { sortPatrolAccounts } from './patrol.js';
+import { runWechatSwift } from './wechat-swift.js';
 import {
   clickWechatChannelsFromMainByLocator,
   cleanupWechatAutoplayTabsByLocator,
@@ -512,11 +513,20 @@ function appendWechatDiagnostics(base, message) {
   const diagnostics = String(message || '')
     .split('；')
     .map((part) => part.trim())
-    .filter((part) => /Dock候选|窗口诊断|关注候选/.test(part));
+    .filter((part) => /Dock候选|窗口诊断|关注候选|截图|定位|几何参考|行距|左侧栏|rows=|groups=/.test(part));
   return diagnostics.length ? `${base}；${diagnostics.join('；')}` : base;
 }
 
 async function defaultWechatScriptRunner(step, payload = {}) {
+  if (step === 'open_profile_entry') {
+    return await openWechatProfileEntryByLocator({ runner: execFileAsync });
+  }
+  if (step === 'open_overview') {
+    return await ensureWechatOverviewByLocator({ runner: execFileAsync });
+  }
+  if (step === 'open_following_overview') {
+    return await openWechatFollowingOverviewByLocator({ runner: execFileAsync });
+  }
   if (step === 'open_creator_by_following_scroll') {
     return await openWechatCreatorByFollowingScroll({ runner: execFileAsync, nickname: payload.nickname });
   }
@@ -528,6 +538,17 @@ async function defaultWechatScriptRunner(step, payload = {}) {
   }
   if (step === 'close_creator_with_command_w') {
     return await closeWechatCreatorWithCommandW({ runner: execFileAsync, keepTabTitle: payload.keepTabTitle || '关注' });
+  }
+  if (step === 'activate_existing_channels') {
+    const visible = await detectWechatChannelsVisibleByScreenshot({ runner: execFileAsync });
+    if (visible.ok) {
+      return {
+        ok: true,
+        code: 'activate_existing_channels',
+        method: visible.method,
+        detail: visible.detail,
+      };
+    }
   }
   const script = appleScriptForStep(step, payload);
   try {
@@ -762,31 +783,10 @@ end vbp_text
 }
 
 async function getWechatCoreGraphicsScreenshotState() {
-  const script = `
-import CoreGraphics
-let list = (CGWindowListCopyWindowInfo(CGWindowListOption(arrayLiteral: .optionAll), kCGNullWindowID) as? [[String: Any]]) ?? []
-var protectedLarge = false
-var sharedLarge = false
-for window in list {
-  let owner = (window[kCGWindowOwnerName as String] as? String) ?? ""
-  if !(owner.localizedCaseInsensitiveContains("wechat") || owner.contains("微信")) { continue }
-  let layer = (window[kCGWindowLayer as String] as? Int) ?? 0
-  if layer != 0 { continue }
-  let sharing = (window[kCGWindowSharingState as String] as? Int) ?? -1
-  let bounds = (window[kCGWindowBounds as String] as? [String: Any]) ?? [:]
-  let x = (bounds["X"] as? Double) ?? 0
-  let y = (bounds["Y"] as? Double) ?? 0
-  let width = (bounds["Width"] as? Double) ?? 0
-  let height = (bounds["Height"] as? Double) ?? 0
-  if x >= 0 && y >= 0 && width >= 500 && height >= 350 {
-    if sharing == 0 { protectedLarge = true }
-    if sharing == 1 { sharedLarge = true }
-  }
-}
-print("\\(protectedLarge ? 1 : 0)|\\(sharedLarge ? 1 : 0)")
-`;
+  // Route window sharing-state checks through the cached Swift helper instead of
+  // repeatedly interpreting short Swift snippets during patrol setup.
   try {
-    const { stdout } = await execFileAsync('swift', ['-e', script], { timeout: 8_000 });
+    const { stdout } = await runWechatSwift('cgwin', [], { timeout: 8_000 });
     const [protectedRaw, sharedRaw] = String(stdout || '').trim().split('|');
     return {
       protectedLargeWindow: protectedRaw === '1',
@@ -916,7 +916,7 @@ on run
       set dockResult to my vbp_click_channels_dock_icon()
       if dockResult does not contain "CLICKED|" then
         if my vbp_window_looks_channels(targetProcess) then return my vbp_result(true, "activate_channels_dock_icon", "already_visible", "当前微信窗口已验证为视频号界面")
-        return my vbp_result(false, "channels_dock_icon", "dock_icon", "未找到微信视频号程序坞图标；" & my vbp_dock_diagnostics() & "；" & my vbp_context_diagnostics(targetProcess))
+        return my vbp_result(false, "channels_dock_icon", "dock_icon", "未找到或无法点击微信视频号程序坞图标，Dock点击结果=" & dockResult & "；" & my vbp_dock_diagnostics() & "；" & my vbp_context_diagnostics(targetProcess))
       end if
       delay 1.0
       set targetProcess to my vbp_process("${step}")
@@ -1029,32 +1029,44 @@ on vbp_click_channels_dock_icon()
   tell application "System Events"
     try
       tell process "Dock"
-        set exactCandidate to missing value
+        set exactCenterX to -1
+        set exactCenterY to -1
         set exactLabel to ""
         set wechatCount to 0
-        set rightmostWechat to missing value
+        set rightmostWechatCenterX to -1
+        set rightmostWechatCenterY to -1
         set rightmostWechatX to -1
         repeat with dockItem in UI elements of list 1
           set labelText to my vbp_dock_label(dockItem)
           set xValue to -1
+          set centerX to -1
+          set centerY to -1
           try
             set p to position of dockItem
+            set s to size of dockItem
             set xValue to item 1 of p
+            set centerX to (item 1 of p) + ((item 1 of s) / 2)
+            set centerY to (item 2 of p) + ((item 2 of s) / 2)
           end try
           if labelText contains "视频号" or labelText contains "Channels" or labelText contains "WeChatAppEx" then
-            set exactCandidate to dockItem
+            set exactCenterX to centerX
+            set exactCenterY to centerY
             set exactLabel to labelText
           else if labelText is "微信" or labelText is "WeChat" then
             set wechatCount to wechatCount + 1
             if xValue > rightmostWechatX then
               set rightmostWechatX to xValue
-              set rightmostWechat to dockItem
+              set rightmostWechatCenterX to centerX
+              set rightmostWechatCenterY to centerY
             end if
           end if
         end repeat
-        if exactCandidate is not missing value then return my vbp_click_dock_item_center(exactCandidate, exactLabel)
-        if wechatCount > 1 and rightmostWechat is not missing value then return my vbp_click_dock_item_center(rightmostWechat, "微信")
+        if exactCenterX >= 0 and exactCenterY >= 0 then return my vbp_click_dock_point(exactCenterX, exactCenterY, exactLabel)
+        if wechatCount > 1 and rightmostWechatCenterX >= 0 and rightmostWechatCenterY >= 0 then return my vbp_click_dock_point(rightmostWechatCenterX, rightmostWechatCenterY, "微信")
+        return "NO_MATCH|wechatCount=" & (wechatCount as text) & "|rightmostX=" & (rightmostWechatX as text)
       end tell
+    on error errMsg
+      return "NO_MATCH|" & errMsg
     end try
   end tell
   return "NO_MATCH"
@@ -1088,18 +1100,15 @@ on vbp_dock_diagnostics()
   return "Dock候选=无法读取"
 end vbp_dock_diagnostics
 
-on vbp_click_dock_item_center(dockItem, labelText)
+on vbp_click_dock_point(centerX, centerY, labelText)
   try
-    set p to position of dockItem
-    set s to size of dockItem
-    set centerX to (item 1 of p) + ((item 1 of s) / 2)
-    set centerY to (item 2 of p) + ((item 2 of s) / 2)
     click at {centerX, centerY}
     delay 0.8
-    return "CLICKED|" & labelText
+    return "CLICKED|" & labelText & "|" & (centerX as text) & "," & (centerY as text)
+  on error errMsg
+    return "NO_CLICK|" & labelText & "|" & errMsg
   end try
-  return "NO_CLICK|" & labelText
-end vbp_click_dock_item_center
+end vbp_click_dock_point
 
 on vbp_click_main_channels_entry(targetProcessRef)
   tell application "System Events"

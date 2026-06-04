@@ -13,14 +13,19 @@ const {
   parseTrafficLightOutput,
   leftRailRegionFromAnchors,
   locateChannelsIconByCode,
+  applyBadgesToCards,
   autoplayTabClosePlanFromAnchors,
   chooseAutoplayClosePlanFromCandidates,
+  chooseCreatorCandidate,
+  chooseCreatorSearchHighlightPointFromRects,
   chooseFirstNonPinnedVideoCard,
   chooseFollowingSidebarPointFromRows,
   chooseNextVideoArrowCandidate,
+  channelsLightPageNeedsRailConfirmation,
   followingSidebarPointFromAnchors,
   profileEntryPointFromAnchors,
   validateAutoplayTabClosePlan,
+  validateChannelsLightPageScreenshotMetrics,
   validateChannelsWindowFullScreenshotMetrics,
   validateFollowingSidebarPoint,
   validateProfileEntryPoint,
@@ -338,10 +343,11 @@ test('desktop WeChat code picker skips pinned creator videos and chooses the fir
 
   assert.equal(picked.ok, true);
   assert.equal(picked.x, 430);
-  assert.equal(picked.y, 710);
+  assert.equal(picked.y, 665);
   assert.equal(picked.skippedPinned, 2);
   assert.equal(picked.skippedBlocked, 1);
   assert.match(picked.detail, /creator_grid_card/);
+  assert.match(picked.detail, /click=430,665/);
 });
 
 test('desktop WeChat code picker refuses uncertain creator video cards instead of clicking fallback coordinates', () => {
@@ -423,7 +429,7 @@ test('desktop WeChat profile and following locator coordinates stay inside safe 
   const imageFollowing = followingSidebarPointFromAnchors(overviewAnchors);
   assert.equal(validateFollowingSidebarPoint(imageFollowing, overviewAnchors), null);
   assert.equal(imageFollowing.x, 221);
-  assert.equal(imageFollowing.y, 367);
+  assert.equal(imageFollowing.y, 315);
 });
 
 test('desktop WeChat autoplay tab cleanup plans hover before close and never targets the Follow tab itself', () => {
@@ -476,6 +482,64 @@ test('desktop WeChat screenshot candidate pickers target sidebar Follow and the 
   assert.match(following.detail, /system_screenshot_left_sidebar_following/);
   assert.match(following.detail, /groups=221,297,373,448/);
 
+  const compactFollowing = chooseFollowingSidebarPointFromRows([
+    { centerX: 492, centerY: 184, width: 94, height: 20, darkPixels: 170 },
+    { centerX: 490, centerY: 222, width: 82, height: 19, darkPixels: 150 },
+    { centerX: 488, centerY: 259, width: 48, height: 19, darkPixels: 120 },
+  ], parseTrafficLightOutput([
+    'WINDOW|微信 (窗口)|418|72|924|796|0',
+    'BUTTON|close|关闭按钮|437|85|16|16',
+    'BUTTON|minimize|最小化按钮|457|85|16|16',
+    'BUTTON|zoom|全屏幕按钮|477|85|16|16',
+  ].join('\n')));
+  assert.equal(compactFollowing.ok, false);
+  assert.match(compactFollowing.reason, /文字组间距异常，拒绝点击/);
+
+  const compactOverviewFollowing = chooseFollowingSidebarPointFromRows([
+    { centerX: 497.4, centerY: 174.5, width: 55, height: 13, darkPixels: 1564 },
+    { centerX: 496.7, centerY: 212.7, width: 54, height: 13, darkPixels: 875 },
+    { centerX: 482.8, centerY: 251.1, width: 26.5, height: 12, darkPixels: 367 },
+    { centerX: 503.2, centerY: 288.5, width: 69, height: 13, darkPixels: 1209 },
+  ], parseTrafficLightOutput([
+    'WINDOW|微信 (窗口)|433|101|925|701|0',
+    'BUTTON|close|关闭按钮|454|114|12|14',
+    'BUTTON|minimize|最小化按钮|474|114|12|14',
+    'BUTTON|zoom|全屏幕按钮|494|114|12|14',
+  ].join('\n')));
+  assert.equal(compactOverviewFollowing.ok, true);
+  assert.equal(compactOverviewFollowing.x, 493);
+  assert.equal(compactOverviewFollowing.y, 251);
+  assert.match(compactOverviewFollowing.detail, /groups=175,213,251,289/);
+
+  const fourRowsBeatLowGeometryReference = chooseFollowingSidebarPointFromRows([
+    { centerX: 498, centerY: 175, width: 55, height: 13, darkPixels: 1564 },
+    { centerX: 496, centerY: 213, width: 55, height: 13, darkPixels: 875 },
+    { centerX: 483, centerY: 251, width: 27, height: 12, darkPixels: 367 },
+    { centerX: 503, centerY: 288, width: 69, height: 13, darkPixels: 1209 },
+  ], parseTrafficLightOutput([
+    'WINDOW|微信 (窗口)|433|101|925|701|0',
+    'BUTTON|close|关闭按钮|454|114|12|14',
+    'BUTTON|minimize|最小化按钮|474|114|12|14',
+    'BUTTON|zoom|全屏幕按钮|494|114|12|14',
+  ].join('\n')));
+  assert.equal(fourRowsBeatLowGeometryReference.ok, true);
+  assert.equal(fourRowsBeatLowGeometryReference.y, 251);
+  assert.match(fourRowsBeatLowGeometryReference.detail, /groups=175,213,251,288/);
+
+  const contentLeakedFollowing = chooseFollowingSidebarPointFromRows([
+    { centerX: 330, centerY: 184, width: 92, height: 20, darkPixels: 170 },
+    { centerX: 471, centerY: 381, width: 112, height: 18, darkPixels: 160 },
+    { centerX: 471, centerY: 405, width: 98, height: 18, darkPixels: 130 },
+    { centerX: 471, centerY: 453, width: 104, height: 18, darkPixels: 120 },
+  ], parseTrafficLightOutput([
+    'WINDOW|微信 (窗口)|221|153|1201|677|0',
+    'BUTTON|close|关闭按钮|228|162|12|14',
+    'BUTTON|minimize|最小化按钮|248|162|12|14',
+    'BUTTON|zoom|全屏幕按钮|268|162|12|14',
+  ].join('\n')));
+  assert.equal(contentLeakedFollowing.ok, false);
+  assert.match(contentLeakedFollowing.reason, /左侧栏文字行不足/);
+
   const noisyFollowing = chooseFollowingSidebarPointFromRows([
     { centerX: 414, centerY: 171, width: 120, height: 18, darkPixels: 160 },
     { centerX: 420, centerY: 262, width: 82, height: 14, darkPixels: 90 },
@@ -493,7 +557,7 @@ test('desktop WeChat screenshot candidate pickers target sidebar Follow and the 
   assert.equal(noisyFollowing.ok, true);
   assert.equal(noisyFollowing.x, 414);
   assert.ok(noisyFollowing.y >= 344 && noisyFollowing.y <= 348);
-  assert.match(noisyFollowing.detail, /groups=171,276,348,492/);
+  assert.match(noisyFollowing.detail, /groups=171,276,348,479/);
 
   const closePlan = chooseAutoplayClosePlanFromCandidates([
     { x: 856, y: 114, width: 14, height: 14, score: 0.4 },
@@ -511,6 +575,21 @@ test('desktop WeChat screenshot candidate pickers target sidebar Follow and the 
   ], anchors);
   assert.equal(noExtraTab.ok, true);
   assert.equal(noExtraTab.noop, true);
+
+  const searchHighlight = chooseCreatorSearchHighlightPointFromRects([
+    { x: 900, y: 206, width: 80, height: 24, pixels: 160 },
+    { x: 850, y: 682, width: 112, height: 24, pixels: 260 },
+  ], anchors);
+  assert.equal(searchHighlight.ok, true);
+  assert.equal(searchHighlight.x, 906);
+  assert.equal(searchHighlight.y, 694);
+  assert.match(searchHighlight.detail, /find_highlight/);
+
+  const staleTopSearchHighlight = chooseCreatorSearchHighlightPointFromRects([
+    { x: 990, y: 121, width: 86, height: 22, pixels: 280 },
+  ], anchors);
+  assert.equal(staleTopSearchHighlight.ok, false);
+  assert.match(staleTopSearchHighlight.reason, /未找到查找高亮候选/);
 
   const noisyClosePlan = chooseAutoplayClosePlanFromCandidates([
     { x: 552, y: 82, width: 14, height: 14, score: 0.24 },
@@ -554,6 +633,59 @@ test('desktop WeChat full-system screenshot metrics accept Channels video window
   }), /采样点不足/);
 });
 
+test('desktop WeChat full-system screenshot metrics accept bright Channels tab pages', () => {
+  assert.equal(validateChannelsLightPageScreenshotMetrics({
+    topTotal: 18000,
+    topOrangePixels: 130,
+    topOrangeClusters: 3,
+    bodyTotal: 90000,
+    bodyBrightRatio: 0.72,
+    bodyDarkRatio: 0.08,
+  }), null);
+  assert.match(validateChannelsLightPageScreenshotMetrics({
+    topTotal: 18000,
+    topOrangePixels: 10,
+    topOrangeClusters: 0,
+    bodyTotal: 90000,
+    bodyBrightRatio: 0.72,
+    bodyDarkRatio: 0.08,
+  }), /未检测到视频号亮色页/);
+  assert.match(validateChannelsLightPageScreenshotMetrics({
+    topTotal: 18000,
+    topOrangePixels: 130,
+    topOrangeClusters: 3,
+    bodyTotal: 90000,
+    bodyBrightRatio: 0.20,
+    bodyDarkRatio: 0.52,
+  }), /未检测到视频号亮色页/);
+  assert.match(validateChannelsLightPageScreenshotMetrics({
+    topTotal: 18000,
+    topOrangePixels: 1200,
+    topOrangeClusters: 2,
+    bodyTotal: 90000,
+    bodyBrightRatio: 0.72,
+    bodyDarkRatio: 0.08,
+  }), /橙色面积异常/);
+});
+
+test('desktop WeChat bright main window needs left-rail Channels confirmation', () => {
+  const normalMain = parseTrafficLightOutput([
+    'WINDOW|微信|221|153|1201|677|0',
+    'BUTTON|close|关闭按钮|234|169|18|18',
+    'BUTTON|minimize|最小化按钮|252|169|18|18',
+    'BUTTON|zoom|全屏幕按钮|270|169|18|18',
+  ].join('\n'));
+  const channelsPopup = parseTrafficLightOutput([
+    'WINDOW|微信 (窗口)|433|101|925|701|0',
+    'BUTTON|close|关闭按钮|460|121|18|18',
+    'BUTTON|minimize|最小化按钮|480|121|18|18',
+    'BUTTON|zoom|全屏幕按钮|500|121|18|18',
+  ].join('\n'));
+
+  assert.equal(channelsLightPageNeedsRailConfirmation(normalMain), true);
+  assert.equal(channelsLightPageNeedsRailConfirmation(channelsPopup), false);
+});
+
 test('desktop WeChat AppleScript opens Channels from the main WeChat page before Dock fallback', () => {
   const accessibilityScript = __wechatDesktopInternals.appleScriptForStep('assert_accessibility');
   assert.match(accessibilityScript, /桌面微信没有可用窗口/);
@@ -580,10 +712,14 @@ test('desktop WeChat AppleScript opens Channels from the main WeChat page before
   assert.match(dockScript, /CLICKED\|/);
   assert.match(dockScript, /WeChatAppEx/);
   assert.match(dockScript, /wechatCount > 1/);
-  assert.match(dockScript, /rightmostWechat/);
+  assert.match(dockScript, /rightmostWechatCenterX/);
+  assert.match(dockScript, /vbp_click_dock_point/);
+  assert.match(dockScript, /Dock点击结果=/);
+  assert.match(dockScript, /NO_CLICK\|/);
   assert.match(dockScript, /vbp_dock_diagnostics/);
   assert.match(dockScript, /当前微信窗口已验证为视频号界面/);
   assert.match(dockScript, /当前窗口仍未验证为视频号/);
+  assert.doesNotMatch(dockScript, /vbp_click_dock_item_center/);
   assert.doesNotMatch(dockScript, /继续尝试接管窗口/);
   assert.doesNotMatch(dockScript, /open_channels_home/);
 
@@ -685,7 +821,10 @@ test('desktop WeChat screenshots use only the system screenshot path', () => {
 });
 
 test('desktop WeChat locator source does not use AI or OCR fallbacks', () => {
-  const source = readFileSync(new URL('../server/rpa/wechat-locator.js', import.meta.url), 'utf8');
+  const source = [
+    readFileSync(new URL('../server/rpa/wechat-locator.js', import.meta.url), 'utf8'),
+    readFileSync(new URL('../server/rpa/wechat-desktop.js', import.meta.url), 'utf8'),
+  ].join('\n');
   assert.doesNotMatch(source, /callJSON/);
   assert.doesNotMatch(source, /vision_left_rail/);
   assert.doesNotMatch(source, /locateChannelsIconByVision/);
@@ -694,10 +833,59 @@ test('desktop WeChat locator source does not use AI or OCR fallbacks', () => {
   assert.match(source, /CoreGraphics/);
 });
 
+test('desktop WeChat locator keeps the Channels window instead of reopening main WeChat', () => {
+  const source = readFileSync(new URL('../server/rpa/wechat-locator.js', import.meta.url), 'utf8');
+  assert.match(source, /if not preferChannelsWindow then reopen/);
+  assert.match(source, /set bestScore to -100000/);
+  assert.match(source, /wn contains "窗口"/);
+  assert.match(source, /ww < 1100 and wh > 520/);
+  assert.match(source, /if bestWindow is not missing value and bestScore > 0 then return bestWindow/);
+});
+
 test('desktop WeChat friendly errors distinguish left-sidebar following from top following', () => {
   const msg = __wechatDesktopInternals.friendlyWechatDesktopError(
     Object.assign(new Error('未找到左侧关注，避免误点顶部关注'), { code: 'open_following_overview' }),
   );
   assert.match(msg, /左侧“关注”/);
   assert.match(msg, /不是顶部视频流/);
+});
+
+test('desktop WeChat creator picker prefers the name row over bio text', () => {
+  const anchors = parseTrafficLightOutput([
+    'WINDOW|微信视频号|111|75|1826|974|0',
+    'BUTTON|close|关闭按钮|154|102|18|18',
+    'BUTTON|minimize|最小化按钮|194|102|18|18',
+    'BUTTON|zoom|全屏幕按钮|234|102|18|18',
+  ].join('\n'));
+
+  const picked = chooseCreatorCandidate([
+    { x: 460, y: 280, width: 500, height: 36, role: 'AXStaticText', label: '这里介绍了目标视频号的简介内容' },
+    { x: 420, y: 330, width: 96, height: 24, role: 'AXStaticText', label: '目标视频号' },
+  ], { nickname: '目标视频号', anchors });
+
+  assert.equal(picked.ok, true);
+  assert.equal(picked.x, 420);
+  assert.match(picked.detail, /coverage=1\.00/);
+
+  const rejected = chooseCreatorCandidate([
+    { x: 460, y: 280, width: 500, height: 36, role: 'AXStaticText', label: '这里介绍了目标视频号的简介内容' },
+  ], { nickname: '目标视频号', anchors });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.reason, /拒绝误点/);
+});
+
+test('desktop WeChat badge mapping marks pinned creator cards', () => {
+  const cards = [
+    { x: 420, y: 320, width: 220, height: 160, label: '旧视频' },
+    { x: 720, y: 320, width: 220, height: 160, label: '新视频' },
+  ];
+  const mapped = applyBadgesToCards(cards, [
+    { kind: 'pinned', x: 345, y: 255, text: '置顶' },
+    { kind: 'blocked', x: 720, y: 318, text: '直播' },
+  ]);
+
+  assert.equal(mapped[0].pinned, true);
+  assert.match(mapped[0].label, /置顶/);
+  assert.equal(mapped[1].blocked, true);
+  assert.match(mapped[1].label, /直播/);
 });

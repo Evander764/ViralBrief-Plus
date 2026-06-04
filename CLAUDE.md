@@ -49,11 +49,11 @@
 
 ### 视频号阶段
 - 视频号巡检由独立按钮/API 发起，不跟随小红书/抖音网页日报自动混跑；视频号在本项目中只指 macOS 微信客户端内的视频号，可保存到内容库和候选池，并可在人工确认后进入独立微信日报。
-- 视频号巡检由 `server/rpa/wechat-desktop.js` 调用 macOS System Events / `screencapture` / Swift CoreGraphics 操作桌面微信；RPA 先激活桌面微信主窗口并确认主页面可截图/可读取 → 从主页面左侧视频号入口进入并用系统全屏截图验证视频号界面；主页面入口失败时，才点击程序坞里的绿色视频号独立窗口图标兜底（优先匹配视频号/Channels/WeChatAppEx，多个“微信”时点击最右侧的那个）。进入视频号后继续：点击右上角小人入口 → 进入赞和收藏/个人总览 → 全屏截图定位左侧栏“关注” → 悬停并关闭“关注”左侧紧邻的随机推荐视频标签 → 按账号池昵称打开博主主页。
+- 视频号巡检由 `server/rpa/wechat-desktop.js` 调用 macOS System Events / `screencapture` / Swift CoreGraphics 操作桌面微信，定位逻辑在 `server/rpa/wechat-locator.js`，重复 Swift 鼠标/像素工作统一走 `server/rpa/wechat-swift.js` 的预编译缓存助手；RPA 先激活桌面微信主窗口并确认主页面可截图/可读取 → 从主页面左侧视频号入口进入并用系统全屏截图验证视频号界面；主页面入口失败时，才点击程序坞里的绿色视频号独立窗口图标兜底（优先匹配视频号/Channels/WeChatAppEx，多个“微信”时点击最右侧的那个）。进入视频号后继续：点击右上角小人入口 → 进入赞和收藏/个人总览 → 全屏截图定位左侧栏“关注” → 悬停并关闭“关注”左侧紧邻的随机推荐视频标签 → 按账号池昵称打开博主主页。
 - 默认不使用 Python、不使用 AI 截图识别、不使用 OCR、不打开网页版视频号；不点击主微信 Dock 图标或相邻应用、不重启微信。所有导航截图都走 macOS 系统截图，不使用微信页面自带截图、截图快捷键或剪贴板截图。每次需要点击时先全屏截图，再由代码按局部特征定位目标，识别不到就记录诊断并停止，不按粗略兜底坐标继续点。
 - 视频号窗口可以移动和缩放，所以“关注”、顶部标签关闭 `×`、博主主页视频卡片和右侧下箭头必须通过当前系统截图或可读 AX 控件现场识别后才允许点击；禁止误点顶部视频流“关注”。如果无法确认目标，只记录窗口锚点、候选坐标、截图特征和几何参考诊断并停止。
-- 进入关注总览后先关闭“关注”左侧紧邻的随机推荐视频标签，避免默认打开的视频继续播放；关闭动作必须按 hover → 等待 `×` → click `×` 的顺序执行。每个博主默认读取 3 条，可通过 `rpa.wechatVideosPerAccount`（1-10）调整；找博主时先用 AX 文本匹配昵称，看不到就对关注列表滚动并重新截图/读取，直到找到或判断到底；主页视频按截图网格识别并跳过右下角有“箭头+横线”的置顶视频，以及直播/预约内容。
-- 详情页先点击界面并轻微晃动鼠标唤出右侧箭头；点击“展开”只走 AX 按钮，展开后的文案只取 AX 可读文本，读不到完整文案时保存截图和诊断待补录，不调用 AI/OCR；采集点赞、转发、收藏/红心、评论后，用截图识别右侧下箭头并验证翻到下一条。每个博主采满目标量或提前失败后发送两次 Command+W 回到“关注”总览，未完成账号不得写 `last_patrolled_at`。
+- 进入关注总览后先关闭“关注”左侧紧邻的随机推荐视频标签，避免默认打开的视频继续播放；关闭动作必须按 hover → 等待 `×` → click `×` 的顺序执行。每个博主默认读取 3 条，可通过 `rpa.wechatVideosPerAccount`（1-10）调整；找博主时先收集 AX 中所有含昵称候选并选择“以昵称为主体”的行，AX 不暴露列表文本或候选不可信时只在微信窗口内查找框粘贴目标昵称并用截图识别橙色高亮坐标，仍找不到才对关注列表滚动并重新截图/读取，直到找到或判断到底；主页视频按截图网格识别，置顶/直播/预约优先按 AX 暴露角标几何贴回卡片后跳过。
+- 详情页切换下一条以在视频区域向下滚动为主路径，每次滚动后用截图指纹/AX 文案验证已经换片；滚动未换片时，再轻微晃动鼠标唤出右侧箭头，并用截图识别右侧下箭头点击兜底。点击“展开”只走 AX 按钮，展开后的文案只取 AX 可读文本，读不到完整文案时保存截图和诊断待补录，不调用 AI/OCR；采集点赞、转发、收藏/红心、评论。每个博主采满目标量或提前失败后发送两次 Command+W 回到“关注”总览，未完成账号不得写 `last_patrolled_at`。
 - 采集结果写入 `wechat-desktop://content/<account-id>/<date>/<index>` 待复核记录；指标原始值和坐标证据写入 `metrics_evidence_json`，`metrics_source='desktop_agent'`，不自动确认。人工确认后的微信视频号内容才可进入独立微信日报。
 
 ## 数据流
@@ -79,6 +79,12 @@
 - `openai` / `openai-compatible`：`POST {base}/chat/completions`，Bearer。仅官方 openai 用 `response_format:json_object`。
 - `anthropic`：`POST {base}/v1/messages`，`x-api-key` + `anthropic-version`，system 块打 `cache_control:ephemeral`。
 - 用量统一 `{input, output, cached}` 入 `usage_log`。
+
+## 打包与版本命名（macOS app）
+- 只有一个正式 app，名字固定 `Viral Brief Plus`，数据目录 `~/Library/Application Support/Viral Brief Plus`。不要用 `VBP_MAC_APP_NAME` 改名打包。
+- 版本号即唯一标识，遵循语义化版本；`scripts/package-macos-app.js` 的 `versionTag = pkg.version`，产物名只带版本号、不再拼时间戳。
+- 新功能使用 `npm run release:feature`，优化/修复使用 `npm run release:fix`；只改版本号可用 `npm run version:feature` / `npm run version:fix`。
+- Info.plist 的 `CFBundleShortVersionString` 与 `CFBundleVersion` 都取 `pkg.version`。
 
 ## 约定
 - ESM（`"type":"module"`），CommonJS 勿混。

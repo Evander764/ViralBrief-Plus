@@ -10,7 +10,7 @@
  */
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { writeFileSync, existsSync, createReadStream, statSync, unlinkSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, createReadStream, statSync, unlinkSync } from 'node:fs';
 import { join, basename, dirname, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -49,6 +49,13 @@ import { safeUrlBasename } from './lib/url-path.js';
 ensureDirs();
 const cfg = loadConfig();
 const PORT = Number(process.env.VBP_PORT ?? process.env.VB_PORT ?? 8787);
+const APP_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(PROJECT_ROOT, 'package.json'), 'utf8')).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -160,7 +167,7 @@ async function handleApi(req, res, url, segs) {
 
   // health 不需要 token，供插件探测桌面端是否在运行
   if (p[0] === 'health') {
-    return sendJson(res, 200, { ok: true, app: 'viral-brief-plus', version: '1.0.1', hasApiKey: hasApiKey() });
+    return sendJson(res, 200, { ok: true, app: 'viral-brief-plus', version: APP_VERSION, hasApiKey: hasApiKey() });
   }
 
   // 鉴权

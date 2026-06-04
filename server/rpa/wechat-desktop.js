@@ -566,7 +566,9 @@ async function defaultWechatScriptRunner(step, payload = {}) {
   }
   const script = appleScriptForStep(step, payload);
   try {
-    const { stdout, stderr } = await execFileAsync('osascript', ['-e', script], { timeout: 60_000 });
+    // 上短超时：微信偶发对 Apple Event 不响应，旧的 60s 会让单步挂死整整一分钟（日志里 open_channels_from_main=61.3s 即此）。
+    // 15s 足够最慢的正常步骤；挂起则快速失败并转兜底，而不是干等。
+    const { stdout, stderr } = await execFileAsync('osascript', ['-e', script], { timeout: 15_000 });
     const parsed = parseScriptResult(stdout, stderr);
     if (step === 'open_channels_from_main' && !parsed.ok && parsed.code === 'main_channels_entry') {
       const located = prelocatedMainEntry || await clickWechatChannelsFromMainByLocator({ runner: execFileAsync });

@@ -25,6 +25,7 @@ const HELPER_SOURCE = String.raw`import AppKit
 import CoreGraphics
 import Foundation
 import Darwin
+import ApplicationServices
 
 let ARGS = CommandLine.arguments
 func argS(_ i: Int) -> String { return i < ARGS.count ? ARGS[i] : "" }
@@ -84,6 +85,71 @@ if cmd == "cgwin" {
     }
   }
   print((protectedLarge ? "1" : "0") + "|" + (sharedLarge ? "1" : "0"))
+  exit(0)
+}
+// 用 AX C API 一次性拿到微信窗口框 + 红黄绿按钮中心，并按需 activate/raise。
+// 取代旧的 osascript 锚点读取：~0.04s、从不挂起、不必每次 activate+delay。微信正文虽不暴露给
+// 辅助功能，但窗口几何与三个标准按钮是暴露的，这正是定位所需的全部锚点。
+if cmd == "axframe" {
+  let preferChannels = argS(2) == "1"
+  let doActivate = argS(3) != "0"
+  guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.tencent.xinWeChat" }) else {
+    print("{\"ok\":false,\"reason\":\"wechat_not_running\"}"); exit(0)
+  }
+  if doActivate { app.activate(options: [.activateIgnoringOtherApps]); usleep(120_000) }
+  let appEl = AXUIElementCreateApplication(app.processIdentifier)
+  func axGet(_ el: AXUIElement, _ a: String) -> CFTypeRef? {
+    var v: CFTypeRef?
+    return AXUIElementCopyAttributeValue(el, a as CFString, &v) == .success ? v : nil
+  }
+  func axRect(_ el: AXUIElement) -> CGRect? {
+    guard let p = axGet(el, kAXPositionAttribute as String), let s = axGet(el, kAXSizeAttribute as String) else { return nil }
+    var pt = CGPoint.zero
+    var sz = CGSize.zero
+    AXValueGetValue(p as! AXValue, .cgPoint, &pt)
+    AXValueGetValue(s as! AXValue, .cgSize, &sz)
+    return CGRect(origin: pt, size: sz)
+  }
+  func axStr(_ el: AXUIElement, _ a: String) -> String { return (axGet(el, a) as? String) ?? "" }
+  var wins: [AXUIElement] = []
+  if let v = axGet(appEl, kAXWindowsAttribute as String) as? [AXUIElement] { wins = v }
+  if wins.isEmpty { print("{\"ok\":false,\"reason\":\"no_windows\"}"); exit(0) }
+  var idx = 0
+  if preferChannels {
+    var chosen = -1
+    for (i, w) in wins.enumerated() {
+      let t = axStr(w, kAXTitleAttribute as String)
+      let f = axRect(w) ?? CGRect.zero
+      if t.contains("窗口") || (f.width < 1100 && f.height > 520) { chosen = i }
+    }
+    idx = chosen >= 0 ? chosen : (wins.count > 1 ? 1 : 0)
+  }
+  let target = wins[idx]
+  if doActivate {
+    AXUIElementSetAttributeValue(target, "AXMinimized" as CFString, kCFBooleanFalse)
+    AXUIElementPerformAction(target, kAXRaiseAction as CFString)
+    usleep(120_000)
+  }
+  guard let wf = axRect(target) else { print("{\"ok\":false,\"reason\":\"no_frame\"}"); exit(0) }
+  func num(_ d: Double) -> String { return String(Int(d.rounded())) }
+  func btn(_ a: String) -> String {
+    guard let raw = axGet(target, a) else { return "" }
+    guard let bf = axRect(raw as! AXUIElement) else { return "" }
+    return "\"x\":" + num(bf.minX) + ",\"y\":" + num(bf.minY) + ",\"width\":" + num(bf.width) + ",\"height\":" + num(bf.height)
+  }
+  func esc(_ s: String) -> String { return s.replacingOccurrences(of: "\\", with: "").replacingOccurrences(of: "\"", with: "") }
+  var parts: [String] = ["\"ok\":true"]
+  parts.append("\"window\":{\"x\":" + num(wf.minX) + ",\"y\":" + num(wf.minY) + ",\"width\":" + num(wf.width) + ",\"height\":" + num(wf.height) + ",\"title\":\"" + esc(axStr(target, kAXTitleAttribute as String)) + "\"}")
+  var btnParts: [String] = []
+  let closeB = btn(kAXCloseButtonAttribute as String)
+  let minB = btn(kAXMinimizeButtonAttribute as String)
+  let zoomB = btn(kAXZoomButtonAttribute as String)
+  if !closeB.isEmpty { btnParts.append("\"close\":{" + closeB + "}") }
+  if !minB.isEmpty { btnParts.append("\"minimize\":{" + minB + "}") }
+  if !zoomB.isEmpty { btnParts.append("\"zoom\":{" + zoomB + "}") }
+  parts.append("\"buttons\":{" + btnParts.joined(separator: ",") + "}")
+  parts.append("\"windowCount\":" + String(wins.count) + ",\"chosenIndex\":" + String(idx))
+  print("{" + parts.joined(separator: ",") + "}")
   exit(0)
 }
 

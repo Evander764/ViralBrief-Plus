@@ -56,6 +56,15 @@ export function normalizeTrafficLightAnchors({ window, buttons } = {}) {
 }
 
 export async function getWechatTrafficLightAnchors({ runner = execFileAsync, preferChannelsWindow = false, includeContentCount = true } = {}) {
+  // 快路径：用 AX C API 一次拿窗口框 + 红黄绿按钮并 activate/raise（~0.05s，从不挂起）。
+  // 这是巡检里调用最频繁的操作；旧 osascript 每次都 activate+delay+可能挂到超时，是慢的大头之一。
+  try {
+    const { stdout } = await runWechatSwift('axframe', [preferChannelsWindow ? '1' : '0', '1'], { runner, timeout: 6_000 });
+    const fast = anchorsFromAxframe(stdout);
+    if (fast?.ok) return fast;
+  } catch {
+    // 助手不可用/超时 → 落到下面的 osascript 兜底
+  }
   const preferChannelsLiteral = preferChannelsWindow ? 'true' : 'false';
   const includeContentCountLiteral = includeContentCount ? 'true' : 'false';
   const script = `
@@ -157,6 +166,31 @@ end vbp_target_window
 `;
   const { stdout } = await runner('osascript', ['-e', script], { timeout: 8_000 });
   return parseTrafficLightOutput(String(stdout || ''));
+}
+
+// 把 axframe 助手的 JSON 映射成与 parseTrafficLightOutput 相同的锚点结构（同一份 normalize 校验）。
+function anchorsFromAxframe(stdout) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(stdout || '').trim());
+  } catch {
+    return null;
+  }
+  if (!parsed || parsed.ok !== true || !parsed.window || !parsed.buttons) return null;
+  const w = parsed.window;
+  const window = {
+    name: w.title || '',
+    x: Number(w.x),
+    y: Number(w.y),
+    width: Number(w.width),
+    height: Number(w.height),
+    contentCount: 0,
+  };
+  const normalized = normalizeTrafficLightAnchors({ window, buttons: parsed.buttons });
+  if (normalized.ok) {
+    normalized.diagnostics = `${normalized.diagnostics}；via=axframe 窗口=${window.name} 窗口数=${parsed.windowCount}/选中${parsed.chosenIndex}`;
+  }
+  return normalized;
 }
 
 export function parseTrafficLightOutput(text) {
@@ -291,75 +325,96 @@ export async function locateChannelsIconByCode({ anchors, rail, clusters } = {})
   };
 }
 
+// 读取微信主进程的窗口态：点开“视频号”会新开一个标题含“窗口”的独立窗口（com.tencent.flue.WeChatAppEx
+// 渲染）。这是“是否已进入视频号”最可靠的判据——比对暗色像素稳得多（视频号首页是白色 feed，不是黑视频）。
+async function readWechatWindowState({ runner, activate = false } = {}) {
+  try {
+    const { stdout } = await runWechatSwift('axframe', ['1', activate ? '1' : '0'], { runner, timeout: 6_000 });
+    const parsed = JSON.parse(String(stdout || '').trim());
+    if (!parsed || parsed.ok !== true) return { ok: false, count: 0, hasChannelsWindow: false };
+    const title = String(parsed.window?.title || '');
+    return { ok: true, count: Number(parsed.windowCount || 0), hasChannelsWindow: title.includes('窗口'), title };
+  } catch {
+    return { ok: false, count: 0, hasChannelsWindow: false };
+  }
+}
+
+// 从左栏图标聚类里挑“视频号”候选点（按命中概率排序）。头像是最靠上、通常最大的那个，丢掉它；
+// 之后 聊天/通讯录/收藏/视频号… 视频号 ≈ 丢头像后的第 4 个（index 3）。检测会有出入，所以按
+// 3,4,2,5,1 的顺序逐个“点击→看是否冒出视频号窗口”，自纠错，不再赌死一个固定下标（上次失败就因这个）。
+function channelsIconCandidatesFromRail(analyzed, region) {
+  const clusters = (analyzed?.clusters || [])
+    .map((c) => ({ x: Math.round(region.x + Number(c.centerX)), y: Math.round(region.y + Number(c.centerY)), w: Number(c.width || 0), h: Number(c.height || 0) }))
+    .filter((c) => Number.isFinite(c.x) && Number.isFinite(c.y))
+    .sort((a, b) => a.y - b.y);
+  if (clusters.length < 4) return [];
+  const icons = clusters.slice(1); // 丢掉最靠上的头像
+  const order = [3, 4, 2, 5, 1, 0].filter((i) => i < icons.length);
+  const seen = new Set();
+  const out = [];
+  for (const i of order) {
+    const c = icons[i];
+    const key = `${c.x},${c.y}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ x: c.x, y: c.y, label: `图标#${i + 2}` }); // +2：人类计数含头像
+  }
+  return out;
+}
+
 export async function clickWechatChannelsFromMainByLocator({ runner = execFileAsync } = {}) {
   try {
+    // 已经开着视频号独立窗口？直接成功（最快路径，~60ms）。
+    const pre = await readWechatWindowState({ runner, activate: true });
+    if (pre.hasChannelsWindow) {
+      return { ok: true, code: 'open_channels_from_main', method: 'channels_window_present', detail: `视频号独立窗口已存在（标题“${pre.title}”，窗口数 ${pre.count}）` };
+    }
+
     const anchors = await getWechatTrafficLightAnchors({ runner, includeContentCount: false });
-    if (!anchors.ok) return { ok: false, code: 'main_channels_entry', method: 'traffic_light_left_rail', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
+    if (!anchors.ok) return { ok: false, code: 'main_channels_entry', method: 'left_rail_click_verify', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
 
-    let lastMessage = '';
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      let rail = null;
-      try {
-        rail = await captureWechatLeftRail(anchors, { runner });
-        if (!rail.ok) {
-          lastMessage = [`第${attempt}次无法截取微信左侧栏`, rail.reason, anchors.diagnostics].filter(Boolean).join('；');
-          continue;
-        }
-
-        const alreadyVisible = await analyzeChannelsAlreadyVisible(rail.path, rail.region, { runner });
-        if (alreadyVisible.ok) {
-          return {
-            ok: true,
-            code: 'open_channels_from_main',
-            method: 'system_screenshot_already_channels',
-            detail: `系统截图确认当前已在视频号界面；${alreadyVisible.detail}; ${anchors.diagnostics}; ${rail.diagnostics}`,
-          };
-        }
-
-        const codeLocated = await locateChannelsIconByCode({ anchors, rail });
-        if (codeLocated.ok && codeLocated.confidence >= CODE_CONFIDENCE_THRESHOLD) {
-          return await clickAndVerify(codeLocated, { runner });
-        }
-
-        lastMessage = [
-          `第${attempt}次代码定位置信度不足，已停止点击`,
-          codeLocated.diagnostics || codeLocated.reason,
-          anchors.diagnostics,
-          rail.diagnostics,
-        ].filter(Boolean).join('；');
-      } finally {
-        cleanupCapturedRail(rail);
+    let candidates = [];
+    let rail = null;
+    try {
+      rail = await captureWechatLeftRail(anchors, { runner });
+      if (rail.ok) {
+        const analyzed = await analyzeLeftRailImage(rail.path, rail.region, { runner });
+        candidates = channelsIconCandidatesFromRail(analyzed, rail.region);
       }
-      if (attempt < 2) await sleep(700);
+    } finally {
+      cleanupCapturedRail(rail);
+    }
+    if (!candidates.length) {
+      const region = leftRailRegionFromAnchors(anchors);
+      const g = geometricChannelsPoint(anchors, region);
+      candidates = [{ x: g.x, y: g.y, label: '几何兜底' }];
     }
 
-    const fullVisible = await verifyChannelsVisibleByFullSystemScreenshot({ runner, anchors });
-    if (fullVisible.ok) {
-      return {
-        ok: true,
-        code: 'open_channels_from_main',
-        method: fullVisible.method,
-        detail: `系统全屏截图确认当前已在视频号界面；${fullVisible.detail}; ${anchors.diagnostics}`,
-      };
-    }
-    const overviewVisible = await verifyProfileOrOverviewVisible({ runner });
-    if (overviewVisible.ok) {
-      return {
-        ok: true,
-        code: 'open_channels_from_main',
-        method: 'system_screenshot_profile_overview',
-        detail: `系统截图确认当前已在视频号个人/总览页；${overviewVisible.detail}; ${anchors.diagnostics}`,
-      };
+    const baseCount = pre.ok ? pre.count : 0;
+    const tried = [];
+    for (const cand of candidates) {
+      await clickAt(cand.x, cand.y, { runner });
+      await sleep(1100);
+      const after = await readWechatWindowState({ runner });
+      tried.push(`${cand.label}@${cand.x},${cand.y}→窗口${after.count}${after.hasChannelsWindow ? '(视频号)' : ''}`);
+      if (after.hasChannelsWindow || (baseCount > 0 && after.count > baseCount)) {
+        return {
+          ok: true,
+          code: 'open_channels_from_main',
+          method: 'left_rail_click_verify',
+          detail: [`点击左栏视频号图标并确认视频号窗口打开 click=${cand.x},${cand.y}`, tried.join(' / '), anchors.diagnostics].filter(Boolean).join('；'),
+        };
+      }
     }
 
     return {
       ok: false,
       code: 'main_channels_entry',
-      method: 'traffic_light_left_rail',
-      message: [lastMessage || '代码定位置信度不足，已停止点击', fullVisible.message, overviewVisible.reason].filter(Boolean).join('；'),
+      method: 'left_rail_click_verify',
+      message: [`逐个点击左栏候选图标后仍未出现视频号窗口`, tried.join(' / '), anchors.diagnostics].filter(Boolean).join('；'),
     };
   } catch (e) {
-    return { ok: false, code: 'main_channels_entry', method: 'traffic_light_left_rail', message: String(e.message || e) };
+    return { ok: false, code: 'main_channels_entry', method: 'left_rail_click_verify', message: String(e.message || e) };
   }
 }
 

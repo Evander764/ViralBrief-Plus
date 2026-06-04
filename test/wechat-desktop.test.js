@@ -93,7 +93,6 @@ test('desktop WeChat patrol enters following overview once, opens nickname, and 
     'assert_accessibility',
     'activate_wechat_main_window',
     'open_channels_from_main',
-    'activate_existing_channels',
     'open_profile_entry',
     'open_overview',
     'open_following_overview',
@@ -111,7 +110,7 @@ test('desktop WeChat patrol enters following overview once, opens nickname, and 
   assert.equal(runner.calls.find((c) => c.step === 'cleanup_autoplay_tabs').payload.keepTabTitle, '关注');
   assert.equal(runner.calls.find((c) => c.step === 'activate_wechat_main_window').payload.nickname, undefined);
   assert.equal(runner.calls.find((c) => c.step === 'open_channels_from_main').payload.nickname, undefined);
-  assert.equal(runner.calls.find((c) => c.step === 'activate_existing_channels').payload.nickname, undefined);
+  assert.equal(runner.calls.some((c) => c.step === 'activate_existing_channels'), false);
   assert.equal(runner.calls.find((c) => c.step === 'open_creator_by_following_scroll').payload.nickname, '目标视频号');
   assert.deepEqual(runner.calls.filter((c) => c.step === 'collect_current_video').map((c) => c.payload.index), [1, 2, 3]);
 
@@ -159,7 +158,6 @@ test('desktop WeChat patrol records main-window, screenshot locator and protecte
     methods: {
       activate_wechat_main_window: 'wechat_main',
       open_channels_from_main: 'wechat_main_sidebar',
-      activate_existing_channels: 'channels_dock_window',
       cleanup_autoplay_tabs: 'protect_following_tab',
       open_following_overview: 'left_sidebar_only',
       open_creator_by_following_scroll: 'following_scroll_locator',
@@ -179,7 +177,6 @@ test('desktop WeChat patrol records main-window, screenshot locator and protecte
   const evidence = JSON.parse(item.metrics_evidence_json);
   assert.match(evidence.navigation.method, /wechat_main/);
   assert.match(evidence.navigation.method, /wechat_main_sidebar/);
-  assert.match(evidence.navigation.method, /channels_dock_window/);
   assert.match(evidence.navigation.method, /protect_following_tab/);
   assert.match(evidence.navigation.method, /left_sidebar_only/);
   assert.equal(evidence.locator.source, 'system_screenshot_code');
@@ -300,6 +297,15 @@ test('desktop WeChat locator reads traffic-light anchors by role and targets the
   assert.equal(Math.round(anchors.buttons.close.centerX), 270);
   assert.equal(Math.round(anchors.buttons.minimize.centerX), 288);
   assert.equal(Math.round(anchors.buttons.zoom.centerX), 306);
+
+  const lightweightAnchors = parseTrafficLightOutput([
+    'WINDOW|微信|257|62|1201|768',
+    'BUTTON|zoom|全屏幕按钮|297|69|18|18',
+    'BUTTON|close|关闭按钮|261|69|18|18',
+    'BUTTON|minimize|最小化按钮|279|69|18|18',
+  ].join('\n'));
+  assert.equal(lightweightAnchors.ok, true);
+  assert.equal(lightweightAnchors.window.contentCount, 0);
 
   const region = leftRailRegionFromAnchors(anchors);
   assert.equal(region.x, 257);
@@ -865,13 +871,55 @@ test('desktop WeChat creator picker prefers the name row over bio text', () => {
 
   assert.equal(picked.ok, true);
   assert.equal(picked.x, 420);
+  assert.equal(picked.y, 330);
   assert.match(picked.detail, /coverage=1\.00/);
+  assert.match(picked.detail, /adjusted=false/);
 
   const rejected = chooseCreatorCandidate([
     { x: 460, y: 280, width: 500, height: 36, role: 'AXStaticText', label: '这里介绍了目标视频号的简介内容' },
   ], { nickname: '目标视频号', anchors });
   assert.equal(rejected.ok, false);
   assert.match(rejected.reason, /拒绝误点/);
+});
+
+test('desktop WeChat creator picker adjusts large row containers to the upper name area', () => {
+  const anchors = parseTrafficLightOutput([
+    'WINDOW|微信视频号|111|75|1826|974|0',
+    'BUTTON|close|关闭按钮|154|102|18|18',
+    'BUTTON|minimize|最小化按钮|194|102|18|18',
+    'BUTTON|zoom|全屏幕按钮|234|102|18|18',
+  ].join('\n'));
+
+  const picked = chooseCreatorCandidate([
+    { x: 640, y: 430, width: 760, height: 170, role: 'AXCell', label: '目标视频号' },
+  ], { nickname: '目标视频号', anchors });
+
+  assert.equal(picked.ok, true);
+  assert.equal(picked.x, 412);
+  assert.equal(picked.y, 393);
+  assert.match(picked.detail, /adjusted=true/);
+  assert.match(picked.detail, /center=640,430/);
+  assert.match(picked.detail, /click=412,393/);
+});
+
+test('desktop WeChat creator picker prefers exact small text over large containers', () => {
+  const anchors = parseTrafficLightOutput([
+    'WINDOW|微信视频号|111|75|1826|974|0',
+    'BUTTON|close|关闭按钮|154|102|18|18',
+    'BUTTON|minimize|最小化按钮|194|102|18|18',
+    'BUTTON|zoom|全屏幕按钮|234|102|18|18',
+  ].join('\n'));
+
+  const picked = chooseCreatorCandidate([
+    { x: 640, y: 430, width: 760, height: 170, role: 'AXCell', label: '目标视频号' },
+    { x: 426, y: 356, width: 98, height: 24, role: 'AXStaticText', label: '目标视频号' },
+  ], { nickname: '目标视频号', anchors });
+
+  assert.equal(picked.ok, true);
+  assert.equal(picked.x, 426);
+  assert.equal(picked.y, 356);
+  assert.match(picked.detail, /role=AXStaticText/);
+  assert.match(picked.detail, /adjusted=false/);
 });
 
 test('desktop WeChat badge mapping marks pinned creator cards', () => {

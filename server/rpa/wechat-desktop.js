@@ -153,13 +153,8 @@ export async function prepareWechatChannelsFollowing({ scriptRunner = defaultWec
   evidence.push(await runStep(scriptRunner, 'assert_accessibility', {}, progress));
 
   try {
-    for (const [step, payload] of [
-      ['activate_wechat_main_window', {}],
-      ['open_channels_from_main', {}],
-      ['activate_existing_channels', {}],
-    ]) {
-      evidence.push(await runStep(scriptRunner, step, payload, progress));
-    }
+    evidence.push(await runStep(scriptRunner, 'activate_wechat_main_window', {}, progress));
+    evidence.push(await runStep(scriptRunner, 'open_channels_from_main', {}, progress));
   } catch (mainEntryError) {
     progress(`  微信主页面入口不可用，改用视频号独立窗口兜底：${friendlyWechatDesktopError(mainEntryError)}`);
     try {
@@ -232,8 +227,22 @@ function stepEvidence(stepResult) {
   };
 }
 
+function formatStepDuration(step, elapsedMs) {
+  const seconds = (elapsedMs / 1000).toFixed(1);
+  const slow = elapsedMs >= 8000 ? ' slow_step' : '';
+  return `步骤 ${step} 用时 ${seconds}s${slow}`;
+}
+
 async function runStep(scriptRunner, step, payload, progress, { optional = false } = {}) {
-  const r = await scriptRunner(step, payload);
+  const started = Date.now();
+  let r;
+  try {
+    r = await scriptRunner(step, payload);
+  } catch (e) {
+    progress(`  ${formatStepDuration(step, Date.now() - started)}`);
+    throw e;
+  }
+  progress(`  ${formatStepDuration(step, Date.now() - started)}`);
   if (!r || r.ok !== true) {
     if (optional) {
       const message = r?.message || `桌面微信步骤失败: ${step}`;
@@ -518,6 +527,11 @@ function appendWechatDiagnostics(base, message) {
 }
 
 async function defaultWechatScriptRunner(step, payload = {}) {
+  let prelocatedMainEntry = null;
+  if (step === 'open_channels_from_main') {
+    prelocatedMainEntry = await clickWechatChannelsFromMainByLocator({ runner: execFileAsync });
+    if (prelocatedMainEntry.ok) return prelocatedMainEntry;
+  }
   if (step === 'open_profile_entry') {
     return await openWechatProfileEntryByLocator({ runner: execFileAsync });
   }
@@ -555,7 +569,7 @@ async function defaultWechatScriptRunner(step, payload = {}) {
     const { stdout, stderr } = await execFileAsync('osascript', ['-e', script], { timeout: 60_000 });
     const parsed = parseScriptResult(stdout, stderr);
     if (step === 'open_channels_from_main' && !parsed.ok && parsed.code === 'main_channels_entry') {
-      const located = await clickWechatChannelsFromMainByLocator({ runner: execFileAsync });
+      const located = prelocatedMainEntry || await clickWechatChannelsFromMainByLocator({ runner: execFileAsync });
       if (located.ok) return located;
       parsed.message = [parsed.message, located.message].filter(Boolean).join('；');
       parsed.method = located.method || parsed.method;
@@ -598,13 +612,6 @@ async function defaultWechatScriptRunner(step, payload = {}) {
         parsed.message = [parsed.message, cleaned.message].filter(Boolean).join('；');
         parsed.method = cleaned.method || parsed.method;
       }
-    }
-    if (step === 'activate_wechat_main_window' && parsed.ok) {
-      const screenshotPath = await captureWechatDesktopScreenshot('wechat_main', {
-        preferredBundleIds: ['com.tencent.xinWeChat', 'com.tencent.flue.WeChatAppEx'],
-      });
-      parsed.screenshotPath = screenshotPath;
-      if (screenshotPath) parsed.detail = `${parsed.detail || '已激活微信主窗口'}；主页面截图=${screenshotPath}`;
     }
     if (step === 'collect_current_video' && parsed.ok) {
       const screenshotPath = await captureWechatDesktopScreenshot(`${payload.nickname || 'wechat'}_${payload.index || 'video'}`);

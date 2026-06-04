@@ -55,12 +55,14 @@ export function normalizeTrafficLightAnchors({ window, buttons } = {}) {
   };
 }
 
-export async function getWechatTrafficLightAnchors({ runner = execFileAsync, preferChannelsWindow = false } = {}) {
+export async function getWechatTrafficLightAnchors({ runner = execFileAsync, preferChannelsWindow = false, includeContentCount = true } = {}) {
   const preferChannelsLiteral = preferChannelsWindow ? 'true' : 'false';
+  const includeContentCountLiteral = includeContentCount ? 'true' : 'false';
   const script = `
 on run
   set rowItems to {}
   set preferChannelsWindow to ${preferChannelsLiteral}
+  set includeContentCount to ${includeContentCountLiteral}
   tell application id "com.tencent.xinWeChat"
     activate
     if not preferChannelsWindow then reopen
@@ -82,9 +84,11 @@ on run
       set wp to position of w
       set ws to size of w
       set contentCount to 0
-      try
-        set contentCount to count of entire contents of p
-      end try
+      if includeContentCount then
+        try
+          set contentCount to count of entire contents of p
+        end try
+      end if
       set end of rowItems to "WINDOW|" & (name of w as text) & "|" & ((item 1 of wp) as text) & "|" & ((item 2 of wp) as text) & "|" & ((item 1 of ws) as text) & "|" & ((item 2 of ws) as text) & "|" & (contentCount as text)
       repeat with i from 1 to 12
         try
@@ -289,27 +293,8 @@ export async function locateChannelsIconByCode({ anchors, rail, clusters } = {})
 
 export async function clickWechatChannelsFromMainByLocator({ runner = execFileAsync } = {}) {
   try {
-    const anchors = await getWechatTrafficLightAnchors({ runner });
+    const anchors = await getWechatTrafficLightAnchors({ runner, includeContentCount: false });
     if (!anchors.ok) return { ok: false, code: 'main_channels_entry', method: 'traffic_light_left_rail', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
-
-    const fullVisible = await verifyChannelsVisibleByFullSystemScreenshot({ runner, anchors });
-    if (fullVisible.ok) {
-      return {
-        ok: true,
-        code: 'open_channels_from_main',
-        method: fullVisible.method,
-        detail: `系统全屏截图确认当前已在视频号界面；${fullVisible.detail}; ${anchors.diagnostics}`,
-      };
-    }
-    const overviewVisible = await verifyProfileOrOverviewVisible({ runner });
-    if (overviewVisible.ok) {
-      return {
-        ok: true,
-        code: 'open_channels_from_main',
-        method: 'system_screenshot_profile_overview',
-        detail: `系统截图确认当前已在视频号个人/总览页；${overviewVisible.detail}; ${anchors.diagnostics}`,
-      };
-    }
 
     let lastMessage = '';
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -348,11 +333,30 @@ export async function clickWechatChannelsFromMainByLocator({ runner = execFileAs
       if (attempt < 2) await sleep(700);
     }
 
+    const fullVisible = await verifyChannelsVisibleByFullSystemScreenshot({ runner, anchors });
+    if (fullVisible.ok) {
+      return {
+        ok: true,
+        code: 'open_channels_from_main',
+        method: fullVisible.method,
+        detail: `系统全屏截图确认当前已在视频号界面；${fullVisible.detail}; ${anchors.diagnostics}`,
+      };
+    }
+    const overviewVisible = await verifyProfileOrOverviewVisible({ runner });
+    if (overviewVisible.ok) {
+      return {
+        ok: true,
+        code: 'open_channels_from_main',
+        method: 'system_screenshot_profile_overview',
+        detail: `系统截图确认当前已在视频号个人/总览页；${overviewVisible.detail}; ${anchors.diagnostics}`,
+      };
+    }
+
     return {
       ok: false,
       code: 'main_channels_entry',
       method: 'traffic_light_left_rail',
-      message: lastMessage || '代码定位置信度不足，已停止点击',
+      message: [lastMessage || '代码定位置信度不足，已停止点击', fullVisible.message, overviewVisible.reason].filter(Boolean).join('；'),
     };
   } catch (e) {
     return { ok: false, code: 'main_channels_entry', method: 'traffic_light_left_rail', message: String(e.message || e) };
@@ -362,7 +366,7 @@ export async function clickWechatChannelsFromMainByLocator({ runner = execFileAs
 export async function detectWechatChannelsVisibleByScreenshot({ runner = execFileAsync } = {}) {
   let rail = null;
   try {
-    const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+    const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
     if (!anchors.ok) return { ok: false, method: 'system_screenshot_channels_state', reason: anchors.reason || '无法读取微信窗口红黄绿按钮' };
 
     const fullVisible = await verifyChannelsVisibleByFullSystemScreenshot({ runner, anchors });
@@ -415,45 +419,57 @@ export async function detectWechatChannelsVisibleByScreenshot({ runner = execFil
 
 export async function openWechatProfileEntryByLocator({ runner = execFileAsync } = {}) {
   const diagnostics = [];
-  let anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  let anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
   if (!anchors.ok) return { ok: false, code: 'profile_entry', method: 'profile_icon_locator', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
 
-  const alreadyOverview = await verifyProfileOrOverviewVisible({ runner });
-  if (alreadyOverview.ok) {
-    return {
-      ok: true,
-      code: 'open_profile_entry',
-      method: 'system_screenshot_profile_overview',
-      detail: `当前已在个人/关注入口页，无需重复点击右上角小人；${alreadyOverview.detail}; ${anchors.diagnostics}`,
-    };
-  }
+  const first = await clickProfileEntryAndVerify(anchors, { runner, waitMs: 800 });
+  if (first.ok) return first.result;
+  diagnostics.push(first.message);
 
   const returned = await returnFromVideoDetailIfNeeded(anchors, { runner });
   diagnostics.push(returned.detail);
   anchors = returned.anchors || anchors;
 
+  const retry = await clickProfileEntryAndVerify(anchors, { runner, waitMs: 950 });
+  if (retry.ok) {
+    retry.result.detail = [retry.result.detail, ...diagnostics].filter(Boolean).join('；');
+    return retry.result;
+  }
+
+  return {
+    ok: false,
+    code: 'profile_entry',
+    method: 'profile_icon_locator',
+    message: [retry.message, anchors.diagnostics, ...diagnostics].filter(Boolean).join('；'),
+  };
+}
+
+async function clickProfileEntryAndVerify(anchors, { runner, waitMs }) {
   const point = profileEntryPointFromAnchors(anchors);
   const pointError = validateProfileEntryPoint(point, anchors);
-  if (pointError) return { ok: false, code: 'profile_entry', method: 'profile_icon_locator', message: pointError };
+  if (pointError) {
+    return { ok: false, message: pointError };
+  }
 
   await clickAt(point.x, point.y, { runner });
-  await sleep(1400);
+  await sleep(waitMs);
 
   const verified = await verifyProfileOrOverviewVisible({ runner });
   if (!verified.ok) {
     return {
       ok: false,
-      code: 'profile_entry',
-      method: 'profile_icon_locator',
-      message: [`已点击右上角小人入口 ${point.x},${point.y}，但未确认进入个人/总览页`, verified.reason, anchors.diagnostics, ...diagnostics].filter(Boolean).join('；'),
+      message: [`已点击右上角小人入口 ${point.x},${point.y}，但未确认进入个人/总览页`, verified.reason].filter(Boolean).join('；'),
     };
   }
 
   return {
     ok: true,
-    code: 'open_profile_entry',
-    method: 'profile_icon_locator',
-    detail: [`已通过系统坐标点击右上角小人入口 ${point.x},${point.y}`, verified.detail, anchors.diagnostics, ...diagnostics].filter(Boolean).join('；'),
+    result: {
+      ok: true,
+      code: 'open_profile_entry',
+      method: 'profile_icon_locator',
+      detail: [`已通过系统坐标点击右上角小人入口 ${point.x},${point.y}`, verified.detail, anchors.diagnostics].filter(Boolean).join('；'),
+    },
   };
 }
 
@@ -471,7 +487,7 @@ export async function ensureWechatOverviewByLocator({ runner = execFileAsync } =
 }
 
 export async function openWechatFollowingOverviewByLocator({ runner = execFileAsync } = {}) {
-  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
   if (!anchors.ok) return { ok: false, code: 'open_following_overview', method: 'left_sidebar_following_locator', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
   const screenshotPoint = await findFollowingSidebarPointByScreenshot({ runner, anchors });
   if (!screenshotPoint.ok) {
@@ -513,7 +529,7 @@ export async function openWechatFollowingOverviewByLocator({ runner = execFileAs
 }
 
 export async function cleanupWechatAutoplayTabsByLocator({ runner = execFileAsync, keepTabTitle = '关注' } = {}) {
-  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
   if (!anchors.ok) return { ok: false, code: 'cleanup_autoplay_tabs', method: 'hover_tab_close', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
 
   const axPlan = await findAutoplayTabClosePlanByAX({ runner, keepTabTitle });
@@ -560,7 +576,7 @@ export async function openWechatCreatorByFollowingScroll({ runner = execFileAsyn
   const term = String(nickname || '').trim();
   if (!term) return { ok: false, code: 'creator_not_found', method: 'following_scroll_locator', message: '缺少视频号博主昵称' };
 
-  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
   if (!anchors.ok) return { ok: false, code: 'creator_not_found', method: 'following_scroll_locator', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
 
   let repeated = 0;
@@ -622,7 +638,7 @@ export async function openWechatCreatorByFollowingScroll({ runner = execFileAsyn
 }
 
 export async function openFirstNonPinnedWechatVideoByScreenshot({ runner = execFileAsync, nickname = '' } = {}) {
-  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
   if (!anchors.ok) return { ok: false, code: 'open_first_non_pinned_video_by_screenshot', method: 'creator_grid_screenshot', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
 
   let screenshot = null;
@@ -668,7 +684,7 @@ export async function openFirstNonPinnedWechatVideoByScreenshot({ runner = execF
 }
 
 export async function goNextWechatVideoByScreenshot({ runner = execFileAsync } = {}) {
-  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
   if (!anchors.ok) return { ok: false, code: 'go_next_video_by_screenshot', method: 'scroll_next_video', message: anchors.reason || '无法读取微信窗口红黄绿按钮' };
   const focusPoint = videoSurfacePointFromAnchors(anchors);
   const before = await captureWechatWindowFingerprint({ runner, anchors });
@@ -1142,6 +1158,40 @@ export function channelsLightPageNeedsRailConfirmation(anchors) {
   return true;
 }
 
+function creatorCandidateRoleRank(c) {
+  const role = String(c?.role || '');
+  const width = Number(c?.width || 0);
+  const height = Number(c?.height || 0);
+  const small = height > 0 && height <= 52 && width > 0 && width <= 360;
+  if (small && /AXStaticText/.test(role)) return 0;
+  if (/AXLink|AXButton/.test(role) && height <= 72) return 1;
+  if (/AXStaticText/.test(role)) return 2;
+  if (/AXLink|AXButton/.test(role)) return 3;
+  if (/AXCell|AXGroup|AXRow/.test(role)) return 4;
+  return 5;
+}
+
+function isLargeCreatorCandidate(c) {
+  const role = String(c?.role || '');
+  const width = Number(c?.width || 0);
+  const height = Number(c?.height || 0);
+  return /AXCell|AXGroup|AXRow/.test(role) || height > 72 || width > 420;
+}
+
+function creatorCandidateClickPoint(c, anchors) {
+  if (!isLargeCreatorCandidate(c)) {
+    return { x: c.x, y: c.y, adjusted: false, centerX: c.x, centerY: c.y };
+  }
+  const { window } = anchors;
+  const width = Number(c.width) > 0 ? Number(c.width) : 180;
+  const height = Number(c.height) > 0 ? Number(c.height) : 96;
+  const left = c.x - width / 2;
+  const top = c.y - height / 2;
+  const x = Math.round(clamp(left + clamp(width * 0.2, 76, 172), window.x + 90, window.x + window.width * 0.82));
+  const y = Math.round(clamp(top + clamp(height * 0.28, 22, 48), window.y + 96, window.y + window.height - 42));
+  return { x, y, adjusted: true, centerX: c.x, centerY: c.y };
+}
+
 export function chooseCreatorCandidate(candidates = [], { nickname, anchors } = {}) {
   if (!anchors?.ok) return { ok: false, reason: '缺少窗口锚点' };
   const term = String(nickname || '').trim();
@@ -1185,19 +1235,21 @@ export function chooseCreatorCandidate(candidates = [], { nickname, anchors } = 
       reason: `关注列表只有包含昵称的长文本，拒绝误点 term=${term} 候选=${normalized.map((c) => `${c.x},${c.y}:cov${c.coverage.toFixed(2)}`).join('/')}`,
     };
   }
-  const roleRank = (role) => (/AXStaticText|AXLink|AXButton|AXCell/.test(role) ? 0 : 1);
   pool.sort((a, b) => {
-    if (roleRank(a.role) !== roleRank(b.role)) return roleRank(a.role) - roleRank(b.role);
+    const roleDelta = creatorCandidateRoleRank(a) - creatorCandidateRoleRank(b);
+    if (roleDelta !== 0) return roleDelta;
+    if (a.exact !== b.exact) return a.exact ? -1 : 1;
     if (Math.abs(a.coverage - b.coverage) > 0.01) return b.coverage - a.coverage;
     if (Math.abs(a.y - b.y) > 12) return a.y - b.y;
     return a.x - b.x;
   });
   const picked = pool[0];
+  const clickPoint = creatorCandidateClickPoint(picked, anchors);
   return {
     ok: true,
-    x: picked.x,
-    y: picked.y,
-    detail: `AX昵称匹配 role=${picked.role || 'unknown'} exact=${picked.exact} coverage=${picked.coverage.toFixed(2)} pool=${pool.length}/${normalized.length} pick=${picked.x},${picked.y} label=${compactForLog(picked.label)}`,
+    x: clickPoint.x,
+    y: clickPoint.y,
+    detail: `AX昵称匹配 role=${picked.role || 'unknown'} exact=${picked.exact} coverage=${picked.coverage.toFixed(2)} adjusted=${clickPoint.adjusted} pool=${pool.length}/${normalized.length} center=${clickPoint.centerX},${clickPoint.centerY} click=${clickPoint.x},${clickPoint.y} label=${compactForLog(picked.label)}`,
   };
 }
 
@@ -1408,7 +1460,7 @@ async function verifyCreatorHomeVisible({ runner, nickname }) {
   if (ax.ok && ax.text.includes(nickname) && /关注|粉丝|作品|视频|动态/.test(ax.text)) {
     return { ok: true, detail: `AX确认博主主页: ${compactForLog(ax.text)}` };
   }
-  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
   if (anchors.ok) {
     let screenshot = null;
     try {
@@ -2239,7 +2291,7 @@ end vbp_text
 async function verifyChannelsVisibleByFullSystemScreenshot({ runner, anchors: providedAnchors } = {}) {
   let screenshot = null;
   try {
-    const anchors = providedAnchors?.ok ? providedAnchors : await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+    const anchors = providedAnchors?.ok ? providedAnchors : await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
     if (!anchors.ok) return { ok: false, method: 'system_screenshot_full_channels_window', message: anchors.reason || '无法读取微信窗口锚点' };
     screenshot = await captureSystemFullScreenshot({ runner });
     if (!screenshot.ok) return { ok: false, method: 'system_screenshot_full_channels_window', message: screenshot.reason || '无法截取系统全屏截图' };
@@ -2328,7 +2380,7 @@ async function verifyChannelsSelectedBySystemScreenshot(location, { runner }) {
   }
   let rail = null;
   try {
-    const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+    const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
     if (!anchors.ok) return { ok: false, message: anchors.reason || '无法读取微信窗口锚点' };
     rail = await captureWechatLeftRail(anchors, { runner });
     if (!rail.ok) return { ok: false, message: rail.reason || '无法截取微信左侧栏' };
@@ -2591,7 +2643,7 @@ async function returnFromVideoDetailIfNeeded(anchors, { runner }) {
       await clickAt(point.x, point.y, { runner });
       await sleep(900);
       details.push(`第${attempt}次从视频详情页点击返回 ${point.x},${point.y}: ${visible.detail}`);
-      const refreshed = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+      const refreshed = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
       if (refreshed.ok) current = refreshed;
     } finally {
       cleanupCapturedRail(rail);
@@ -2614,7 +2666,7 @@ async function verifyProfileOrOverviewVisible({ runner }) {
     return { ok: true, detail: `AX确认个人/总览信号: ${compactForLog(ax.text)}` };
   }
 
-  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+  const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
   if (!anchors.ok) return { ok: false, reason: [ax.reason, anchors.reason].filter(Boolean).join('；') || '未确认个人/总览页' };
   const sidebar = await findFollowingSidebarPointByScreenshot({ runner, anchors });
   if (sidebar.ok) {
@@ -2698,7 +2750,7 @@ end vbp_text
 async function analyzeCurrentWechatWindowByScreenshot({ runner }) {
   let rail = null;
   try {
-    const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true });
+    const anchors = await getWechatTrafficLightAnchors({ runner, preferChannelsWindow: true, includeContentCount: false });
     if (!anchors.ok) return { ok: false, reason: anchors.reason || '无法读取微信窗口红黄绿按钮' };
     rail = await captureWechatLeftRail(anchors, { runner });
     if (!rail.ok) return { ok: false, reason: rail.reason || '无法截取微信左侧栏' };

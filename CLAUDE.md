@@ -22,7 +22,7 @@
 8. **RPA 只负责顺序采集，不负责入选判断**。每读完一条详情内容，先记录/规范化发布时间和指标，再截图入库；未知时间、超窗口、未达阈值都要进入内容库。巡检阶段不因时间窗口或标题匹配判断而丢弃已打开详情；小红书/抖音非置顶详情若已确认早于窗口，保存本条后可结束当前博主巡检。正式日报只在巡检结束后的 `recomputeAll()` / `getEligible()` 阶段筛选。
 
 ## 巡检流程（当前唯一口径）
-- 巡检前先排序：前端/API 实际按平台阶段执行，网页内容小红书阶段整体先于抖音阶段，微信视频号阶段由独立入口发起；每个阶段内部评级越高越前，同评级按 `created_at` 更早优先；缺少时间时随机打散。`sortPatrolAccounts()` 仍保留混合列表的同评级小红书优先规则。
+- 巡检前先排序：前端/API 实际按平台阶段执行，网页内容小红书阶段整体先于抖音阶段（视频号桌面巡检已移除）；每个阶段内部评级越高越前，同评级按 `created_at` 更早优先；缺少时间时随机打散。`sortPatrolAccounts()` 仍保留混合列表的同评级小红书优先规则。
 - API 阶段拆开：网页内容前端依次调用 `/api/patrol/run` 跑 `{ platform: "xiaohongshu" }`、`{ platform: "douyin" }`；微信视频号由独立按钮调用 `/api/patrol/run` 跑 `{ platform: "wechat_channels" }`。小红书/抖音由 Chrome CDP 巡检，`wechat_channels` 只操作 macOS 微信客户端内的视频号，不打开网页版视频号；`/api/reports/generate` 默认生成 `reportType:"web"` 网页日报，`reportType:"wechat"` 生成微信日报。
 - 单活跃巡检：同一时间只允许一个巡检运行；已有巡检时，新的 `/api/patrol/run` 或含 RPA 的 `/api/reports/generate` 必须返回 409，并保留原巡检的停止控制。
 - 并发标签：`rpa.maxTabsPerBatch` 默认 6，允许 1-10；内存不足可自动下调。多标签模式每个账号标签使用独立 CDP client，账号跑完立即关标签。
@@ -47,14 +47,10 @@
 - 发布时间缺失、超窗口、标题不匹配或互动未达标都不阻断保存；抖音详情发布日期早于窗口时，保存本条后结束该博主巡检；是否入选留到巡检后判断。
 - 全部账号完成或剩余账号正在跑时不再额外开新标签；单个账号跑完立即关闭自己的标签。
 
-### 视频号阶段
-- 视频号巡检由独立按钮/API 发起，不跟随小红书/抖音网页日报自动混跑；视频号在本项目中只指 macOS 微信客户端内的视频号，可保存到内容库和候选池，并可在人工确认后进入独立微信日报。
-- 视频号巡检由 `server/rpa/wechat-desktop.js` 调用 macOS System Events / `screencapture` / Swift CoreGraphics 操作桌面微信，定位逻辑在 `server/rpa/wechat-locator.js`，重复 Swift 鼠标/像素工作统一走 `server/rpa/wechat-swift.js` 的预编译缓存助手；RPA 先激活桌面微信主窗口并确认主页面可截图/可读取 → 从主页面左侧视频号入口进入并用系统全屏截图验证视频号界面；主页面入口失败时，才点击程序坞里的绿色视频号独立窗口图标兜底（优先匹配视频号/Channels/WeChatAppEx，多个“微信”时点击最右侧的那个）。进入视频号后继续：点击右上角小人入口 → 进入赞和收藏/个人总览 → 全屏截图定位左侧栏“关注” → 悬停并关闭“关注”左侧紧邻的随机推荐视频标签 → 按账号池昵称打开博主主页。
-- 默认不使用 Python、不使用 AI 截图识别、不使用 OCR、不打开网页版视频号；不点击主微信 Dock 图标或相邻应用、不重启微信。所有导航截图都走 macOS 系统截图，不使用微信页面自带截图、截图快捷键或剪贴板截图。每次需要点击时先全屏截图，再由代码按局部特征定位目标，识别不到就记录诊断并停止，不按粗略兜底坐标继续点。
-- 视频号窗口可以移动和缩放，所以“关注”、顶部标签关闭 `×`、博主主页视频卡片和右侧下箭头必须通过当前系统截图或可读 AX 控件现场识别后才允许点击；禁止误点顶部视频流“关注”。如果无法确认目标，只记录窗口锚点、候选坐标、截图特征和几何参考诊断并停止。
-- 进入关注总览后先关闭“关注”左侧紧邻的随机推荐视频标签，避免默认打开的视频继续播放；关闭动作必须按 hover → 等待 `×` → click `×` 的顺序执行。每个博主默认读取 3 条，可通过 `rpa.wechatVideosPerAccount`（1-10）调整；找博主时先收集 AX 中所有含昵称候选并选择“以昵称为主体”的行，AX 不暴露列表文本或候选不可信时只在微信窗口内查找框粘贴目标昵称并用截图识别橙色高亮坐标，仍找不到才对关注列表滚动并重新截图/读取，直到找到或判断到底；主页视频按截图网格识别，置顶/直播/预约优先按 AX 暴露角标几何贴回卡片后跳过。
-- 详情页切换下一条以在视频区域向下滚动为主路径，每次滚动后用截图指纹/AX 文案验证已经换片；滚动未换片时，再轻微晃动鼠标唤出右侧箭头，并用截图识别右侧下箭头点击兜底。点击“展开”只走 AX 按钮，展开后的文案只取 AX 可读文本，读不到完整文案时保存截图和诊断待补录，不调用 AI/OCR；采集点赞、转发、收藏/红心、评论。每个博主采满目标量或提前失败后发送两次 Command+W 回到“关注”总览，未完成账号不得写 `last_patrolled_at`。
-- 采集结果写入 `wechat-desktop://content/<account-id>/<date>/<index>` 待复核记录；指标原始值和坐标证据写入 `metrics_evidence_json`，`metrics_source='desktop_agent'`，不自动确认。人工确认后的微信视频号内容才可进入独立微信日报。
+### 视频号阶段（已移除，待重做）
+- 旧的视频号桌面巡检（`server/rpa/wechat-desktop.js` / `wechat-locator.js` / `wechat-swift.js`，靠系统截图 + 合成鼠标驱动 macOS 桌面微信）已**整体删除**：太慢、太脆——微信几乎不向 Accessibility 暴露可读控件（实测窗口正文「控件 0」），只能截图猜像素，进个视频号要 100s 还经常失败。将从零重做。当前**没有任何 `wechat_channels` 自动采集入口**（API/前端按钮都已移除）。
+- 仍保留的：`wechat_channels` 作为平台/内容类型，以及 store / filter / 链接 / 阈值 / 去重 的处理；**微信日报**（`pipeline.runWechatReport`）只基于已人工确认、已关联账号池、未归档、非重复的窗口内微信内容生成，**不再触发任何 RPA 巡检**。视频号内容目前只能通过其他方式进入内容库（手动确认、或未来重做的巡检）。
+- 重做时可参考的关键事实（实测）：① 微信主窗口对 AX 不暴露正文，但**窗口几何 + 红黄绿按钮**用 AX C API 可秒读；② 点左栏「视频号」蝴蝶/光圈图标会新开一个标题含「窗口」的独立窗口（`com.tencent.flue.WeChatAppEx`），「是否冒出该窗口」是比暗色像素稳得多的进入成功判据；③ 视频号首页是白色 feed，不是黑视频，旧的「黑屏=已进入」判据是错的。这些验证记录在 `speed/wechat-entry` 分支里（本分支即从它复制而来）。
 
 ## 数据流
 - 采集（三条入口，殊途同归到 `store.upsertCapture()`）：
@@ -63,7 +59,7 @@
   - **粘贴链接服务端抓取** `POST /api/ingest`：`ingest/scrape.js` 用 `fetch` 拉 HTML → `extractFromHtml`（复用 `extension/extract-core.js`，从 `__INITIAL_STATE__`/`RENDER_DATA`/og 解析）→ `metrics_source='scraped'` → needs_review。纯 HTTP 抓取「尽力而为」：常只拿到 JS 外壳/验证页，抓不到数字属正常，缺的进待补录。**不做反爬绕过/验证码/签名伪造**。
   - 共同：`upsertCapture()` 标准化指标、算 url_key/fingerprint、去重合并、账号池自动关联、`computeDataStatus`、落库；截图存 `data/screenshots/`。
 - 确认：仪表盘候选池 → `POST /api/contents/:id/confirm` → `store.confirmContent()`：重算指标、强制 `metrics_source='manual'` + `user_confirmed=1`、重算状态。
-- 账号池打开：`POST /api/accounts/open-platform` 只筛选小红书 `/user/profile/<id>` 和抖音 `/user/<id>` 主页并交给 Chrome 打开；视频号不走浏览器打开，必须通过桌面微信巡检。
+- 账号池打开：`POST /api/accounts/open-platform` 只筛选小红书 `/user/profile/<id>` 和抖音 `/user/<id>` 主页并交给 Chrome 打开；视频号不走浏览器打开（桌面巡检已移除，待重做）。
 - 出报：`pipeline.runDailyReport({windowType})` 生成网页日报：可选先跑小红书、抖音 Chrome RPA 阶段 → `recomputeAll(窗口)` → `getEligible(窗口起点)`（小红书/抖音 + 账号池 + confirmed + 平台必需指标都达标）→ 逐条 `analyzeContent`（按 content_id 缓存）→ `generateReportData`（校验编号）→ `render*` → 落 `daily_reports(report_type='web')` + 写 `data/exports/`（MD/HTML/CSV/ZIP）。`pipeline.runWechatReport({windowType})` 生成微信日报：只取 `wechat_channels` / `wechat_article` 中窗口内、已人工确认、已关联账号池、未归档、非重复内容，落 `daily_reports(report_type='wechat')`。0 条则用 `fallbackReportData` 跳过 AI。
 - 自动：`scheduler.startScheduler()`，setTimeout 到点跑；用 `meta.last_auto_run_date` 防重复；可补跑。设置变更后调 `restartScheduler()`。
 

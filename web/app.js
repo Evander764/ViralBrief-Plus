@@ -22,7 +22,6 @@ const WEB_PATROL_STAGES = [
   { platform: 'xiaohongshu', label: '小红书' },
   { platform: 'douyin', label: '抖音' },
 ];
-const WECHAT_PATROL_STAGE = { platform: 'wechat_channels', label: '微信视频号' };
 let patrolRunning = false;
 
 async function api(path, opts = {}) {
@@ -194,46 +193,7 @@ $('#ovGenerate').addEventListener('click', async () => {
   }
 });
 
-$('#ovRunWechatPatrol').addEventListener('click', async (e) => {
-  const btn = e.target;
-  btn.disabled = true;
-  btn.textContent = '巡检中...';
-  const progressEl = $('#ovProgress');
-  const progressText = $('#ovProgressText');
-  $('#ovWechatMsg').textContent = '';
-  if (progressEl) progressEl.style.display = 'block';
-  if (progressText) progressText.textContent = '正在巡检微信视频号账号...';
-  try {
-    setPatrolRunning(true, btn);
-    const res = await runPatrolStages(progressText, {
-      includePatrolledToday: true,
-      stages: [WECHAT_PATROL_STAGE],
-    });
-    const status = classifyPatrolSummary(res);
-    const detail = `巡检账号 ${res.total || 0} 个，成功 ${res.success || 0} 个，失败 ${res.failed || 0} 个，新增 ${res.newItems || 0} 条，今日跳过 ${res.skippedToday || 0} 个`;
-    const failureDetail = patrolFailureDetails(res);
-    if (status === 'failed') {
-      $('#ovWechatMsg').textContent = `巡检失败：${detail}${failureDetail ? `；${failureDetail}` : ''}`;
-      toast(`微信视频号巡检失败：${failureDetail || detail}`, 'bad');
-    } else if (status === 'partial') {
-      $('#ovWechatMsg').textContent = `部分失败：${detail}${failureDetail ? `；${failureDetail}` : ''}`;
-      toast(`微信视频号巡检部分失败：${failureDetail || detail}`, 'bad');
-    } else {
-      $('#ovWechatMsg').textContent = `${status === 'stopped' ? '已停止' : '完成'}：${detail}`;
-      toast(`${status === 'stopped' ? '微信视频号巡检已停止' : '微信视频号巡检完成'}：${detail}`, status === 'stopped' ? '' : 'ok');
-    }
-    loadCandidates();
-    loadOverview();
-  } catch (err) {
-    $('#ovWechatMsg').textContent = '巡检失败：' + err.message;
-    toast('微信巡检失败：' + err.message, 'bad');
-  } finally {
-    if (progressEl) progressEl.style.display = 'none';
-    setPatrolRunning(false);
-    btn.disabled = false;
-    btn.textContent = '巡检微信视频号';
-  }
-});
+// 视频号桌面巡检按钮已移除（准备重做）。微信日报仍可基于已确认内容生成。
 
 $('#ovGenerateWechat').addEventListener('click', async () => {
   try {

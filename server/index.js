@@ -17,7 +17,6 @@ import { execFile } from 'node:child_process';
 import { CDPClient } from './rpa/cdp.js';
 import { runPatrol, discoverFollowedCreators } from './rpa/patrol.js';
 import { classifyPatrolResult, combinePatrolResults, patrolStatusMessage } from './rpa/patrol-results.js';
-import { runWechatDesktopPatrol } from './rpa/wechat-desktop.js';
 import { launchChrome, killChrome } from './rpa/chrome-launcher.js';
 import { beginPatrolRun, endPatrolRun, requestPatrolStop, getPatrolRunState } from './rpa/control.js';
 
@@ -262,7 +261,6 @@ async function handleApi(req, res, url, segs) {
       const cfg = loadConfig();
       const windowType = body.window || cfg.schedule?.window || 'last_1_days';
       const maxTabsPerBatch = body.maxTabsPerBatch ?? cfg.rpa?.maxTabsPerBatch;
-      const wechatVideosPerAccount = body.wechatVideosPerAccount ?? cfg.rpa?.wechatVideosPerAccount;
       const includePatrolledToday = body.includePatrolledToday === true;
       const platforms = body.platform ? [body.platform] : (Array.isArray(body.platforms) && body.platforms.length ? body.platforms : ['xiaohongshu', 'douyin']);
       runCtrl = beginPatrolRun({ source: 'api', platforms });
@@ -292,14 +290,7 @@ async function handleApi(req, res, url, segs) {
           if (chrome.closeOnDone && chrome.child) killChrome(chrome.child);
         }
       }
-      if (platforms.includes('wechat_channels') && !runCtrl.shouldStop()) {
-        stageResults.push(await runWechatDesktopPatrol({
-          onProgress: (msg) => log.info(`[RPA] ${msg}`),
-          includePatrolledToday,
-          shouldStop: runCtrl.shouldStop,
-          maxVideosPerAccount: wechatVideosPerAccount,
-        }));
-      }
+      // 视频号桌面巡检已移除，准备重做。这里不再触发任何 wechat_channels 自动采集。
       const result = combinePatrolResults(stageResults);
       const patrolStatus = classifyPatrolResult(result);
       return sendJson(res, 200, {

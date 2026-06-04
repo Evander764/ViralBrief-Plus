@@ -28,7 +28,6 @@ import { EXPORTS_DIR } from './lib/paths.js';
 import { log } from './lib/log.js';
 import { CDPClient } from './rpa/cdp.js';
 import { runPatrol } from './rpa/patrol.js';
-import { runWechatDesktopPatrol } from './rpa/wechat-desktop.js';
 import { launchChrome, killChrome } from './rpa/chrome-launcher.js';
 
 function combinePatrolResults(results = []) {
@@ -271,25 +270,10 @@ export async function runWechatReport({
   windowType = normalizeWindowType(windowType);
   const startISO = windowStartISO(windowType);
 
-  let patrolResult = null;
-  let rpaError = null;
-
-  if (!skipRpa) {
-    progress('rpa', '开始桌面微信视频号阶段巡检...');
-    try {
-      patrolResult = await runWechatDesktopPatrol({
-        onProgress: (msg) => progress('rpa', msg),
-        shouldStop,
-        maxVideosPerAccount,
-      });
-    } catch (rpaErr) {
-      rpaError = rpaErr.message || String(rpaErr);
-      log.warn(`[Pipeline] 桌面微信视频号巡检失败，继续使用已有数据: ${rpaErr.message}`);
-      progress('rpa', `巡检失败: ${rpaErr.message}（将使用已有数据继续）`);
-    }
-  } else {
-    progress('rpa', '已跳过微信巡检（使用已有数据）');
-  }
+  // 视频号桌面巡检已移除（准备重做）。微信日报现在只基于已有的、已人工确认的内容生成。
+  const patrolResult = null;
+  const rpaError = null;
+  progress('rpa', '视频号桌面巡检已移除，使用已有数据生成微信日报');
 
   progress('filter', '刷新微信内容状态...');
   recomputeAll(startISO);

@@ -37,6 +37,6 @@ test('pipeline keeps web report RPA isolated from desktop WeChat patrol', () => 
 
   assert.doesNotMatch(daily, /runWechatDesktopPatrol\(/);
   assert.match(daily, /platform of \['xiaohongshu', 'douyin'\]/);
-  assert.match(wechat, /runWechatDesktopPatrol\(/);
-  assert.match(wechat, /maxVideosPerAccount/);
+  // 视频号桌面巡检已移除：微信日报只基于已确认内容生成，不再触发任何 RPA 巡检。
+  assert.doesNotMatch(wechat, /runWechatDesktopPatrol/);
 });

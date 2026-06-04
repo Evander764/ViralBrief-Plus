@@ -47,6 +47,7 @@
             <b style="color: var(--brand-strong);">微信内容</b>
             <div class="muted" style="font-size:13px; margin-top:4px;">视频号 / 公众号文章</div>
           </div>
+          <button id="ovRunWechatPatrol">巡检视频号</button>
           <button class="primary" id="ovGenerateWechat">生成微信日报</button>
           <span class="muted" id="ovWechatMsg"></span>
         </div>
@@ -57,7 +58,7 @@
           </div>
         </div>
         <p class="muted">入选条件（硬阈值，由系统确定性判定）：小红书需点赞和收藏都达标；抖音需点赞、收藏和转发都达标。1000+ 按超过 1000 处理。</p>
-        <p class="muted" style="font-size:12px;">勾选「先自动采集」后，网页日报只发起小红书、抖音巡检。微信日报基于已确认的微信内容生成（视频号桌面巡检正在重做中）。Chrome 每轮默认同时打开 6 个账号标签页，可在 1-10 间调整。</p>
+        <p class="muted" style="font-size:12px;">勾选「先自动采集」后，网页日报只发起小红书、抖音巡检。视频号桌面巡检会使用桌面微信左上搜索框进入目标账号；微信日报只基于已人工确认的微信内容生成。Chrome 每轮默认同时打开 6 个账号标签页，可在 1-10 间调整。</p>
       </div>
       <div class="panel">
         <h3>今日候选池 <span class="muted">— 待你确认/补录指标的内容</span></h3>
@@ -65,7 +66,7 @@
         <div class="row accent-row" style="margin-bottom: 15px;">
           <div style="flex: 1;">
             <b style="color: var(--brand-strong);">自动巡检</b>
-            <div class="muted" style="font-size: 13px; margin-top: 4px;">小红书/抖音使用你已登录的 Chrome。视频号桌面巡检正在重做中。</div>
+            <div class="muted" style="font-size: 13px; margin-top: 4px;">小红书/抖音使用你已登录的 Chrome；视频号使用桌面微信左上搜索框。</div>
           </div>
           <button class="primary" id="candRunRpa" style="align-self: center;">巡检网页内容</button>
           <button class="danger" id="candStopRpa" style="align-self: center;" disabled>停止巡检</button>

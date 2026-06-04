@@ -22,6 +22,9 @@ const WEB_PATROL_STAGES = [
   { platform: 'xiaohongshu', label: '小红书' },
   { platform: 'douyin', label: '抖音' },
 ];
+const WECHAT_PATROL_STAGES = [
+  { platform: 'wechat_channels', label: '视频号' },
+];
 let patrolRunning = false;
 
 async function api(path, opts = {}) {
@@ -193,7 +196,40 @@ $('#ovGenerate').addEventListener('click', async () => {
   }
 });
 
-// 视频号桌面巡检按钮已移除（准备重做）。微信日报仍可基于已确认内容生成。
+$('#ovRunWechatPatrol').addEventListener('click', async () => {
+  const btn = $('#ovRunWechatPatrol');
+  const msgEl = $('#ovWechatMsg');
+  const progressEl = $('#ovProgress');
+  const progressText = $('#ovProgressText');
+  btn.disabled = true;
+  msgEl.textContent = '';
+  progressEl.style.display = 'block';
+  progressText.textContent = '正在启动桌面微信视频号巡检...';
+  setPatrolRunning(true, btn);
+  try {
+    const patrolSummary = await runPatrolStages(progressText, {
+      includePatrolledToday: true,
+      stages: WECHAT_PATROL_STAGES,
+    });
+    if (patrolSummary.stopped) {
+      msgEl.textContent = '已停止视频号巡检。';
+      return;
+    }
+    const status = classifyPatrolSummary(patrolSummary);
+    const failureDetail = patrolFailureDetails(patrolSummary);
+    msgEl.textContent = `视频号巡检完成：账号 ${patrolSummary.total}, 成功 ${patrolSummary.success}, 失败 ${patrolSummary.failed}, 新增 ${patrolSummary.newItems}, 去重 ${patrolSummary.duplicates}${failureDetail ? ` | 失败原因：${failureDetail}` : ''}`;
+    toast(status === 'failed' ? '视频号巡检失败' : '视频号巡检完成', status === 'failed' ? 'bad' : 'ok');
+    loadOverview();
+    loadCandidates();
+  } catch (e) {
+    msgEl.textContent = '视频号巡检失败：' + e.message;
+    toast(msgEl.textContent, 'bad');
+  } finally {
+    progressEl.style.display = 'none';
+    setPatrolRunning(false, btn);
+    btn.disabled = false;
+  }
+});
 
 $('#ovGenerateWechat').addEventListener('click', async () => {
   try {

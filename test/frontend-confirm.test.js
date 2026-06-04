@@ -140,10 +140,11 @@ test('RPA skill 明确要求巡检阶段先保存后筛选', () => {
   assert.match(skill, /是否入日报只在巡检后的筛选阶段决定/);
 });
 
-test('网页巡检前端保留两阶段与停止按钮；视频号桌面巡检入口已移除，仅保留微信日报入口', () => {
+test('网页巡检前端保留两阶段与停止按钮；视频号桌面巡检使用桌面微信搜索路径', () => {
   const appJs = readFileSync(join(root, 'web', 'app.js'), 'utf8');
   const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
   const serverJs = readFileSync(join(root, 'server', 'index.js'), 'utf8');
+  const wechatRunner = readFileSync(join(root, 'server', 'rpa', 'wechat-desktop.js'), 'utf8');
 
   assert.match(appJs, /WEB_PATROL_STAGES/);
   assert.match(appJs, /function classifyPatrolSummary/);
@@ -156,22 +157,27 @@ test('网页巡检前端保留两阶段与停止按钮；视频号桌面巡检�
   assert.match(appJs, /res\?\.details/);
   assert.match(appJs, /巡检失败，未生成/);
   assert.match(appJs, /ovGenerateWechat/);
+  assert.match(appJs, /WECHAT_PATROL_STAGES/);
+  assert.match(appJs, /ovRunWechatPatrol/);
+  assert.match(appJs, /platform: 'wechat_channels'/);
   assert.match(appJs, /reportType: 'wechat'/);
   assert.match(appJs, /\/patrol\/stop/);
   assert.match(serverJs, /requestPatrolStop/);
   assert.match(serverJs, /chromePlatforms/);
+  assert.match(serverJs, /runWechatDesktopPatrol/);
   assert.match(serverJs, /patrolStatus/);
   assert.match(serverJs, /platformComplete: patrolStatus === 'success'/);
   assert.match(html, /id="ovStopPatrol"/);
+  assert.match(html, /id="ovRunWechatPatrol"/);
   assert.match(html, /id="ovGenerateWechat"/);
   assert.match(html, /id="candStopRpa"/);
   assert.match(html, /id="stWechatVideosPerAccount"/);
-
-  // 视频号桌面巡检已移除：前端按钮、阶段常量与服务端触发都不应再存在。
-  assert.doesNotMatch(appJs, /WECHAT_PATROL_STAGE/);
-  assert.doesNotMatch(appJs, /ovRunWechatPatrol/);
-  assert.doesNotMatch(html, /ovRunWechatPatrol/);
-  assert.doesNotMatch(serverJs, /runWechatDesktopPatrol/);
+  assert.match(wechatRunner, /open_creator_by_main_search/);
+  assert.match(wechatRunner, /vbp_click_main_search_field/);
+  assert.match(wechatRunner, /vbp_click_network_search_row/);
+  assert.match(wechatRunner, /vbp_click_search_video_tab/);
+  assert.doesNotMatch(appJs, /视频号桌面巡检正在重做中/);
+  assert.doesNotMatch(html, /视频号桌面巡检正在重做中/);
 });
 
 test('前端账号池、内容库和日报列表显示微信日报与公众号文章', () => {

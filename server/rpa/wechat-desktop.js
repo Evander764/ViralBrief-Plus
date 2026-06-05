@@ -458,6 +458,9 @@ function beijingDateKey(now) {
 
 function friendlyWechatDesktopError(e) {
   const message = String(e?.message || e || '');
+  if (isWechatBlankWindowError(e, message)) {
+    return appendWechatDiagnostics('微信主窗口当前是空白或不可读，未暴露搜索框/正文控件；请先让微信主窗口恢复到已登录首页，或重启微信后再跑视频号巡检', message);
+  }
   if (e?.code === 'accessibility' || /辅助功能权限未开启|not allowed|not authorized|assistive access|accessibility/i.test(message)) {
     return '无法控制桌面微信：请在系统设置 > 隐私与安全性 > 辅助功能 中允许 Viral Brief Plus、node 或当前终端控制电脑';
   }
@@ -500,10 +503,12 @@ function friendlyWechatDesktopError(e) {
   if (e?.code === 'open_overview' || /总览入口/.test(message)) {
     return appendWechatDiagnostics('没有确认进入视频号个人总览页：请确认右上角小人入口打开后能看到“赞和收藏”或“我的视频号”等入口', message);
   }
-  if (e?.code === 'wechat_window_empty' || /微信主窗口是空白窗口|没有暴露可操作控件/.test(message)) {
-    return appendWechatDiagnostics('桌面微信当前没有暴露可操作控件；请确认微信主窗口已登录、可见，并允许本应用使用辅助功能', message);
-  }
   return message || '桌面微信视频号自动化失败';
+}
+
+function isWechatBlankWindowError(e, message) {
+  if (e?.code === 'wechat_window_empty') return true;
+  return /微信主窗口.*(空白|不可读|没有暴露|未暴露)|当前微信窗口没有暴露可操作控件|没有暴露可操作控件|未暴露搜索框|窗口诊断=.*控件 0/.test(message);
 }
 
 function appendWechatDiagnostics(base, message) {
@@ -1683,6 +1688,9 @@ on run
     set visible of targetProcess to true
     set frontmost of targetProcess to true
     my vbp_raise_window(targetProcess)
+    if my vbp_main_window_is_blank(targetProcess) then
+      return my vbp_result(false, "wechat_window_empty", "main_search", "微信主窗口当前是空白或不可读，未暴露搜索框；" & my vbp_context_diagnostics(targetProcess))
+    end if
 
     if not my vbp_click_main_search_field(targetProcess) then
       return my vbp_result(false, "main_search_field", "main_search", "未找到微信左上角搜索框；" & my vbp_context_diagnostics(targetProcess))
@@ -1749,6 +1757,24 @@ on vbp_raise_window(targetProcessRef)
     delay 0.25
   end tell
 end vbp_raise_window
+
+on vbp_main_window_is_blank(targetProcessRef)
+  try
+    set contentCount to my vbp_accessible_content_count(targetProcessRef)
+    set dumpText to my vbp_visible_text_dump(targetProcessRef)
+    if contentCount < 2 and dumpText is "" then return true
+  end try
+  return false
+end vbp_main_window_is_blank
+
+on vbp_accessible_content_count(targetProcessRef)
+  tell application "System Events"
+    try
+      return count of entire contents of targetProcessRef
+    end try
+  end tell
+  return 0
+end vbp_accessible_content_count
 
 on vbp_click_main_search_field(targetProcessRef)
   tell application "System Events"

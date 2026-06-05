@@ -217,7 +217,9 @@ $('#ovRunWechatPatrol').addEventListener('click', async () => {
     }
     const status = classifyPatrolSummary(patrolSummary);
     const failureDetail = patrolFailureDetails(patrolSummary);
-    msgEl.textContent = `视频号巡检完成：账号 ${patrolSummary.total}, 成功 ${patrolSummary.success}, 失败 ${patrolSummary.failed}, 新增 ${patrolSummary.newItems}, 去重 ${patrolSummary.duplicates}${failureDetail ? ` | 失败原因：${failureDetail}` : ''}`;
+    const statusLabel = status === 'failed' ? '失败' : (status === 'partial' ? '部分失败' : '完成');
+    const recoveryHint = wechatPatrolRecoveryHint(failureDetail);
+    msgEl.textContent = `视频号巡检${statusLabel}：账号 ${patrolSummary.total}, 成功 ${patrolSummary.success}, 失败 ${patrolSummary.failed}, 新增 ${patrolSummary.newItems}, 去重 ${patrolSummary.duplicates}${failureDetail ? ` | 失败原因：${failureDetail}` : ''}${recoveryHint ? ` | 建议：${recoveryHint}` : ''}`;
     toast(status === 'failed' ? '视频号巡检失败' : '视频号巡检完成', status === 'failed' ? 'bad' : 'ok');
     loadOverview();
     loadCandidates();
@@ -293,6 +295,12 @@ function patrolFailureDetails(res = {}) {
   const unique = [...new Set(detailRows)];
   if (!unique.length && res.message) unique.push(res.message);
   return unique.slice(0, 3).join('；');
+}
+
+function wechatPatrolRecoveryHint(detail = '') {
+  return /微信主窗口.*(空白|不可读|未暴露)|未暴露搜索框|控件 0/.test(String(detail || ''))
+    ? '先让微信主窗口恢复到已登录首页，或重启微信后再跑。'
+    : '';
 }
 
 async function runPatrolStages(progressText = null, options = {}) {

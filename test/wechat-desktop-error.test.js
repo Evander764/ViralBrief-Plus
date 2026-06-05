@@ -7,7 +7,12 @@ import assert from 'node:assert/strict';
 process.env.VBP_DATA_DIR = mkdtempSync(join(tmpdir(), 'vbp-wechat-desktop-error-'));
 
 const { __wechatDesktopInternals } = await import('../server/rpa/wechat-desktop.js');
-const { friendlyWechatDesktopError, appleScriptForMainSearchCreator } = __wechatDesktopInternals;
+const {
+  friendlyWechatDesktopError,
+  appleScriptForMainSearchCreator,
+  parseScriptResult,
+  sanitizeWechatErrorText,
+} = __wechatDesktopInternals;
 
 function codedError(code, message) {
   const err = new Error(message);
@@ -56,4 +61,35 @@ test('微信主搜索脚本在空白窗口时先失败并返回明确错误码',
   assert.match(script, /vbp_main_window_is_blank/);
   assert.match(script, /"wechat_window_empty"/);
   assert.match(script, /未暴露搜索框/);
+});
+
+test('微信错误清洗会过滤 AppleScript 源码长串并限制长度', () => {
+  const raw = [
+    '微信主窗口当前是空白或不可读，未暴露搜索框；窗口诊断=窗口 微信，控件 0，文本片段 ',
+    'my vbp_context_diagnostics(targetProcess)) if (my vbp_accessible_content_count(targetProcess)) < 1 then return my vbp_result(true, "activate_wechat_main_window", "wechat_main_traffic_lights", "微信正文控件不可读") end if end tell end run on vbp_process(stepName) tell application "System Events" repeat with bid in preferredBids',
+  ].join('');
+  const msg = friendlyWechatDesktopError(codedError('wechat_window_empty', raw));
+
+  assert.match(msg, /微信主窗口当前是空白或不可读/);
+  assert.match(msg, /窗口诊断=窗口 微信，控件 0/);
+  assert.ok(msg.length <= 360, `message too long: ${msg.length}`);
+  assert.doesNotMatch(msg, /tell application/);
+  assert.doesNotMatch(msg, /on vbp_/);
+  assert.doesNotMatch(msg, /my vbp_/);
+  assert.doesNotMatch(msg, /repeat with/);
+});
+
+test('parseScriptResult 的旧管道错误也不会透出脚本源码', () => {
+  const parsed = parseScriptResult('', 'ERR|wechat_window_empty|main_search|未暴露搜索框；tell application "System Events" to repeat with el in entire contents of targetProcess');
+
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.code, 'wechat_window_empty');
+  assert.match(parsed.message, /未暴露搜索框/);
+  assert.doesNotMatch(parsed.message, /tell application/);
+});
+
+test('sanitizeWechatErrorText 对纯脚本错误返回短文本', () => {
+  const text = sanitizeWechatErrorText('tell application "System Events" to set p to first process whose bundle identifier is "com.tencent.xinWeChat"');
+
+  assert.equal(text, '');
 });

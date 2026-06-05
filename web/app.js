@@ -290,11 +290,22 @@ function patrolFailureDetails(res = {}) {
     .filter((row) => row && (row.status === 'error' || row.error))
     .map((row) => {
       const label = row.nickname || row.accountId || PLATFORM_LABEL[row.platform] || '账号';
-      return `${label}：${row.error || '巡检失败'}`;
+      return `${label}：${shortPatrolErrorText(row.error || '巡检失败')}`;
     });
   const unique = [...new Set(detailRows)];
-  if (!unique.length && res.message) unique.push(res.message);
+  if (!unique.length && res.message) unique.push(shortPatrolErrorText(res.message));
   return unique.slice(0, 3).join('；');
+}
+
+function shortPatrolErrorText(value, limit = 220) {
+  let text = String(value || '')
+    .replace(/\r?\n+/g, '；')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const marker = text.search(/\b(tell application|on vbp_[\w_]+|my vbp_[\w_]+|end vbp_[\w_]+|repeat with|end tell|end run)\b/i);
+  if (marker >= 0) text = text.slice(0, marker).trim();
+  text = text.replace(/\s*；\s*/g, '；').replace(/；{2,}/g, '；').replace(/^；|；$/g, '').trim();
+  return text.length > limit ? `${text.slice(0, limit - 1).trim()}…` : text;
 }
 
 function wechatPatrolRecoveryHint(detail = '') {

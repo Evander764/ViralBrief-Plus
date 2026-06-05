@@ -25,6 +25,9 @@ const execFileAsync = promisify(execFile);
 const PLATFORM = 'wechat_channels';
 export const DEFAULT_WECHAT_VIDEOS_PER_ACCOUNT = 3;
 const WECHAT_SCREENSHOT_STANDARD_ATTEMPTS = 3;
+const WECHAT_ERROR_TEXT_LIMIT = 360;
+const WECHAT_DIAGNOSTIC_TEXT_LIMIT = 140;
+const WECHAT_SCRIPT_SOURCE_RE = /\b(tell application|on vbp_[\w_]+|my vbp_[\w_]+|end vbp_[\w_]+|repeat with|end tell|end run|set [A-Za-z_][A-Za-z0-9_]* to)\b/i;
 
 export class WechatDesktopPatrolError extends Error {
   constructor(code, message) {
@@ -457,7 +460,8 @@ function beijingDateKey(now) {
 }
 
 function friendlyWechatDesktopError(e) {
-  const message = String(e?.message || e || '');
+  const rawMessage = String(e?.message || e || '');
+  const message = sanitizeWechatErrorText(rawMessage, { limit: 900 });
   if (isWechatBlankWindowError(e, message)) {
     return appendWechatDiagnostics('微信主窗口当前是空白或不可读，未暴露搜索框/正文控件；请先让微信主窗口恢复到已登录首页，或重启微信后再跑视频号巡检', message);
   }
@@ -503,7 +507,7 @@ function friendlyWechatDesktopError(e) {
   if (e?.code === 'open_overview' || /总览入口/.test(message)) {
     return appendWechatDiagnostics('没有确认进入视频号个人总览页：请确认右上角小人入口打开后能看到“赞和收藏”或“我的视频号”等入口', message);
   }
-  return message || '桌面微信视频号自动化失败';
+  return sanitizeWechatErrorText(message) || '桌面微信视频号自动化失败';
 }
 
 function isWechatBlankWindowError(e, message) {
@@ -512,11 +516,40 @@ function isWechatBlankWindowError(e, message) {
 }
 
 function appendWechatDiagnostics(base, message) {
-  const diagnostics = String(message || '')
-    .split('；')
-    .map((part) => part.trim())
+  const diagnostics = sanitizeWechatErrorText(message, { limit: 1200 })
+    .split(/[；\r\n]+/)
+    .map((part) => sanitizeWechatDiagnosticText(part))
     .filter((part) => /Dock候选|窗口诊断|关注候选|搜索候选|搜一搜|视频号候选|截图|定位|几何参考|行距|左侧栏|rows=|groups=/.test(part));
-  return diagnostics.length ? `${base}；${diagnostics.join('；')}` : base;
+  const unique = [...new Set(diagnostics)].slice(0, 3);
+  return sanitizeWechatErrorText(unique.length ? `${base}；${unique.join('；')}` : base);
+}
+
+function sanitizeWechatDiagnosticText(value) {
+  return truncateWechatText(stripWechatScriptSource(String(value || '').trim()), WECHAT_DIAGNOSTIC_TEXT_LIMIT);
+}
+
+function sanitizeWechatErrorText(value, { limit = WECHAT_ERROR_TEXT_LIMIT } = {}) {
+  let text = stripWechatScriptSource(String(value || ''));
+  text = text
+    .replace(/\r?\n+/g, '；')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*；\s*/g, '；')
+    .replace(/；{2,}/g, '；')
+    .replace(/^；|；$/g, '')
+    .trim();
+  return truncateWechatText(text, limit);
+}
+
+function stripWechatScriptSource(value) {
+  const text = String(value || '');
+  const marker = text.search(WECHAT_SCRIPT_SOURCE_RE);
+  return marker >= 0 ? text.slice(0, marker) : text;
+}
+
+function truncateWechatText(value, limit) {
+  const text = String(value || '').trim();
+  if (!text || text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 1)).trim()}…`;
 }
 
 async function defaultWechatScriptRunner(step, payload = {}) {
@@ -928,7 +961,7 @@ function parseScriptResult(stdout, stderr) {
   }
   const [status, code = '', method = '', ...rest] = text.split('|');
   if (status === 'OK') return { ok: true, code, method, detail: rest.join('|') };
-  return { ok: false, code: code || 'osascript', message: rest.join('|') || text || 'osascript 未返回结果' };
+  return { ok: false, code: code || 'osascript', message: sanitizeWechatErrorText(rest.join('|') || text || 'osascript 未返回结果') };
 }
 
 function appleScriptForStep(step, payload = {}) {
@@ -2093,6 +2126,7 @@ export const __wechatDesktopInternals = {
   friendlyWechatDesktopError,
   openWechatCreatorByMainSearch,
   parseScriptResult,
+  sanitizeWechatErrorText,
   normalizeWechatVideoCount,
   WECHAT_SCREENSHOT_STANDARD_ATTEMPTS,
 };
